@@ -947,6 +947,18 @@ class XRefer:
                                 
         return func_artifacts, orphan_func_artifacts, orphan_artifacts
 
+    def _is_function_excluded(self, func_name: str) -> bool:
+        """
+        Check if a function name should be excluded from analysis.
+        
+        Args:
+            func_name (str): Name of the function to check (e.g., "sub_401000", "unknown_lib").
+        
+        Returns:
+            bool: True if the function should be excluded, False otherwise.
+        """
+        return func_name.startswith('unknown_')
+
     def populate_entity_xrefs(self, entity_idx: int) -> None:
         """Quickly populate xrefs for a specific entity."""
         entity = self.entities[entity_idx]
@@ -2494,6 +2506,9 @@ class XRefer:
             orig_name = idc.get_func_name(ref[0])
             func_ea = idc.get_name_ea(0, orig_name)
             self.leaf_funcs.add(func_ea)
+    
+            if self._is_function_excluded(orig_name):
+                continue
 
             entity_index = ref[1]
             ref_addr = ref[0]
