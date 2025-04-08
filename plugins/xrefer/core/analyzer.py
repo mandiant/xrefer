@@ -2505,10 +2505,20 @@ class XRefer:
         for ref in self.mapped_refs:
             orig_name = idc.get_func_name(ref[0])
             func_ea = idc.get_name_ea(0, orig_name)
-            self.leaf_funcs.add(func_ea)
-    
+
+            # If the user has requested to skip library functions
+            if self.settings["exclude_non_language_libs"]:
+                func_flags = idc.get_func_flags(func_ea)
+
+                # Check if the function is a library function, then skip it
+                if (func_flags & idc.FUNC_LIB) == 0:
+                    continue
+            
+            # Check if the function is excluded based on custom criteria
             if self._is_function_excluded(orig_name):
                 continue
+
+            self.leaf_funcs.add(func_ea)
 
             entity_index = ref[1]
             ref_addr = ref[0]
