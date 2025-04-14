@@ -20,7 +20,6 @@ from pprint import pprint
 from xrefer.core.helpers import *
 from xrefer.core.settings import XReferSettingsDialog
 
-
 class PeekViewToggleHandler(idaapi.action_handler_t):
     """
     Handler for toggling peek view functionality.
@@ -492,6 +491,62 @@ class CopyInterestingStringsHandler(idaapi.action_handler_t):
         else:
             return idaapi.AST_DISABLE
 
+class CopyProcessedStringsHandler(idaapi.action_handler_t):
+    """
+    Handle copying all processed strings to clipboard.
+    
+    Collects all processed strings and copies their full versions
+    to the system clipboard if any are available.
+    
+    Args:
+        ctx (Any): IDA context (unused)
+        
+    Returns:
+        bool: True if operation completed successfully
+    """
+    def activate(self, ctx: Any) -> bool:
+        from xrefer.plugin import plugin_instance
+
+        try:
+            all_strings = []
+
+            for entity in plugin_instance.xrefer_view.xrefer_obj.entities:
+                # Check if it's a string (type 3) and has full version
+                if entity[2] == 3: # String type
+                    if len(entity) > 6:
+                        all_strings.append(entity[6])  # Get full string
+                    else:
+                        all_strings.append(entity[1])  # Fallback to truncated version
+
+            if not all_strings:
+                log("No strings found in entities.")
+                return False
+
+            text = '\n'.join(all_strings)
+            QtWidgets.QApplication.clipboard().setText(text)
+
+            log(f"{len(all_strings)} total strings copied to clipboard")
+            return True
+
+        except Exception as e:
+            log(f"Error copying all processed strings: {e}")
+            return False
+
+    def update(self, ctx: Any) -> int:
+        """
+        Update handler state.
+        
+        Args:
+            ctx (Any): IDA context (unused)
+            
+        Returns:
+            int: AST_ENABLE_ALWAYS if view exists, AST_DISABLE otherwise
+        """
+        from xrefer.plugin import plugin_instance
+        if plugin_instance.xrefer_view:
+            return idaapi.AST_ENABLE_ALWAYS
+        else:
+            return idaapi.AST_DISABLE
 
 class StartHandlerCustomEntrypoint(idaapi.action_handler_t):
     """
