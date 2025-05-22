@@ -15,7 +15,7 @@
 from time import time, sleep
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
-from base import BaseModel, ModelConfig
+from xrefer.llm.base import BaseModel, ModelConfig
 
 
 class GoogleModel(BaseModel):
@@ -203,4 +203,5 @@ class OpenAIModel(BaseModel):
         """
         client = self.get_client()
         return client.invoke(prompt).content
-    
+
+ 
