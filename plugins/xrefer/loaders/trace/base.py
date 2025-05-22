@@ -15,7 +15,7 @@
 import binascii
 import collections
 from abc import ABC, abstractmethod
-from typing import Any, DefaultDict, Dict, List, Optional, Tuple
+from typing import Any, DefaultDict, Dict, List
 
 import ida_nalt
 import ida_ua

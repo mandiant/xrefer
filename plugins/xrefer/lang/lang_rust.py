@@ -14,7 +14,7 @@
 
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
+from typing import Dict, List, Optional, Tuple
 
 import ida_bytes
 import ida_ida

@@ -12,9 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import sys
-from functools import wraps
-from typing import Any, Callable, Optional, Tuple
+from typing import Optional, Tuple
 
 import ida_bytes
 import ida_ida

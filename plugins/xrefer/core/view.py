@@ -12,27 +12,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 import re
 import traceback
 import weakref
 from collections import OrderedDict, defaultdict
-from time import time
-from typing import Any, Callable, Dict, List, Optional, Pattern, Set, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import asciinet
+import ida_bytes
 import ida_funcs
+import ida_idp
 import ida_kernwin
 import ida_lines
 import idaapi
+import idautils
 import idc
-from networkx import NetworkXError
+import networkx as nx
 from PyQt5 import QtCore, QtGui, QtWidgets
-from xrefer.core.action_handlers import *
+from xrefer.core.action_handlers import ArtifactAnalysisHandler, ClusterEverythingHandler, ClusterInterestingFunctionsHandler, CopyInterestingStringsHandler, PeekViewToggleHandler
 from xrefer.core.analyzer import XRefer
 from xrefer.core.help import ContextHelp
-from xrefer.core.helpers import *
+from xrefer.core.helpers import (CollapseEventFilter, CollapseIndicator, FocusEventFilter, KeyEventFilter, create_cluster_relationship_graph, create_colored_table_from_cols,
+                                 create_interesting_artifacts_table, create_xrefs_table_colored, draw_cluster_hierarchy, find_cluster_analysis, get_addr_from_text, help_text, is_windows_or_linux, log,
+                                 longest_line_length, parse_cluster_id, patch_asciinet, prepare_interesting_artifacts_table_rows, register_popup_action, remove_non_displayable, set_focus_to_code,
+                                 set_xref_coverage_color, strip_color_codes, wrap_substring_with_string)
 from xrefer.core.settings import XReferSettingsManager
-from xrefer.core.state_machine import *
+from xrefer.core.state_machine import XReferStateMachine
 from xrefer.legacy.shim import format_ribbon
 
 
@@ -2242,7 +2248,7 @@ class XReferView(idaapi.simplecustviewer_t):
                 log(f"Error converting graph to ASCII: {str(e)}")
                 self.AddLine(f"{INDENT}Error visualizing graph: {str(e)}")
 
-        except NetworkXError as e:
+        except nx.NetworkXError as e:
             log(f"NetworkX error: {str(e)}")
             self.AddLine(f"{INDENT}Error creating graph: {str(e)}")
         except Exception as e:

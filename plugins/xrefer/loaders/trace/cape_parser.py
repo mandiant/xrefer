@@ -18,8 +18,6 @@ import re
 from typing import Any, Dict, List, Optional
 
 import ida_lines
-import idaapi
-import idc
 from xrefer.core.helpers import colorize_api_call, log
 from xrefer.loaders.trace import BaseTraceParser
 

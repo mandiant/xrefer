@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import json
-from typing import *
+from typing import Any, Dict, List, Set, Union
 
 import capa.features.freeze as frz
 import capa.render.result_document as rd

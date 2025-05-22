@@ -20,8 +20,6 @@ from typing import Any, Dict, List
 from zipfile import BadZipfile, ZipFile
 
 import ida_lines
-import idaapi
-import idc
 from xrefer.core.helpers import colorize_api_call, log
 from xrefer.loaders.trace.base import BaseTraceParser
 

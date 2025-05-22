@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
+from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 
+import idc
 import networkx as nx
 from networkx import NetworkXError
-from xrefer.core.helpers import *
+from xrefer.core.helpers import find_cluster_analysis, log
 
 
 class FunctionalCluster:

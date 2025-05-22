@@ -16,23 +16,23 @@ import gzip
 import json
 import os
 import pickle
+import re
 import shutil
-from collections import OrderedDict, deque
+from collections import OrderedDict, defaultdict, deque
 from operator import itemgetter
 from pathlib import Path
 from time import time
-from typing import *
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import ida_funcs
 import ida_lines
-import ida_name
 import ida_xref
 import idaapi
 import idautils
 import idc
 from PyQt5.QtWidgets import QDialog
 from xrefer.core.clusters import ClusterManager, FunctionalCluster
-from xrefer.core.helpers import *
+from xrefer.core.helpers import create_xrefs_table_colored, enrich_string_data, log, log_elapsed_time
 from xrefer.core.settings import MissingFilesDialog, XReferSettingsManager
 from xrefer.lang import get_language_object
 from xrefer.llm.artifact_analyzer import ArtifactAnalyzer

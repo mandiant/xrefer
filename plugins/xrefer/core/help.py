@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Set, Tuple
 
 import ida_lines
-from xrefer.core.helpers import get_visible_width, strip_color_codes
+from xrefer.core.helpers import get_visible_width
 
 
 class ActionCategory(Enum):

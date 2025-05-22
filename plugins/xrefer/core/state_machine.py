@@ -18,7 +18,6 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from statemachine import State, StateMachine
 from statemachine import exceptions as sm_exceptions
-from xrefer.core.helpers import log
 
 
 class XReferStateMachine(StateMachine):

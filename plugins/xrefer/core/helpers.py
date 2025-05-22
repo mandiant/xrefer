@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 import html
 import os
 import platform
@@ -23,7 +24,7 @@ import unicodedata
 from collections import defaultdict
 from functools import wraps
 from time import time
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import asciinet
 import ida_bytes
@@ -39,7 +40,7 @@ import idc
 import networkx as nx
 import requests
 from bs4 import BeautifulSoup
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtWidgets
 from tabulate import tabulate
 
 
@@ -172,7 +173,8 @@ class CollapseIndicator(QtWidgets.QWidget):
 
     def setup_ui(self):
         self.setFixedSize(20, 20)
-        self.setStyleSheet("""
+        self.setStyleSheet(
+            """
             QWidget {
                 background-color: #2d2d2d;
                 border-radius: 3px;
@@ -181,7 +183,8 @@ class CollapseIndicator(QtWidgets.QWidget):
             QWidget:hover {
                 background-color: #3d3d3d;
             }
-        """)
+        """
+        )
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -2027,7 +2030,7 @@ def help_text() -> List[str]:
     Returns:
         List[str]: List of lines containing formatted help text
     """
-    help_text = """
+    help_text = r"""
  ------------------------------------------------------------------------------------------
   /$$   /$$ /$$$$$$$             /$$$$$$
  | $$  / $$| $$__  $$           /$$__  $$

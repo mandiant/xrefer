@@ -15,9 +15,9 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any, Dict, List, Optional
+from typing import Optional
 
-from xrefer.core.helpers import *
+from xrefer.core.helpers import check_internet_connectivity, log
 
 
 class PromptType(Enum):

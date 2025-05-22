@@ -15,7 +15,7 @@
 import json
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Set
 
 from xrefer.llm.templates.artifact_analyzer import ARTIFACT_ANALYZER_PROMPT
 from xrefer.llm.templates.categorizer import CATEGORIZER_PROMPT

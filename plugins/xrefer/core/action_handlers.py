@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from pprint import pprint
-from typing import Any, Dict
+import os
+from typing import Any
 
 import idaapi
 import idc
-from xrefer.core.helpers import *
+from PyQt5 import QtCore, QtGui, QtWidgets
+from xrefer.core.helpers import dump_indirect_calls, handle_entrypoint_selection, log
 from xrefer.core.settings import XReferSettingsDialog
 
 
