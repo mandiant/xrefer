@@ -12,20 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Dict, Any
+from typing import Any, Dict, List
 
+from xrefer.core.helpers import log
 from xrefer.llm.base import ModelConfig
 from xrefer.llm.processor import LLMProcessor
 from xrefer.llm.prompts import PromptType
-from xrefer.core.helpers import log
 
 
 class ClusterAnalyzer:
     """Main interface for analyzing function clusters"""
-    
+
     current_config: ModelConfig = None
     _processor: LLMProcessor = None
-    
+
     @classmethod
     def _get_processor(cls) -> LLMProcessor:
         """Get or create LLM processor with current config."""
@@ -35,13 +35,13 @@ class ClusterAnalyzer:
             cls._processor = LLMProcessor()
             cls._processor.set_model_config(cls.current_config)
         return cls._processor
-    
+
     @classmethod
     def set_model_config(cls, config: ModelConfig):
         """Set LLM configuration for analysis."""
         cls.current_config = config
         cls._processor = None  # Force new processor with new config
-    
+
     @classmethod
     def analyze_clusters(cls, clusters: List["FunctionalCluster"], xrefer_obj) -> Dict[str, Any]:
         """
@@ -75,21 +75,15 @@ class ClusterAnalyzer:
 
             if cluster_count <= batch_size:
                 # Single request scenario, no partial instructions
-                cluster_data = cls.format_cluster_data(
-                    clusters, xrefer_obj, start_idx=0, end_idx=cluster_count
-                )
+                cluster_data = cls.format_cluster_data(clusters, xrefer_obj, start_idx=0, end_idx=cluster_count)
                 log(f"Generated cluster data ({len(cluster_data)} chars)")
-                results = processor.process_items(
-                    cluster_data,
-                    prompt_type=PromptType.CLUSTER_ANALYZER,
-                    ignore_token_limit=True
-                )
+                results = processor.process_items(cluster_data, prompt_type=PromptType.CLUSTER_ANALYZER, ignore_token_limit=True)
 
                 if not isinstance(results, dict):
                     log("Error: LLM returned invalid format")
                     return {}
 
-                required_keys = {'clusters', 'binary_description', 'binary_category'}
+                required_keys = {"clusters", "binary_description", "binary_category"}
                 if not all(key in results for key in required_keys):
                     log("Error: Missing required keys in LLM response")
                     log(f"Found keys: {list(results.keys())}")
@@ -102,7 +96,7 @@ class ClusterAnalyzer:
                 binary_description = None
                 binary_category = None
                 binary_report = None
-                log(f'Going to process {cluster_count} clusters through the LLM. This will take some time...')
+                log(f"Going to process {cluster_count} clusters through the LLM. This will take some time...")
 
                 # Process clusters in batches of batch_size
                 for start in range(0, cluster_count, batch_size):
@@ -111,29 +105,25 @@ class ClusterAnalyzer:
 
                     cluster_data = cls.format_cluster_data(clusters, xrefer_obj, start_idx=start, end_idx=end)
                     log(f"Generated cluster data ({len(cluster_data)} chars)")
-                    results = processor.process_items(
-                        cluster_data,
-                        prompt_type=PromptType.CLUSTER_ANALYZER,
-                        ignore_token_limit=True
-                    )
+                    results = processor.process_items(cluster_data, prompt_type=PromptType.CLUSTER_ANALYZER, ignore_token_limit=True)
 
                     if not isinstance(results, dict) or not results:
                         log("Error: LLM returned erroneous response, please re-start cluster analysis")
                         break
 
                     # Extract clusters from partial result
-                    partial_clusters = results.get('clusters', {})
+                    partial_clusters = results.get("clusters", {})
                     # Merge cluster analyses
                     for cid, cdata in partial_clusters.items():
                         all_clusters_result[cid] = cdata
 
                     # Update binary fields from the latest batch
-                    if 'binary_description' in results:
-                        binary_description = results['binary_description']
-                    if 'binary_category' in results:
-                        binary_category = results['binary_category']
-                    if 'binary_report' in results:
-                        binary_report = results['binary_report']
+                    if "binary_description" in results:
+                        binary_description = results["binary_description"]
+                    if "binary_category" in results:
+                        binary_category = results["binary_category"]
+                    if "binary_report" in results:
+                        binary_report = results["binary_report"]
 
                 # After processing all batches, ensure required fields are present
                 if not all_clusters_result:
@@ -144,11 +134,7 @@ class ClusterAnalyzer:
                     log("Error: Missing binary_description or binary_category after batched analysis")
                     return {}
 
-                final_result = {
-                    "clusters": all_clusters_result,
-                    "binary_description": binary_description,
-                    "binary_category": binary_category
-                }
+                final_result = {"clusters": all_clusters_result, "binary_description": binary_description, "binary_category": binary_category}
                 if binary_report is not None:
                     final_result["binary_report"] = binary_report
 
@@ -261,7 +247,7 @@ class ClusterAnalyzer:
             # but only fully respond for the given subset.
             note = ""
             ps_note = f"IMPORTANT: Enumerate and ensure you return results for all clusters with IDs {','.join(map(str, range(start_idx + 1, end_idx + 1)))}"
-            full_range = (start_idx == 0 and end_idx == len(clusters))
+            full_range = start_idx == 0 and end_idx == len(clusters)
             if not full_range:
                 note = (
                     f"NOTE: Analyze ALL clusters to understand overall functionality and relationships. "
@@ -277,7 +263,7 @@ class ClusterAnalyzer:
             formatted += "Each cluster shows its functions, artifacts (APIs, strings, etc.), and call flows.\n"
             formatted += "References to subclusters indicate where complex behavior is encapsulated.\n\n"
             formatted += note
-            
+
             for cluster in clusters:
                 formatted += format_cluster(cluster) + "\n\n"
 
@@ -294,29 +280,28 @@ class ClusterAnalyzer:
         Create a dummy cluster analysis dictionary with fake, unique data for each cluster and subcluster.
         Useful for testing and debugging issues without calling the LLM.
         """
+
         # A recursive helper to handle subclusters
         def recurse_clusters(c: "FunctionalCluster", analysis: Dict[str, Any], prefix: str):
             cluster_id_str = f"cluster_{c.id}"
-            analysis['clusters'][cluster_id_str] = {
+            analysis["clusters"][cluster_id_str] = {
                 "label": f"Dummy Label {prefix}{c.id}",
                 "description": f"This is a dummy description for {prefix}{c.id}.",
                 "relationships": f"Dummy relationships for {prefix}{c.id}.",
-                "function_prefix": f"dummy_{prefix}{c.id}"
+                "function_prefix": f"dummy_{prefix}{c.id}",
             }
-            
+
             for sc in c.subclusters:
                 recurse_clusters(sc, analysis, prefix + f"{c.id}_")
-        
-        analysis = {
-            "clusters": {}
-        }
+
+        analysis = {"clusters": {}}
         for c in clusters:
             recurse_clusters(c, analysis, "")
-        
+
         # Add global fields to mimic the structure returned by LLM
         analysis["binary_description"] = "Dummy binary description for testing."
         analysis["binary_category"] = "Dummy category"
         # Optionally add "binary_report"
         analysis["binary_report"] = "Dummy binary report"
-        
+
         return analysis

@@ -12,11 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import analyzer
-from . import action_handlers
-from . import helpers
-from . import state_machine
-from . import view
-from . import settings
-from . import clusters
-from . import help
+from . import action_handlers, analyzer, clusters, help, helpers, settings, state_machine, view

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARTIFACT_ANALYZER_PROMPT = '''
+ARTIFACT_ANALYZER_PROMPT = """
 You will be provided with a JSON object containing artifacts extracted from a binary file. The artifacts are organized by type, where each type maps to a dictionary of artifacts. Each artifact is represented by an `index` and its `content`.
 
 **Input Format:**
@@ -335,4 +335,4 @@ Remember:
 
 
 Begin analyzing the artifacts and provide raw JSON output without quotes or code snippets. Do NOT wrap the JSON in code fences or formatting. The input is as follows:
-'''
+"""

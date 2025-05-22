@@ -13,14 +13,8 @@
 # limitations under the License.
 
 from xrefer.loaders.trace.base import BaseTraceParser
-from xrefer.loaders.trace.vmray_parser import VMRayTraceParser
 from xrefer.loaders.trace.cape_parser import CapeTraceParser
 from xrefer.loaders.trace.factory import TraceParserFactory, parse_api_trace
+from xrefer.loaders.trace.vmray_parser import VMRayTraceParser
 
-__all__ = [
-    'BaseTraceParser',
-    'VMRayTraceParser',
-    'CapeTraceParser',
-    'TraceParserFactory',
-    'parse_api_trace'
-]
+__all__ = ["BaseTraceParser", "VMRayTraceParser", "CapeTraceParser", "TraceParserFactory", "parse_api_trace"]

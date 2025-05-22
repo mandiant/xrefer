@@ -12,42 +12,42 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from functools import wraps
 from dataclasses import dataclass, field
-from statemachine import StateMachine, State
-from statemachine import exceptions as sm_exceptions
-from typing import Optional, List, Set, Dict, Tuple
+from functools import wraps
+from typing import Dict, List, Optional, Set, Tuple
 
+from statemachine import State, StateMachine
+from statemachine import exceptions as sm_exceptions
 from xrefer.core.helpers import log
 
 
 class XReferStateMachine(StateMachine):
     """
     State machine managing XRefer UI states and transitions.
-    
+
     Handles all possible states and transitions of the XRefer interface,
     including search, graph view, trace analysis, and more.
     """
 
     # State definitions
-    base = State('base', initial=True)
-    search = State('search')
-    call_focus = State('call focus')
-    trace_scope_function = State('function trace')
-    trace_scope_path = State('path trace')
-    trace_scope_full = State('full trace')
-    graph = State('graph')
-    pinned_graph = State('pinned graph')
-    simplified_graph = State('simplified graph')
-    pinned_simplified_graph = State('pinned simplified graph')
-    boundary_results = State('boundary results')
-    last_boundary_results = State('last boundary results')
-    interesting_artifacts = State('interesting artifacts')
-    clusters = State('clusters')
-    pinned_cluster_graphs = State('pinned cluster graphs')
-    cluster_graphs = State('cluster graphs')
-    xref_listing = State('xref listing')
-    help = State('help')
+    base = State("base", initial=True)
+    search = State("search")
+    call_focus = State("call focus")
+    trace_scope_function = State("function trace")
+    trace_scope_path = State("path trace")
+    trace_scope_full = State("full trace")
+    graph = State("graph")
+    pinned_graph = State("pinned graph")
+    simplified_graph = State("simplified graph")
+    pinned_simplified_graph = State("pinned simplified graph")
+    boundary_results = State("boundary results")
+    last_boundary_results = State("last boundary results")
+    interesting_artifacts = State("interesting artifacts")
+    clusters = State("clusters")
+    pinned_cluster_graphs = State("pinned cluster graphs")
+    cluster_graphs = State("cluster graphs")
+    xref_listing = State("xref listing")
+    help = State("help")
 
     # primary transitions
     start_search = base.to(search)
@@ -61,11 +61,22 @@ class XReferStateMachine(StateMachine):
     start_cluster_graphs = base.to(cluster_graphs) | clusters.to(cluster_graphs)
 
     # help transition
-    start_help = (base.to(help) | call_focus.to(help) | trace_scope_function.to(help) | graph.to(help) |
-                  pinned_graph.to(help) | boundary_results.to(help) | trace_scope_path.to(help) |
-                  last_boundary_results.to(help) | xref_listing.to(help) | trace_scope_full.to(help) |
-                  interesting_artifacts.to(help) | clusters.to(help) | cluster_graphs.to(help) |
-                  pinned_cluster_graphs.to(help))
+    start_help = (
+        base.to(help)
+        | call_focus.to(help)
+        | trace_scope_function.to(help)
+        | graph.to(help)
+        | pinned_graph.to(help)
+        | boundary_results.to(help)
+        | trace_scope_path.to(help)
+        | last_boundary_results.to(help)
+        | xref_listing.to(help)
+        | trace_scope_full.to(help)
+        | interesting_artifacts.to(help)
+        | clusters.to(help)
+        | cluster_graphs.to(help)
+        | pinned_cluster_graphs.to(help)
+    )
 
     # graph transitions
     toggle_on_pinned_graph = graph.to(pinned_graph) | simplified_graph.to(pinned_simplified_graph)
@@ -114,14 +125,25 @@ class XReferStateMachine(StateMachine):
     revert_xref_listing_to_interesting_artifacts = xref_listing.to(interesting_artifacts)
 
     # base transition
-    to_base = (search.to(base) | call_focus.to(base) | trace_scope_function.to(base) | graph.to(base) |
-               simplified_graph.to(base) | boundary_results.to(base) | last_boundary_results.to(base) |
-               xref_listing.to(base) | help.to(base) | interesting_artifacts.to(base) | clusters.to(base) |
-               cluster_graphs.to(base) | pinned_cluster_graphs.to(base))
+    to_base = (
+        search.to(base)
+        | call_focus.to(base)
+        | trace_scope_function.to(base)
+        | graph.to(base)
+        | simplified_graph.to(base)
+        | boundary_results.to(base)
+        | last_boundary_results.to(base)
+        | xref_listing.to(base)
+        | help.to(base)
+        | interesting_artifacts.to(base)
+        | clusters.to(base)
+        | cluster_graphs.to(base)
+        | pinned_cluster_graphs.to(base)
+    )
 
     def __init__(self):
-        self._search_filter = ''
-        self._address_filter = ''
+        self._search_filter = ""
+        self._address_filter = ""
         self._cluster_sync_enabled: bool = False
         self._selected_index: Optional[int] = None
         self._boundary_methods: Optional[list] = None
@@ -134,9 +156,8 @@ class XReferStateMachine(StateMachine):
 
     def on_enter_state(self, event_data) -> None:
         """Handle state entry events."""
-        state_name = event_data.state.name if hasattr(event_data.state, 'name') else str(event_data.state)
-        event_name = event_data.event if isinstance(event_data.event, str) else getattr(event_data.event, 'name',
-                                                                                    str(event_data.event))
+        state_name = event_data.state.name if hasattr(event_data.state, "name") else str(event_data.state)
+        event_name = event_data.event if isinstance(event_data.event, str) else getattr(event_data.event, "name", str(event_data.event))
         # log(f"Entering state: {state_name} (Event: {event_name})")
 
         if event_data.state == self.base:
@@ -147,23 +168,22 @@ class XReferStateMachine(StateMachine):
 
     def on_exit_state(self, event_data):
         """Only for debugging states."""
-        state_name = event_data.state.name if hasattr(event_data.state, 'name') else str(event_data.state)
-        event_name = event_data.event if isinstance(event_data.event, str) else getattr(event_data.event, 'name',
-                                                                                    str(event_data.event))
+        state_name = event_data.state.name if hasattr(event_data.state, "name") else str(event_data.state)
+        event_name = event_data.event if isinstance(event_data.event, str) else getattr(event_data.event, "name", str(event_data.event))
         # log(f"Exiting state: {state_name} (Event: {event_name})")
 
     def _wrap_transitions(self) -> bool:
         """
         Wrap all transition methods with safety checks.
-        
+
         Ensures all state transitions are properly wrapped with error handling
         and logging.
-        
+
         Returns:
             bool: True if wrapping was successful
         """
         for attr_name in dir(self):
-            if attr_name.startswith(('start_', 'end_', 'to_', 'toggle_', 'revert_')):
+            if attr_name.startswith(("start_", "end_", "to_", "toggle_", "revert_")):
                 attr = getattr(self, attr_name)
                 if callable(attr):
                     wrapped = safe_transition(attr)
@@ -181,7 +201,7 @@ class XReferStateMachine(StateMachine):
         """Navigate to previous valid state."""
         if len(self._state_history) <= 1:
             return False, None
-            
+
         current_state = self.current_state
 
         # Iterate through history in reverse
@@ -189,9 +209,7 @@ class XReferStateMachine(StateMachine):
             prev_state, event = self._state_history[i]
 
             # Check if this state meets our criteria
-            if (prev_state != current_state and
-                    not event.startswith('toggle_')):
-
+            if prev_state != current_state and not event.startswith("toggle_"):
                 # Find the transition
                 for transition in current_state.transitions:
                     if transition.target == prev_state:
@@ -200,7 +218,7 @@ class XReferStateMachine(StateMachine):
                             cursor_pos = self.get_cursor_position(prev_state)
                             getattr(self, transition.event)()
                             # Remove states from history up to this point
-                            self._state_history = self._state_history[:i + 1]
+                            self._state_history = self._state_history[: i + 1]
                             # log(f"Successfully transitioned to {self.current_state.name}")
                             return True, cursor_pos
                         except Exception as e:
@@ -208,7 +226,7 @@ class XReferStateMachine(StateMachine):
                             return False, None
                 # log(f"No transition found from {current_state.name} to {prev_state.name}")
                 return False, None
-        
+
         # log("No suitable previous state found")
         return False, None
 
@@ -216,8 +234,8 @@ class XReferStateMachine(StateMachine):
         """Reset state machine to initial conditions."""
         self._state_history.clear()
         self._cluster_sync_enabled = False
-        self._search_filter = ''
-        self._address_filter = ''
+        self._search_filter = ""
+        self._address_filter = ""
         self._selected_index = None
 
     def update_selected_refs(self, func_ea: int, e_index: int) -> None:
@@ -236,11 +254,11 @@ class XReferStateMachine(StateMachine):
     def is_simplified_graph(self) -> bool:
         """Check if current state is a simplified graph view."""
         return self.current_state in (self.simplified_graph, self.pinned_simplified_graph)
-    
+
     def is_pinned_graph(self) -> bool:
         """Check if current state is a pinned graph view."""
         return self.current_state in (self.pinned_graph, self.pinned_simplified_graph, self.pinned_cluster_graphs)
-    
+
     def push_cluster_graph(self, cluster_id: int, parent_cluster_id: Optional[int] = None) -> None:
         """Delegate to cluster manager."""
         self.cluster_manager.push_cluster(cluster_id, parent_cluster_id)
@@ -257,20 +275,20 @@ class XReferStateMachine(StateMachine):
         current = self.cluster_manager.pop_cluster()
         if not current:
             return None
-            
+
         # Get previous (now current)
         previous = self.get_current_cluster()
-        
+
         # Restore current
         self.cluster_manager.push_cluster(current)
-        
+
         return previous
 
     def navigate_cluster_graph_back(self) -> bool:
         """Delegate navigation to cluster manager."""
         if self.current_state != self.cluster_graphs:
             return False
-        
+
         return self.cluster_manager.pop_cluster() is not None
 
     def clear_cluster_history(self) -> None:
@@ -296,21 +314,21 @@ class XReferStateMachine(StateMachine):
     def toggle_cluster_sync(self, event=None) -> bool:
         """
         Toggle cluster sync state and handle related state changes.
-        
+
         Args:
             event: State machine event (optional)
-            
+
         Returns:
             bool: True if state was changed
         """
         current_state = self.current_state
-        
+
         # Only toggle if in appropriate states
         if current_state not in (self.cluster_graphs, self.pinned_cluster_graphs):
             return False
-            
+
         self._cluster_sync_enabled = not self._cluster_sync_enabled
-        
+
         # Handle pinned state based on sync
         if self._cluster_sync_enabled:
             if current_state == self.cluster_graphs:
@@ -318,7 +336,7 @@ class XReferStateMachine(StateMachine):
         else:
             if current_state == self.pinned_cluster_graphs:
                 return self.toggle_unpinned_cluster_graph()
-                
+
         return True
 
     @property
@@ -357,18 +375,18 @@ class XReferStateMachine(StateMachine):
     def state_history(self) -> Optional[list]:
         """Get the state transition history."""
         return self._state_history
-    
+
     @property
     def cluster_sync_enabled(self) -> bool:
         """Check if cluster sync is enabled."""
         return self._cluster_sync_enabled
-    
+
 
 @dataclass
 class ClusterViewState:
     """
     Tracks view state for a single cluster.
-    
+
     Attributes:
         cluster_id: ID of cluster
         simplified: Whether graph is in simplified mode
@@ -376,81 +394,80 @@ class ClusterViewState:
         parent_id: ID of parent cluster if any
         dual_references: Set of addresses referencing this cluster directly
     """
+
     cluster_id: int
     simplified: bool = True
     cursor_pos: Optional[tuple[int, int, int]] = None
     parent_id: Optional[int] = None
     dual_references: Set[int] = field(default_factory=set)
 
+
 class ClusterStateManager:
     """
     Manages view states for cluster graphs.
-    
+
     Tracks current active cluster and view states for all clusters
     while staying coordinated with main state machine.
     """
+
     def __init__(self):
         self._cluster_states: Dict[int, ClusterViewState] = {}
         self._history: List[int] = []  # Stack of cluster IDs being viewed
         self._relationship_pos: Optional[tuple[int, int, int]] = None
         self._show_report: bool = False
-        
+
     def push_cluster(self, cluster_id: int, parent_id: Optional[int] = None) -> None:
         """Add cluster to view history with dual-purpose awareness."""
         dual_refs = set()
-        
+
         if cluster_id not in self._cluster_states:
-            self._cluster_states[cluster_id] = ClusterViewState(
-                cluster_id=cluster_id,
-                parent_id=parent_id,
-                dual_references=dual_refs
-            )
+            self._cluster_states[cluster_id] = ClusterViewState(cluster_id=cluster_id, parent_id=parent_id, dual_references=dual_refs)
         self._history.append(cluster_id)
-        
+
     def pop_cluster(self) -> Optional[int]:
         """Remove and return top cluster from history."""
         if self._history:
             return self._history.pop()
         return None
-        
+
     def get_current_cluster(self) -> Optional[ClusterViewState]:
         """Get state of currently viewed cluster."""
         if not self._history:
             return None
         return self._cluster_states[self._history[-1]]
-        
+
     def toggle_view_mode(self) -> None:
         """Toggle between simplified/full view for current cluster."""
         if current := self.get_current_cluster():
             current.simplified = not current.simplified
-    
+
     def toggle_report_view(self) -> None:
         """Toggle between showing description or full report."""
         self._show_report = not self._show_report
-        
+
     def is_showing_report(self) -> bool:
         """Check if currently showing report view."""
         return self._show_report
-            
+
     def store_cursor_pos(self, cluster_id: int, pos: tuple[int, int, int]) -> None:
         """Store cursor position for a cluster view."""
         if cluster_id in self._cluster_states:
             self._cluster_states[cluster_id].cursor_pos = pos
-            
+
     def store_relationship_pos(self, pos: tuple[int, int, int]) -> None:
         """Store cursor position for relationship graph view."""
         self._relationship_pos = pos
-        
+
     def get_cursor_pos(self, cluster_id: int) -> Optional[tuple[int, int, int]]:
         """Get stored cursor position for a cluster."""
         if state := self._cluster_states.get(cluster_id):
             return state.cursor_pos
         return None
-        
+
     def get_relationship_pos(self) -> Optional[tuple[int, int, int]]:
         """Get stored cursor position for relationship graph."""
         return self._relationship_pos
-        
+
     def clear(self) -> None:
         """Clear all stored states."""
         self._cluster_states.clear()
@@ -462,16 +479,17 @@ class ClusterStateManager:
 def safe_transition(func):
     """
     Decorator for safe state machine transitions.
-    
+
     Wraps state transition functions with error handling and logging.
     Prevents crashes from invalid state transitions.
-    
+
     Args:
         func: State transition function to wrap
-        
+
     Returns:
         Wrapped function that handles transition errors gracefully
     """
+
     @wraps(func)
     def wrapper(*args, **kwargs):
         try:
@@ -481,11 +499,12 @@ def safe_transition(func):
             self = args[0] if args else None
             current_state = self.current_state.name if self else "Unknown"
             # Use func.name if available, else func.__name__, else 'Unknown'
-            attempted_transition = getattr(func, 'name', getattr(func, '__name__', 'Unknown'))
+            attempted_transition = getattr(func, "name", getattr(func, "__name__", "Unknown"))
             # log(f"[XReferStateMachine] Transition not allowed: {attempted_transition} from {current_state}")
         except Exception as e:
             # log(f"[XReferStateMachine] Unexpected error during state transition: {str(e)}")
             pass
-    
+
         return False
+
     return wrapper

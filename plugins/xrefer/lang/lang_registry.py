@@ -12,39 +12,40 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Type, List
-import os
 import importlib
 import inspect
+import os
+from typing import Any, List, Type
+
 from xrefer.core.helpers import log
 from xrefer.lang.lang_base import LanguageBase
 from xrefer.lang.lang_default import LangDefault
+
 
 def get_language_modules() -> List[Type[LanguageBase]]:
     """Get all available language module classes."""
     lang_classes = []
     lang_dir = os.path.dirname(__file__)
-    
+
     # Get all lang_*.py files except default and base
-    lang_files = [f[:-3] for f in os.listdir(lang_dir) 
-                 if f.startswith('lang_') and f.endswith('.py') 
-                 and f not in ('lang_base.py', 'lang_default.py', 'lang_registry.py')]
-                 
+    lang_files = [f[:-3] for f in os.listdir(lang_dir) if f.startswith("lang_") and f.endswith(".py") and f not in ("lang_base.py", "lang_default.py", "lang_registry.py")]
+
     for module_name in lang_files:
         try:
             # Import module
-            module = importlib.import_module(f'.{module_name}', package='xrefer.lang')
-            
+            module = importlib.import_module(f".{module_name}", package="xrefer.lang")
+
             # Find language class (subclass of LanguageBase)
             for name, obj in inspect.getmembers(module, inspect.isclass):
-                if name == 'LangDefault':
+                if name == "LangDefault":
                     continue
                 if issubclass(obj, LanguageBase) and obj != LanguageBase:
                     lang_classes.append(obj)
         except Exception as e:
             log(f"Error loading language module {module_name}: {e}")
-            
+
     return lang_classes
+
 
 def get_language_object() -> Any:
     """Get appropriate language object for current binary."""
@@ -53,9 +54,9 @@ def get_language_object() -> Any:
         try:
             lang_obj = lang_class()
             if lang_obj.lang_match():
-                return lang_obj 
+                return lang_obj
         except Exception as e:
             log(f"Error instantiating {lang_class.__name__}: {e}")
-            
+
     # Return default as fallback
     return LangDefault()

@@ -12,10 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import base
-from . import processor
-from . import models
-from . import prompts
-from . import categorizer
-from . import artifact_analyzer
-from . import cluster_analyzer
+from . import artifact_analyzer, base, categorizer, cluster_analyzer, models, processor, prompts
