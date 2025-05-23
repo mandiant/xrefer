@@ -29,9 +29,7 @@ From the main directory of the cloned repository:
   pip install -r requirements.txt
   ```
 
-Note: The `asciinet` dependency requires Java to be installed. OpenJDK or any JRE should work. Ensure `java` is accessible on your system's PATH.
-
-**License:** XRefer is released under the Apache License 2.0. See [LICENSE](LICENSE) for details.
+_Note: The `asciinet` dependency requires Java to be installed. OpenJDK or any JRE should work. Ensure `java` is accessible on your system's PATH._
 
 ## Usage
 

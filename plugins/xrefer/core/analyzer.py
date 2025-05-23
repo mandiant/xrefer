@@ -27,7 +27,7 @@ import shutil
 from time import time
 from PyQt5.QtWidgets import QDialog
 from pathlib import Path
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from operator import itemgetter
 from typing import *
 
@@ -2642,37 +2642,39 @@ class XRefer:
             List[List[int]]: A list of call paths between the initial and final functions.
         """
         all_paths = []
-        path_buffer = [[final]]
+        path_buffer = deque([[final]])
 
         log(f'Building call paths :: {idc.get_func_name(initial)} -> {idc.get_func_name(final)}')
+        xref_cache = {}
         while path_buffer and len(all_paths) < max_limit and len(path_buffer) < max_limit:
+            current_path = path_buffer.popleft()
             refs = set()
-            target = path_buffer[0][-1]
-
-            if len(path_buffer[0]) < max_limit:
+            target = current_path[-1]
+            if target not in xref_cache:
+                refs = set()
                 for cross_ref in idautils.XrefsTo(target):
                     ref_func = idaapi.get_func(cross_ref.frm)
                     if ref_func:
                         ref_start = ref_func.start_ea
                         refs.add(ref_start)
+                xref_cache[target] = refs
+            else:
+                refs = xref_cache[target]
 
             if refs:
-                current_path = path_buffer.pop(0)
                 for ref in refs:
                     if ref in current_path:
                         continue
-
                     if ref == initial:
                         all_paths = self.insert_path(all_paths, (current_path + [ref])[::-1])
                     else:
                         path_buffer.append(current_path + [ref])
 
-            elif initial not in path_buffer[0]:
-                path_buffer.pop(0)
+            elif len(current_path) > 0 and initial not in current_path:
+                continue  # Skip this path as it doesn't lead to initial
 
-            elif initial in path_buffer[0]:
-                all_paths = self.insert_path(all_paths, path_buffer.pop(0)[::-1])
-
+            elif len(current_path) > 0 and initial in current_path:
+                all_paths = self.insert_path(all_paths, current_path[::-1])
         return all_paths
 
     def generate_all_simple_call_paths_for_ep(self) -> None:
