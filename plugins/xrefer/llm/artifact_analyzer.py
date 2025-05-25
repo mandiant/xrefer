@@ -21,10 +21,10 @@ from xrefer.llm.prompts import PromptType
 
 class ArtifactAnalyzer:
     """Main interface for analyzing interesting artifacts"""
-    
+
     current_config: ModelConfig = None
     _processor: LLMProcessor = None
-    
+
     @classmethod
     def _get_processor(cls) -> LLMProcessor:
         if not cls._processor:
@@ -33,20 +33,20 @@ class ArtifactAnalyzer:
             cls._processor = LLMProcessor()
             cls._processor.set_model_config(cls.current_config)
         return cls._processor
-    
+
     @classmethod
     def set_model_config(cls, config: ModelConfig):
         cls.current_config = config
         cls._processor = None  # Force new processor with new config
-    
+
     @classmethod
     def find_interesting_artifacts(cls, artifacts: List[Dict]) -> Set[int]:
         """
         Find potentially interesting artifacts from a security perspective.
-        
+
         Args:
             artifacts: List of artifacts, each with 'type', 'index', and 'content' keys
-                      
+
         Returns:
             Set of indexes for interesting artifacts
         """
@@ -55,6 +55,5 @@ class ArtifactAnalyzer:
         return processor.process_items(
             items=artifacts,
             prompt_type=PromptType.ARTIFACT_ANALYZER,
-            ignore_token_limit=True  # Process all artifacts in one batch
+            ignore_token_limit=True,  # Process all artifacts in one batch
         )
-    

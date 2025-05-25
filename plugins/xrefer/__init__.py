@@ -12,15 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import sys
 import subprocess
+import sys
 
 _original_popen = subprocess.Popen
 
 # asciinet when imported on windows while running openjdk, ends up displaying a console window
-# since asciinet is not maintained anymore submitting a PR is futile and in order to avoid forking 
+# since asciinet is not maintained anymore submitting a PR is futile and in order to avoid forking
 # our own copy we will replace the Popen function temporarily to appropriately execute javaw.exe
 # and avoid spawning any unnecessary console windows
+
 
 def hooking_popen(*args, **kwargs):
     """
@@ -35,15 +36,16 @@ def hooking_popen(*args, **kwargs):
             # we switch "java" -> "javaw" or do creationflags below
             if sys.platform.startswith("win") and cmd and cmd[0].lower() == "java":
                 cmd[0] = "javaw"  # Switch to a windowless Java
-    
+
     # Also, to avoid popping up a console on Windows, set CREATE_NO_WINDOW
     if sys.platform.startswith("win"):
         # Combine or set the creationflags
-        creationflags = kwargs.pop('creationflags', 0)
+        creationflags = kwargs.pop("creationflags", 0)
         creationflags |= subprocess.CREATE_NO_WINDOW
-        kwargs['creationflags'] = creationflags
+        kwargs["creationflags"] = creationflags
 
     return _original_popen(*args, **kwargs)
+
 
 # -- 1) Patch Popen BEFORE importing asciinet
 subprocess.Popen = hooking_popen
@@ -56,9 +58,4 @@ import asciinet
 subprocess.Popen = _original_popen
 
 
-from . import plugin
-from . import core
-from . import lang
-from . import llm
-from . import loaders
-from . import legacy
+from . import core, lang, legacy, llm, loaders, plugin

@@ -13,25 +13,26 @@
 # limitations under the License.
 
 import json
-from typing import *
-import idaapi
-import capa.render.utils as rutils
+from typing import Any, Dict, List, Set, Union
+
 import capa.features.freeze as frz
 import capa.render.result_document as rd
-
+import capa.render.utils as rutils
+import idaapi
 from xrefer.core.helpers import log
+
 
 def load_capa_json(capa_json_path: str) -> Dict[int, List[Dict[str, Any]]]:
     """
     Load and process CAPA JSON results file.
-    
+
     Parses CAPA capability analysis results and organizes them by address
     for use in XRefer analysis. Handles image base mismatches by relocating
     addresses appropriately.
-    
+
     Args:
         capa_json_path (str): Path to CAPA JSON results file
-        
+
     Returns:
         Dict[int, List[Dict[str, Any]]]: Dictionary mapping addresses to lists of
             rule match information dictionaries
@@ -39,36 +40,37 @@ def load_capa_json(capa_json_path: str) -> Dict[int, List[Dict[str, Any]]]:
     try:
         doc = get_doc_json_file(capa_json_path)
     except Exception as e:
-        log(f'Unable to load {capa_json_path}: {str(e)}')
+        log(f"Unable to load {capa_json_path}: {str(e)}")
         return {}
 
     # Get image bases and calculate relocation delta if needed
     capa_base = doc.meta.analysis.base_address.value
     ida_base = idaapi.get_imagebase()
     relocation_delta = ida_base - capa_base if capa_base != ida_base else 0
-    
+
     if relocation_delta:
         log(f"Detected image base mismatch: CAPA base=0x{capa_base:x}, IDA base=0x{ida_base:x}")
         log(f"Applying relocation delta: 0x{relocation_delta:x}")
-    
+
     rmatches = get_rule_matches_dict(doc)
-    
+
     # If there's a relocation delta, adjust all addresses
     if relocation_delta:
         rmatches = relocate_addresses(rmatches, relocation_delta)
-        
+
     return rmatches
+
 
 def get_doc_json_file(json_results_path: str) -> rd.ResultDocument:
     """
     Load and parse CAPA JSON file into ResultDocument.
-    
+
     Args:
         json_results_path (str): Path to CAPA JSON results file
-        
+
     Returns:
         rd.ResultDocument: Parsed CAPA result document
-        
+
     Raises:
         ValueError: If no JSON file provided or located
     """
@@ -84,16 +86,17 @@ def get_doc_json_file(json_results_path: str) -> rd.ResultDocument:
 
     return rd.ResultDocument.parse_obj(results)
 
+
 def to_locations(addresses: Set[frz.Address]) -> Set[int]:
     """
     Convert CAPA addresses to IDA-compatible locations.
-    
+
     Handles different types of CAPA addresses (absolute, relative, file)
     and converts them to usable IDA addresses.
-    
+
     Args:
         addresses (Set[frz.Address]): Set of CAPA addresses to convert
-        
+
     Returns:
         Set[int]: Set of converted location addresses
     """
@@ -110,16 +113,17 @@ def to_locations(addresses: Set[frz.Address]) -> Set[int]:
         locs.add(v)
     return locs
 
+
 def get_rule_matches_dict(doc: rd.ResultDocument) -> Dict[int, List[Dict[str, Any]]]:
     """
     Convert CAPA document to dictionary of rule matches.
-    
+
     Processes CAPA results into a format more suitable for XRefer usage,
     organizing matches by their location/function address.
-    
+
     Args:
         doc (rd.ResultDocument): CAPA result document
-        
+
     Returns:
         Dict[int, List[Dict[str, Any]]]: Dictionary where keys are addresses and values are
             lists of dictionaries containing rule match information including:
@@ -154,16 +158,17 @@ def get_rule_matches_dict(doc: rd.ResultDocument) -> Dict[int, List[Dict[str, An
 
     return rmatches
 
+
 def get_addresses(match: rd.Match) -> Set[frz.Address]:
     """
     Get all addresses associated with a CAPA match.
-    
+
     Recursively extracts all addresses from a match and its children,
     excluding addresses of match features themselves.
-    
+
     Args:
         match (rd.Match): CAPA match object to extract addresses from
-        
+
     Returns:
         Set[frz.Address]: Set of all relevant addresses for the match
     """
@@ -182,16 +187,17 @@ def get_addresses(match: rd.Match) -> Set[frz.Address]:
 
     return addresses
 
+
 def get_matched_rules(match: rd.Match) -> List[Dict[str, Union[str, List[frz.Address]]]]:
     """
     Get list of all rules matched within a CAPA match.
-    
+
     Recursively processes a match to extract information about all matched rules,
     including nested matches.
-    
+
     Args:
         match (rd.Match): CAPA match object to process
-        
+
     Returns:
         List[Dict[str, Union[str, List[frz.Address]]]]: List of dictionaries containing:
             - name: Name of matched rule
@@ -204,71 +210,70 @@ def get_matched_rules(match: rd.Match) -> List[Dict[str, Union[str, List[frz.Add
         return matched_rules
 
     if match.node.type == "feature" and match.node.feature.type == "match":
-        matched_rules.append({
-            "name": match.node.feature.match,
-            "locations": match.locations,
-            "loc_string": hex_list_str([loc.value for loc in match.locations if loc.value]),
-        })
+        matched_rules.append(
+            {
+                "name": match.node.feature.match,
+                "locations": match.locations,
+                "loc_string": hex_list_str([loc.value for loc in match.locations if loc.value]),
+            }
+        )
 
     for child in match.children:
         matched_rules.extend(get_matched_rules(child))
 
     return matched_rules
 
+
 def relocate_addresses(matches: Dict[int, List[Dict[str, Any]]], delta: int) -> Dict[int, List[Dict[str, Any]]]:
     """
     Relocate all addresses in the matches dictionary by the specified delta.
-    
+
     Args:
         matches: Dictionary of rule matches indexed by address
         delta: Relocation delta to apply to all addresses
-        
+
     Returns:
         Updated dictionary with relocated addresses
     """
     relocated_matches = {}
-    
+
     for addr, match_list in matches.items():
         # Relocate the dictionary key (function address)
         new_addr = addr + delta
-        
+
         # Create new list for relocated matches
         relocated_matches[new_addr] = []
-        
+
         for match in match_list:
             # Create a copy of the match to modify
             new_match = match.copy()
-            
+
             # Relocate all locations in the match
             new_match["locations"] = [loc + delta for loc in match["locations"]]
-            
+
             # Update the location string with relocated addresses
             new_match["loc_string"] = hex_list_str(new_match["locations"])
-            
+
             # Relocate nested matches
             for nested_match in new_match["matches"]:
                 if nested_match.get("locations"):
-                    nested_match["locations"] = [
-                        addr.value + delta if hasattr(addr, 'value') else addr + delta 
-                        for addr in nested_match["locations"]
-                    ]
-                    nested_match["loc_string"] = hex_list_str([
-                        loc.value if hasattr(loc, 'value') else loc 
-                        for loc in nested_match["locations"]
-                        if hasattr(loc, 'value') and loc.value or not hasattr(loc, 'value')
-                    ])
-            
+                    nested_match["locations"] = [addr.value + delta if hasattr(addr, "value") else addr + delta for addr in nested_match["locations"]]
+                    nested_match["loc_string"] = hex_list_str(
+                        [loc.value if hasattr(loc, "value") else loc for loc in nested_match["locations"] if hasattr(loc, "value") and loc.value or not hasattr(loc, "value")]
+                    )
+
             relocated_matches[new_addr].append(new_match)
-    
+
     return relocated_matches
+
 
 def hex_list_str(locations: List[int]) -> str:
     """
     Convert list of addresses to comma-separated hex string.
-    
+
     Args:
         locations (List[int]): List of addresses to convert
-        
+
     Returns:
         str: Comma-separated string of hexadecimal values
     """

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-CATEGORIZER_PROMPT = '''
+CATEGORIZER_PROMPT = """
 Categorize the following {{TYPE}}s according to their most basic and direct functionality. Use ONLY the categories in the provided list. If an item doesn't clearly fit into the main categories, assign it to the 'Others' category. Base your decision solely on the function or library item name, focusing on recognizable patterns, prefixes, and keywords, without making assumptions about higher-level behaviors or implementations. The names may come from any programming language or library, and can be arbitrary.
 
 Categories:
@@ -135,4 +135,4 @@ Output format:
 Return only the JSON and do not include any explanatory text. Do not wrap the JSON in code fences or formatting. Ensure all items are assigned a category index. Do not miss any item.
 
 {{ITEMS}}
-'''
+"""

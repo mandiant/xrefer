@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-CLUSTER_ANALYZER_PROMPT = '''You are a malware analyst examining a binary. 
+CLUSTER_ANALYZER_PROMPT = """You are a malware analyst examining a binary. 
 You will analyze clusters of functions containing suspicious behaviors.
 Each cluster shows functions, their artifacts (APIs and their corresponding calls (if available), strings, library names, CAPA static analysis tool results etc.), and call relationships.
 
@@ -111,4 +111,4 @@ Focus on:
 Ensure descriptions are clear and precise. Use technical terms where appropriate. Return only the JSON and do not include any explanatory text. Do NOT wrap the JSON in code fences or formatting.
 All the required keys should be present in all respective JSON values. Even if a cluster does not have relevant data for a particular field, you should still include the key. For example: "relationships": "None".
 Do not use backslashes, string quotes or new lines in the binary_report.
-'''
+"""

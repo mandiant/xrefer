@@ -12,9 +12,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import lang_base
-from . import lang_rust
-from . import lang_default
-from . import lang_registry
-
+from . import lang_base, lang_default, lang_registry, lang_rust
 from .lang_registry import get_language_object
