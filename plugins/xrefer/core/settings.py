@@ -19,7 +19,6 @@ import re
 from time import time
 from typing import Any, Dict, List
 
-import idaapi
 import idc
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QFontMetrics
@@ -44,7 +43,7 @@ class XReferSettingsManager:
     """
 
     def __init__(self):
-        self.settings_dir = os.path.join(idaapi.get_user_idadir(), "xrefer")
+        self.settings_dir = os.path.join(os.path.expanduser("~"), ".xrefer")
         self.settings_file = os.path.join(self.settings_dir, "settings.json")
         self.exclusion_file = os.path.join(self.settings_dir, "exclusions.json")
         self.lockfile = self.settings_file + ".lock"
