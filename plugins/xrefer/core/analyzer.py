@@ -1447,7 +1447,7 @@ class XRefer:
                 self.run_full_analysis()
                 self.save_analysis()
             except Exception as err:
-                log("Error running full analysis {err}")
+                log(f"Error running full analysis {err}")
 
         log_elapsed_time("Analysis Time", start_time)
 
