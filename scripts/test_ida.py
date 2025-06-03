@@ -104,7 +104,7 @@ def cli():
         sys.stdout = open(log_file, "w", encoding="utf-8")
         sys.stderr = open(log_file, "w", encoding="utf-8")
     print(f"[+] Analyzing file: {file_path} using XRefer.")
-    print(f"{rel_pkg_path = })")
+    print(f"{rel_pkg_path = }")
     try:
         artifact_path = _analyze(file_path, auto_analysis=args.auto_analysis, save_changes=args.save, force_analysis=args.force)
         if Path(artifact_path).exists():

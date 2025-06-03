@@ -232,9 +232,6 @@ def main():
     except ValueError as e:  # Catch specific error from _load_db
         print(f"Error: {e}")
         sys.exit(1)
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-        sys.exit(1)
 
 
 if __name__ == "__main__":
