@@ -41,7 +41,7 @@ from xrefer.llm.categorizer import CATEGORIES, Categorizer
 from xrefer.llm.cluster_analyzer import ClusterAnalyzer
 from xrefer.loaders.capa import load_capa_json
 from xrefer.loaders.trace import parse_api_trace
-
+from xrefer.backend import Backend
 
 class XRefer:
     """
@@ -140,8 +140,8 @@ class XRefer:
             self.leaf_funcs: Set[int] = set()
             self.git_lookups: bool = True
             self.llm_lookups: bool = True
-            self.image_base: int = idaapi.get_imagebase()
-            self.idb_path: str = idc.get_idb_path()
+            self._backend = Backend()
+            self.image_base: int = self._backend.image_base()
             self.plugin_subdir_path: str = str(Path(__file__).resolve().parent.parent)
             self._processed_orphan_thunks: Set[int] = set()
             self.clusters = None
@@ -258,9 +258,9 @@ class XRefer:
             return
 
         log("Sifting library references...")
-        lib_list = [x[1] for x in self.lang.lib_refs]
 
         if self.llm_lookups:
+            lib_list = [x[1] for x in self.lang.lib_refs]
             _, self.categories["lib_categories"] = Categorizer.categorize(lib_list, self.categories["libs"], type="lib")
 
         for lib_ref in self.lang.lib_refs:
@@ -616,45 +616,19 @@ class XRefer:
         categorizes them if enabled, and adds them to the imports list.
         """
         log("Getting imports...")
-        entries = []
-        for i in range(idaapi.get_import_module_qty()):
-            module_name = idaapi.get_import_module_name(i)
-            if not module_name:
-                continue
-
-            module_name = module_name.lower().split("/")[-1]
-
-            def cb(ea: int, name: str, ordinal: int) -> bool:
-                _module_name = None
-                if "@@" in name:  # elf dynsyms
-                    splitted = name.split("@@")
-                    name = splitted[0]
-                    if "_" in splitted[1]:
-                        _module_name = "_".join(splitted[1].split("_")[:-1])
-                    else:
-                        _module_name = splitted[1]
-                if _module_name is None:
-                    entries.append((ea, f"{module_name}.{name}", ordinal, module_name))
-                else:
-                    entries.append((ea, f"{_module_name}.{name}", ordinal, _module_name))
-                return True
-
-            idaapi.enum_import_names(i, cb)
-
-        api_list = [x[1] for x in entries]
+        entries = list(self._backend.get_imports())
         if self.llm_lookups:
+            api_list = [x[1] for x in entries]
             _, self.categories["api_categories"] = Categorizer.categorize(api_list, self.categories["apis"])
-
-        for ea, name, _, module_name in entries:
+        for ea, name, module_name in entries:
             try:
                 category_index = self.categories["apis"][name]
                 category = self.categories["api_categories"][category_index]
                 entity = (category, name, 2)
             except:
                 entity = (module_name, name, 2)
-
             self.entities.append(entity)
-            self.imports.append((ea, len(self.entities) - 1, 2))
+            self.imports.append((int(ea), len(self.entities) - 1, 2))
 
     def merge_xrefs(self, func_ea: int, child_func_ea: int) -> bool:
         """
