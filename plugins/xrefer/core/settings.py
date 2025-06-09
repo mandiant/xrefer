@@ -19,13 +19,13 @@ import re
 from time import time
 from typing import Any, Dict, List
 
-import idc
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QFontMetrics
 from PyQt5.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMessageBox,
                              QPushButton, QScrollArea, QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
 from xrefer.core.helpers import log
 
+from xrefer import backend
 
 class XReferSettingsManager:
     """
@@ -51,7 +51,7 @@ class XReferSettingsManager:
 
         # IDB-specific settings - paths that can be customized per IDB
         self.idb_specific_paths = {"analysis", "capa", "trace", "xrefs"}
-        self.current_idb = idc.get_idb_path()
+        self.current_idb = backend.sample_path()
 
     def get_default_settings(self) -> Dict[str, Any]:
         """Get default settings dictionary with added display options."""
