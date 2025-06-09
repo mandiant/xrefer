@@ -130,7 +130,6 @@ class DBAnalyzer:
         metrics["entity_xrefs_size"] = len(self.data.get("entity_xrefs", {}))
         metrics["leaf_functions"] = len(self.data.get("leaf_funcs", set()))
         metrics["api_trace_functions"] = len(self.data.get("api_trace_data", {}))
-        metrics["interesting_artifacts"] = len(self.data.get("interesting_artifacts", set()))
 
         return metrics
 
@@ -159,7 +158,6 @@ class DBAnalyzer:
         print(f"  Entity XRefs: {self.metrics['entity_xrefs_size']}")
         print(f"  Leaf Functions: {self.metrics['leaf_functions']}")
         print(f"  API Trace Functions: {self.metrics['api_trace_functions']}")
-        print(f"  Interesting Artifacts: {self.metrics['interesting_artifacts']}")
 
 
 def compare_databases(db1_path: str, db2_path: str):
@@ -215,12 +213,12 @@ def main():
             sys.exit(0)
         else:
             db1 = DBAnalyzer(args.db1_path)
-            print(f"\nSummary for {Path(args.db1_path).name}")
-            db1.summary()
+            # print(f"\nSummary for {Path(args.db1_path).name}")
+            # db1.summary()
 
             db2 = DBAnalyzer(args.db2_path)
-            print(f"\nSummary for {Path(args.db2_path).name}")
-            db2.summary()
+            # print(f"\nSummary for {Path(args.db2_path).name}")
+            # db2.summary()
 
             # Compare
             are_same = compare_databases(args.db1_path, args.db2_path)
