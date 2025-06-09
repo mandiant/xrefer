@@ -56,7 +56,7 @@ def _analyze(file_path: Path, auto_analysis: bool = True, save_changes: bool = F
                 print(f"[+] Removing {file_to_remove}.")
                 file_to_remove.unlink()
     if force_analysis:
-        for ext in ("i64", "i64.xrefer"):  # project archived
+        for ext in ("i64", "xrefer"):  # project archived
             file_to_remove = file_path.with_name(f"{file_path.name}.{ext}")
             if file_to_remove.exists():
                 print(f"[+] Removing {file_to_remove}.")
