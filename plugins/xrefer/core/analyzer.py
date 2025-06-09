@@ -22,15 +22,17 @@ from collections import OrderedDict, defaultdict, deque
 from operator import itemgetter
 from pathlib import Path
 from time import time
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, Union
 
-import ida_funcs
-import ida_lines
+import ida_idaapi
+import ida_lines  # ignore this
 import ida_xref
 import idaapi
 import idautils
 import idc
 from PyQt5.QtWidgets import QDialog
+from xrefer.backend import Backend
+from xrefer.backend.types import Address, FunctionType
 from xrefer.core.clusters import ClusterManager, FunctionalCluster
 from xrefer.core.helpers import create_xrefs_table_colored, enrich_string_data, log, log_elapsed_time
 from xrefer.core.settings import MissingFilesDialog, XReferSettingsManager
@@ -41,7 +43,7 @@ from xrefer.llm.categorizer import CATEGORIES, Categorizer
 from xrefer.llm.cluster_analyzer import ClusterAnalyzer
 from xrefer.loaders.capa import load_capa_json
 from xrefer.loaders.trace import parse_api_trace
-from xrefer.backend import Backend
+
 
 class XRefer:
     """
@@ -517,27 +519,17 @@ class XRefer:
         """
 
         log("Generating xref mappings...")
-        for func in idautils.Functions():
-            start = idc.get_func_attr(func, idc.FUNCATTR_START)
-            end = idc.prev_addr(idc.get_func_attr(func, idc.FUNCATTR_END))
-
-            _func = idaapi.get_func(func)
-
-            if not _func:
-                continue
-
-            # Iterate over basic blocks in the function
-            flowchart = idaapi.FlowChart(_func)
-            for block in flowchart:
+        for func in self._backend.functions():
+            for block in func.basic_blocks:
                 # Iterate over the instructions in the basic block
-                for addr in idautils.Heads(block.start_ea, block.end_ea):
-                    func_refs_from = idautils.XrefsFrom(addr, 1)
+                for addr in idautils.Heads(int(block.start), int(block.end)):
+                    func_refs_from = idautils.XrefsFrom(addr, ida_xref.XREF_FAR)
                     for ref in func_refs_from:
                         # Check if the reference points within the same function
-                        ref_to = ida_funcs.get_func(ref.to)
-                        if ref_to and ref_to == ida_funcs.get_func(start):
+                        if Address(ref.to) in func:
                             continue
 
+                        start = int(func.start)
                         if start not in self.caller_xrefs_cache:
                             # function A -> function B call locations
                             self.caller_xrefs_cache[start] = {ref.to: {ref.frm}}
@@ -707,18 +699,19 @@ class XRefer:
                 # If it's a library function, do not continue here. We fall through to XrefsTo() below.
 
             # Find cross-references to 'addr' and try to resolve them
-            for xref in idautils.XrefsTo(addr):
-                if idc.func_contains(xref.frm, xref.frm):
+            for xref in self._backend.get_xrefs_to(Address(addr)):  # TODO: TypeError: in method 'get_func_name', argument 2 of type 'ea_t'
+                source_fn = self._backend.get_function_at(xref.source)
+                if source_fn and xref.source in source_fn:
                     # Cross-reference is within a function
-                    if xref.type == ida_xref.fl_F:
+                    if xref._xref.type == ida_xref.fl_F:
                         # Ordinary flow reference, use the original address
-                        self.mapped_refs.append((addr, item, type))
+                        self.mapped_refs.append((int(addr), item, type))  # TODO: TypeError: in method 'get_func_name', argument 2 of type 'ea_t'
                     # If not a library function, we map from the caller
-                    elif (idc.get_func_flags(xref.frm) & idc.FUNC_LIB) == 0:
-                        self.mapped_refs.append((xref.frm, item, type))
-                elif xref.type in (ida_xref.fl_U, ida_xref.dr_O, ida_xref.dr_W, ida_xref.dr_R, ida_xref.dr_T, ida_xref.dr_I):
+                    elif source_fn.type != FunctionType.LIBRARY:
+                        self.mapped_refs.append((int(xref.source), item, type))  # TODO: TypeError: in method 'get_func_name', argument 2 of type 'ea_t'
+                elif xref._xref.type in (ida_xref.fl_U, ida_xref.dr_O, ida_xref.dr_W, ida_xref.dr_R, ida_xref.dr_T, ida_xref.dr_I):
                     # Indirect or data reference, we store it for another iteration
-                    ref_to_search.append((xref.frm, item, type))
+                    ref_to_search.append((ida_idaapi.ea_t(xref.source), item, type))
 
             # If ref_list is empty, swap in the refs we found this round
             if not ref_list:
@@ -803,32 +796,32 @@ class XRefer:
         artifact_sorted = False
         # Create a copy of xrefs set to safely iterate over
         for xref in set(xrefs):  # Create a copy here
-            func = idaapi.get_func(xref)
+            func = self._backend.get_function_at(xref)
             if not func:
                 continue
 
-            func_ea = func.start_ea
-            if idc.get_func_flags(func_ea) & idc.FUNC_THUNK:
+            if func.is_thunk:
                 continue
+            fn_start = func.start
 
             # Use orphan check that considers indirect xrefs
-            is_orphan = self.is_orphan_function(func_ea)
+            is_orphan = self.is_orphan_function(fn_start)
 
             if not is_orphan:
-                if func_ea not in func_artifacts:
-                    func_artifacts[func_ea] = []
+                if fn_start not in func_artifacts:
+                    func_artifacts[fn_start] = []
                 artifact_entry = (entity[2], entity[1], xref)
-                if artifact_entry[:2] not in [(x[0], x[1]) for x in func_artifacts[func_ea]]:
-                    func_artifacts[func_ea].append(artifact_entry)
+                if artifact_entry[:2] not in [(x[0], x[1]) for x in func_artifacts[fn_start]]:
+                    func_artifacts[fn_start].append(artifact_entry)
                 artifact_sorted = True
             else:
-                if func_ea in self.table_data:
-                    self.table_data[func_ea] = self.create_sorted_table(func_ea)
-                if func_ea not in orphan_func_artifacts:
-                    orphan_func_artifacts[func_ea] = []
+                if fn_start in self.table_data:
+                    self.table_data[fn_start] = self.create_sorted_table(fn_start)
+                if fn_start not in orphan_func_artifacts:
+                    orphan_func_artifacts[fn_start] = []
                 artifact_entry = (entity[2], entity[1], xref)
-                if artifact_entry[:2] not in [(x[0], x[1]) for x in orphan_func_artifacts[func_ea]]:
-                    orphan_func_artifacts[func_ea].append(artifact_entry)
+                if artifact_entry[:2] not in [(x[0], x[1]) for x in orphan_func_artifacts[fn_start]]:
+                    orphan_func_artifacts[fn_start].append(artifact_entry)
                 artifact_sorted = True
 
         if not artifact_sorted:
@@ -1816,13 +1809,13 @@ class XRefer:
         for e_index in scan_entities:
             path_count = 0
             for xref in self.entity_xrefs[e_index]:
-                func = idaapi.get_func(xref)
+                fn = self._backend.get_function_at(xref)
 
-                if not func:
+                if not fn:
                     continue  # there will be no function present at unloaded/encrypted regions of the binary, while api calls from traces might actually be present
 
                 try:
-                    path_count += len(self.paths[ep][func.start_ea])
+                    path_count += len(self.paths[ep][fn.start])
                 except KeyError:
                     pass
 
@@ -1854,15 +1847,15 @@ class XRefer:
         boundary_methods = set()
 
         for xref in self.entity_xrefs[e_index]:
-            func = idaapi.get_func(xref)
+            func = self._backend.get_function_at(xref)
 
             if not func:
                 continue  # there will be no function present at unloaded/encrypted regions of the binary, while api calls from traces might actually be present
 
-            if func.start_ea not in self.paths[ep]:
+            if func.start not in self.paths[ep]:
                 continue
 
-            for path in self.paths[ep][func.start_ea]:
+            for path in self.paths[ep][func.start]:
                 for node_ea in reversed(path):
                     combined_xrefs = self.global_xrefs[node_ea][self.COMBINED_XREFS]
                     if scan_entities.issubset(combined_xrefs):
@@ -1907,14 +1900,12 @@ class XRefer:
         xref_items = []
 
         for xref in xrefs:
-            xref_func = idaapi.get_func(xref)
-
+            xref_func = self._backend.get_function_at(xref)
             if not xref_func:  # Skip if no function (e.g., unloaded/encrypted regions)
                 continue
 
-            xref_func_ea = xref_func.start_ea
-            orphan = "Yes" if self.is_orphan_function(xref_func_ea) else "No"
-            xref_item = [xref_func.start_ea, orphan, idc.get_func_name(xref_func_ea)]
+            orphan = "Yes" if self.is_orphan_function(xref_func.start) else "No"
+            xref_item = [xref_func.start, orphan, xref_func.name]
             if xref_item not in xref_items:
                 xref_items.append(xref_item)
 
@@ -2550,11 +2541,10 @@ class XRefer:
             target = current_path[-1]
             if target not in xref_cache:
                 refs = set()
-                for cross_ref in idautils.XrefsTo(target):
-                    ref_func = idaapi.get_func(cross_ref.frm)
-                    if ref_func:
-                        ref_start = ref_func.start_ea
-                        refs.add(ref_start)
+                for cross_ref in idautils.XrefsTo(ida_idaapi.ea_t(target)):
+                    fn = self._backend.get_function_at(cross_ref.frm)
+                    if fn:
+                        refs.add(fn.start)
                 xref_cache[target] = refs
             else:
                 refs = xref_cache[target]
@@ -2604,7 +2594,11 @@ class XRefer:
             for func_ea, paths in self.paths[ep].items():
                 for path in paths:
                     if node_ea in path:
-                        ep_name = idc.get_func_name(self.current_analysis_ep)
+                        ep_name = ""
+                        try:
+                            ep_name = self._backend.get_function_at(self.current_analysis_ep).name
+                        except Exception as err:
+                            log(f"Exception: {err}")
                         log(f"Function @ 0x{self.current_analysis_ep:x} ({ep_name}) has already been analyzed in a prior analysis as a node.")
                         return True
         return False
@@ -2701,7 +2695,7 @@ class XRefer:
             for cluster in self.clusters:
                 map_function_clusters(cluster)
 
-            all_functions = set(idautils.Functions())
+            all_functions = set(fn.start for fn in self._backend.functions())
 
             # Recursively gather all cluster nodes, root nodes, and cluster_refs from all levels
             def gather_all_cluster_nodes(clusters):
@@ -2781,24 +2775,24 @@ class XRefer:
                 func_single_cluster_id[f_ea] = cid
 
             # Step 4: Rename functions
-            def has_known_prefix(func_ea):
-                old_name = idc.get_func_name(func_ea)
+            def has_known_prefix(old_name):
                 if not old_name:
                     return True  # Not a valid function name, skip
                 return any(old_name.startswith(p) for p in KNOWN_PREFIXES)
 
             def rename_function(func_ea, new_prefix, allow_cluster_prefix_check=False):
                 # Check if this is a simple API thunk
+                fn = self._backend.get_function_at(func_ea)
                 if self.is_simple_api_thunk(func_ea):
                     return
 
-                old_name = idc.get_func_name(func_ea)
+                old_name = fn.name
                 if not old_name:
                     # Not a valid function name or no name known, skip
                     return
 
                 # If this function already has a known prefix, skip
-                if has_known_prefix(func_ea):
+                if has_known_prefix(old_name):
                     return
 
                 # If applying a cluster-specific prefix, also check if old_name already starts with that prefix

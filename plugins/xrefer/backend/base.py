@@ -1,18 +1,48 @@
 """Base classes for backend abstraction."""
 
+import enum
 import hashlib
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from xrefer.backend.types import Address, FunctionType, XrefType
 
+
+@dataclass
+class BasicBlock:
+    """Basic block representation."""
+
+    start: Address
+    end: Address
+
+    def contains(self, address: Address) -> bool:
+        """Check if address is within the block."""
+        return self.start <= address < self.end
+
+    def __repr__(self):
+        return f"BasicBlock(start={self.start}, end={self.end})"
+
+    def __contains__(self, item):
+        return self.contains(item)
+
+
 class Function(ABC):
     """Abstract function representation."""
 
+    _name: str = None
+    _function_type: FunctionType = None
+
+    def __repr__(self):
+        return f"Function(name={self.name!r}, address={self.address!r}, nbb={len(self.basic_blocks)})"
+
+    def __contains__(self, item: "Address"):
+        return self.contains(item)
+
     @property
     @abstractmethod
-    def address(self) -> Address:
+    def start(self) -> Address:
         """Start address of function."""
         pass
 
@@ -34,14 +64,32 @@ class Function(ABC):
         """Check if function is a thunk."""
         pass
 
+    @property
+    @abstractmethod
+    def basic_blocks(self) -> Iterator[BasicBlock]:
+        """Iterate over basic blocks in the function."""
+        pass
+
     @abstractmethod
     def contains(self, address: Address) -> bool:
         """Check if address is within function."""
         pass
+        return any(address in bb for bb in self.basic_blocks)
+
+
+class StringEncType(enum.IntEnum):
+    """Unified string types."""
+
+    ASCII = 0
+    UTF16 = 1
+    UTF32 = 2
+    UTF8 = 3
 
 
 class String(ABC):
     """Abstract string representation."""
+
+    _MIN_LENGTH = 5  # Minimum length for a string to be considered
 
     @property
     @abstractmethod
@@ -57,9 +105,25 @@ class String(ABC):
 
     @property
     @abstractmethod
-    def encoding(self) -> str:
-        """String encoding (utf-8, utf-16, etc)."""
+    def length(self) -> int:
+        """String length"""
         pass
+
+    def __len__(self) -> int:
+        """Get string length."""
+        return self.length
+
+    def __str__(self) -> str:
+        """Get string content."""
+        return self.content
+
+    def __repr__(self) -> str:
+        """String representation."""
+        return f"String(address={self.address}, content={self.content})"
+
+    def __hash__(self) -> int:
+        """Hash based on address and content."""
+        return hash((self.address, self.content))
 
 
 class Xref(ABC):
@@ -134,7 +198,7 @@ class BackEnd(ABC):
 
     # Functions
     @abstractmethod
-    def get_functions(self) -> Iterator[Function]:
+    def functions(self) -> Iterator[Function]:
         """Iterate over all functions."""
         pass
 
@@ -145,7 +209,7 @@ class BackEnd(ABC):
 
     # Strings
     @abstractmethod
-    def get_strings(self, min_length: int = 3) -> Iterator[String]:
+    def strings(self, min_length: int = 3) -> Iterator[String]:
         """Iterate over all strings."""
         pass
 
@@ -158,17 +222,6 @@ class BackEnd(ABC):
     @abstractmethod
     def get_xrefs_from(self, address: Address) -> Iterator[Xref]:
         """Get references from address."""
-        pass
-
-    # Instructions
-    @abstractmethod
-    def is_call_instruction(self, address: Address) -> bool:
-        """Check if instruction at address is a call."""
-        pass
-
-    @abstractmethod
-    def get_instruction_mnemonic(self, address: Address) -> Optional[str]:
-        """Get instruction mnemonic at address."""
         pass
 
     # Memory access

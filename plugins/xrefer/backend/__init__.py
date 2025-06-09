@@ -1,16 +1,26 @@
-g = globals()
+_BACKEND = {
+    "ida": False,
+    "binaryninja": False,
+    "ghidra": False,
+}
 
+for k, v in [("ida", "idc"), ("binaryninja", "binaryninja")]:
+    try:
+        __import__(v)
+        _BACKEND[k] = True
+        break
+    except ImportError:
+        pass
 
-if "binaryninja" in globals():
+if _BACKEND["ida"]:
+    from .ida import IDABackend as Backend
+    from .ida import IDAFunction as Function
+    from .ida import IDAString as String
+    from .ida import IDAXref as Xref
+    from .utils import _dump_indirect_calls_ida as get_indirect_calls
+elif _BACKEND["binaryninja"]:
     # from .binaryninja.backend import BinaryNinjaBackend as BackEnd
-    pass
-if "idc" in globals() or True:
-    # TODO: idc is not loaded when importing this module in IDA Pro. Need to think of a better way to handle this.
-    # For now, just fallback
-    from .ida.backend import IDABackend as Backend
-    from .ida.backend import IDAFunction as Function
-    from .ida.backend import IDAString as String
-    from .ida.backend import IDAXref as Xref
+    from .utils import _dump_indirect_calls_bn as get_indirect_calls
 else:
     raise ImportError("No supported backend found. Please ensure IDA Pro or Binary Ninja is available.")
 
@@ -20,6 +30,8 @@ __all__ = [
     "Function",
     "String",
     "Xref",
+    "Segment",
     "Backend",
     "sample_path",
+    "get_indirect_calls",
 ]

@@ -4,13 +4,14 @@ from typing import Iterator, Optional, Tuple
 
 import ida_bytes
 import ida_funcs
+import ida_nalt
 import ida_segment
 import ida_xref
 import idaapi
 import idautils
 import idc
 
-from ..base import BackEnd, Function, Segment, Xref
+from ..base import BackEnd, BasicBlock, Function, Segment, String, Xref
 from ..types import Address, FunctionType, XrefType
 
 
@@ -20,16 +21,16 @@ class IDAFunction(Function):
     def __init__(self, ida_func: "ida_funcs.func_t"):
         self._func = ida_func
         self._name = None
+        self._function_type = None
         # super().__init__(address, name)
 
     @property
-    def address(self) -> Address:
+    def start(self) -> Address:
         return Address(self._func.start_ea)
 
     @property
     def name(self) -> str:
-        if self._name is None:
-            self._name = idc.get_func_name(self._func.start_ea)
+        self._name = idc.get_func_name(self._func.start_ea)
         return self._name
 
     # @property
@@ -42,7 +43,7 @@ class IDAFunction(Function):
     def type(self) -> FunctionType:
         """Get function classification."""
         if self._function_type is None:
-            flags = idc.get_func_flags(self._ida_func.start_ea)
+            flags = idc.get_func_flags(self._func.start_ea)
 
             if flags & idc.FUNC_LIB:
                 self._function_type = FunctionType.LIBRARY
@@ -64,7 +65,52 @@ class IDAFunction(Function):
 
     def contains(self, address: Address) -> bool:
         """Check if the address is within the function."""
-        return idc.func_contains(self._func, address.value)
+        return idc.func_contains(self._func.start_ea, address.value)
+
+    @property
+    def basic_blocks(self) -> Iterator[BasicBlock]:
+        """Iterate over basic blocks in the function."""
+        for block in idaapi.FlowChart(self._func):
+            yield BasicBlock(Address(block.start_ea), Address(block.end_ea))
+
+    def _is_import(self) -> bool:
+        """Return True if the function resides in an import segment."""
+        seg: "ida_segment.segment_t" = ida_segment.getseg(self._func.start_ea)
+        return bool(seg) and seg.type == ida_segment.SEG_XTRN
+
+    def _is_export(self) -> bool:
+        """Return True if the function is exported from the binary."""
+        # TODO: do this.
+        pass
+
+
+class IDAString(String):
+    """IDA string wrapper."""
+
+    def __init__(self, string_info):
+        self._info = string_info
+        self._content = None
+
+    @property
+    def address(self) -> Address:
+        return Address(self._info.ea)
+
+    @property
+    def content(self) -> str:
+        if self._content is None:
+            str_type = idc.get_str_type(self._info.ea)
+            if str_type is None:
+                return ""
+            raw = ida_bytes.get_strlit_contents(self._info.ea, self.length, str_type)
+            if raw:
+                self._content = raw.decode("utf-8", errors="replace")
+            else:
+                self._content = ""
+        return self._content
+
+    @property
+    def length(self) -> int:
+        return self._info.length
 
 
 class IDAXref(Xref):
@@ -130,7 +176,7 @@ class IDABackend(BackEnd):
     def image_base(self):
         return idaapi.get_imagebase()
 
-    def get_functions(self) -> Iterator[IDAFunction]:
+    def functions(self) -> Iterator[IDAFunction]:
         """Iterate over all functions."""
         for ea in idautils.Functions():
             func = idaapi.get_func(ea)
@@ -140,12 +186,15 @@ class IDABackend(BackEnd):
     def get_function_at(self, address: Address) -> Optional[IDAFunction]:
         """Get function containing address."""
         func = idaapi.get_func(int(address))
+        if func and func.start_ea == idaapi.BADADDR:
+            return None
         return IDAFunction(func) if func else None
 
-    def get_strings(self, min_length: int = 3) -> Iterator[IDAString]:
-        strings = idautils.Strings()
+    def strings(self, min_length: int = 5) -> Iterator[IDAString]:
+        strings = idautils.Strings(False)
+        strings.setup(strtypes=[ida_nalt.STRTYPE_C, ida_nalt.STRTYPE_C_16, ida_nalt.STRTYPE_C_32], minlen=min_length)
         for s in strings:
-            if s.length >= min_length:
+            if idc.get_str_type(s.ea) is not None:
                 yield IDAString(s)
 
     def get_xrefs_to(self, address: Address) -> Iterator[IDAXref]:
@@ -164,26 +213,12 @@ class IDABackend(BackEnd):
             while xref.next_from():
                 yield IDAXref(xref)
 
-    def is_call_instruction(self, address: Address) -> bool:
-        """Check if instruction at address is a call."""
-        insn = idaapi.insn_t()
-        if idaapi.decode_insn(insn, int(address)):
-            return insn.itype in (idaapi.NN_call, idaapi.NN_callfi, idaapi.NN_callni)
-        return False
-
-    def get_instruction_mnemonic(self, address: Address) -> Optional[str]:
-        """Get instruction mnemonic at address."""
-        insn = idaapi.insn_t()
-        if idaapi.decode_insn(insn, address.value):
-            return idaapi.get_instruction_name(insn.itype)
-        return None
-
     def read_bytes(self, address: Address, size: int) -> Optional[bytes]:
         """Read bytes from address."""
         try:
             data = ida_bytes.get_bytes(address.value, size)
             return data if data else None
-        except:
+        except Exception:
             return None
 
     def get_segments(self) -> Iterator[IDASegment]:
