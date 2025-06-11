@@ -23,7 +23,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QFontMetrics
 from PyQt5.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMessageBox,
                              QPushButton, QScrollArea, QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
-from xrefer.core.helpers import log
+from xrefer.gui.helpers import log
 
 from xrefer import backend
 

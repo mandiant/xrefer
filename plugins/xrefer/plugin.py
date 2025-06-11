@@ -15,9 +15,9 @@
 from typing import Optional
 
 import idaapi
-from xrefer.core.action_handlers import *
-from xrefer.core.helpers import *
-from xrefer.core.view import XReferView
+from xrefer.gui.action_handlers import *
+from xrefer.gui.helpers import *
+from xrefer.gui.view import XReferView
 
 initialized: bool = False
 plugin_instance = None

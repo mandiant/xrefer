@@ -19,8 +19,8 @@ import ida_funcs
 import idaapi
 import idc
 from PyQt5 import QtCore, QtGui, QtWidgets
-from xrefer.core.helpers import dump_indirect_calls, handle_entrypoint_selection, log
 from xrefer.core.settings import XReferSettingsDialog
+from xrefer.gui.helpers import dump_indirect_calls, handle_entrypoint_selection, log
 
 
 class PeekViewToggleHandler(idaapi.action_handler_t):

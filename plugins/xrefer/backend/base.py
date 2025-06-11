@@ -1,15 +1,5 @@
 """
 base classes for backend abstraction.
-
-This module provides abstract base classes and supporting types for implementing
-disassembler backends. The design allows XRefer to work with multiple disassemblers
-(IDA Pro, Binary Ninja, etc.) through a unified interface.
-
-Key Components:
-    - Address: Type-safe address wrapper
-    - Function, String, Xref, Segment: Abstract representations
-    - BackEnd: Main backend interface
-    - Error types and enums for type safety
 """
 
 import hashlib
@@ -17,7 +7,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional, Protocol, Tuple, runtime_checkable
+from typing import Optional, Tuple
 
 
 class BackendError(Exception):
@@ -36,11 +26,6 @@ class UnsupportedOperationError(BackendError):
     """Raised when an operation is not supported by the backend."""
 
     pass
-
-
-#
-# Type Enums
-#
 
 
 class FunctionType(Enum):
@@ -75,11 +60,6 @@ class StringEncType(Enum):
     UTF8 = "utf-8"
     UTF16 = "utf-16"
     UTF32 = "utf-32"
-
-
-#
-# Core Types
-#
 
 
 class Address(int):
@@ -138,11 +118,6 @@ class BasicBlock:
 
     def __repr__(self):
         return f"BasicBlock(start={self.start}, end={self.end})"
-
-
-#
-# Abstract Base Classes
-#
 
 
 class Function(ABC):
@@ -204,9 +179,6 @@ class Function(ABC):
 class String(ABC):
     """
     Abstract string representation.
-
-    Provides unified access to strings found in the binary, handling
-    different encodings and storage formats.
     """
 
     MIN_LENGTH = 5  # Minimum length for a string to be considered
@@ -256,9 +228,6 @@ class String(ABC):
 class Xref(ABC):
     """
     Abstract cross-reference representation.
-
-    Represents references between different parts of the binary,
-    such as function calls, data access, or jumps.
     """
 
     def __repr__(self) -> str:
@@ -287,9 +256,6 @@ class Xref(ABC):
 class Segment(ABC):
     """
     Abstract memory segment representation.
-
-    Represents a contiguous region of memory with specific properties
-    (code, data, imports, etc.).
     """
 
     def __repr__(self) -> str:
@@ -324,39 +290,13 @@ class Segment(ABC):
 
 
 #
-# Protocol Definitions
-#
-
-
-@runtime_checkable
-class AnalysisBackend(Protocol):
-    """
-    Protocol defining the minimal interface for analysis backends.
-
-    This can be used for type checking and to ensure backends implement
-    the essential methods needed for analysis.
-    """
-
-    def get_function_at(self, address: Address) -> Optional[Function]:
-        """Get function containing the specified address."""
-        ...
-
-    def functions(self) -> Iterator[Function]:
-        """Iterate over all functions in the binary."""
-        ...
-
-
-#
 # Main Backend Interface
 #
 
 
 class BackEnd(ABC):
     """
-    Abstract interface for disassembler operations.
-
-    This is the main backend interface that all disassembler implementations
-    must implement. It provides a unified API for binary analysis operations.
+    Abstract interface for binary analysis operations.
 
     The backend handles:
     - Function enumeration and analysis
@@ -434,9 +374,7 @@ class BackEnd(ABC):
         except Exception:
             return False
 
-    #
     # Function Analysis
-    #
 
     @abstractmethod
     def functions(self) -> Iterator[Function]:
@@ -465,10 +403,6 @@ class BackEnd(ABC):
         """Alias for get_function_at for backwards compatibility."""
         return self.get_function_at(address)
 
-    #
-    # String Analysis
-    #
-
     @abstractmethod
     def strings(self, min_length: int = String.MIN_LENGTH) -> Iterator[String]:
         """
@@ -482,9 +416,7 @@ class BackEnd(ABC):
         """
         pass
 
-    #
     # Symbol Resolution
-    #
 
     @abstractmethod
     def get_name_at(self, address: Address) -> str:
@@ -512,9 +444,7 @@ class BackEnd(ABC):
         """
         pass
 
-    #
     # Cross-Reference Analysis
-    #
 
     @abstractmethod
     def get_xrefs_to(self, address: Address) -> Iterator[Xref]:
@@ -542,9 +472,7 @@ class BackEnd(ABC):
         """
         pass
 
-    #
     # Memory Access
-    #
 
     @abstractmethod
     def read_bytes(self, address: Address, size: int) -> Optional[bytes]:
@@ -574,10 +502,6 @@ class BackEnd(ABC):
         """
         pass
 
-    #
-    # Segment Analysis
-    #
-
     @abstractmethod
     def get_segments(self) -> Iterator[Segment]:
         """
@@ -600,10 +524,6 @@ class BackEnd(ABC):
             Segment with the specified name, or None if not found
         """
         pass
-
-    #
-    # Import Analysis
-    #
 
     def get_imports(self) -> Iterator[Tuple[Address, str, str]]:
         """

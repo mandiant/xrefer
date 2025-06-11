@@ -14,7 +14,7 @@
 
 from typing import Any, Dict, List
 
-from xrefer.core.helpers import log
+from xrefer.gui.helpers import log
 from xrefer.llm.base import ModelConfig, ModelType
 from xrefer.llm.models import GoogleModel, OpenAIModel
 from xrefer.llm.prompts import ArtifactAnalyzerPrompt, CategorizerPrompt, ClusterAnalyzerPrompt, PromptType

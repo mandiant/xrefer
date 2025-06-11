@@ -18,7 +18,8 @@ from typing import Dict, List, Optional, Set, Tuple
 import idc
 import networkx as nx
 from networkx import NetworkXError
-from xrefer.core.helpers import find_cluster_analysis, log
+from xrefer.core.helpers import find_cluster_analysis
+from xrefer.gui.helpers import log
 
 
 class FunctionalCluster:

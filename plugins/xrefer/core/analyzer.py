@@ -35,8 +35,8 @@ import idc
 from PyQt5.QtWidgets import QDialog
 from xrefer.backend import Address, BackEnd, FunctionType, get_current_backend
 from xrefer.core.clusters import ClusterManager, FunctionalCluster
-from xrefer.core.helpers import create_xrefs_table_colored, enrich_string_data, log, log_elapsed_time
 from xrefer.core.settings import MissingFilesDialog, XReferSettingsManager
+from xrefer.gui.helpers import create_xrefs_table_colored, enrich_string_data, log, log_elapsed_time
 from xrefer.lang import get_language_object
 from xrefer.llm.artifact_analyzer import ArtifactAnalyzer
 from xrefer.llm.base import ModelConfig, ModelType
@@ -1627,7 +1627,7 @@ class XRefer:
             - Repopulates function context tables
             - Saves updated analysis state
         """
-        image_base = self._backend.image_base()
+        image_base = self._backend.image_base
         if image_base == self.image_base:
             if manual:
                 log(f"Imagebase already synced with IDB imagebase: 0x{image_base:x}")

@@ -30,15 +30,16 @@ import idautils
 import idc
 import networkx as nx
 from PyQt5 import QtCore, QtGui, QtWidgets
-from xrefer.core.action_handlers import ArtifactAnalysisHandler, ClusterEverythingHandler, ClusterInterestingFunctionsHandler, CopyInterestingStringsHandler, PeekViewToggleHandler
 from xrefer.core.analyzer import XRefer
-from xrefer.core.help import ContextHelp
-from xrefer.core.helpers import (CollapseEventFilter, CollapseIndicator, FocusEventFilter, KeyEventFilter, create_cluster_relationship_graph, create_colored_table_from_cols,
-                                 create_interesting_artifacts_table, create_xrefs_table_colored, draw_cluster_hierarchy, find_cluster_analysis, get_addr_from_text, help_text, is_windows_or_linux, log,
-                                 longest_line_length, parse_cluster_id, patch_asciinet, prepare_interesting_artifacts_table_rows, register_popup_action, remove_non_displayable, set_focus_to_code,
-                                 set_xref_coverage_color, strip_color_codes, wrap_substring_with_string)
+from xrefer.core.helpers import (find_cluster_analysis, get_addr_from_text, is_windows_or_linux, longest_line_length, parse_cluster_id, remove_non_displayable, strip_color_codes,
+                                 wrap_substring_with_string)
 from xrefer.core.settings import XReferSettingsManager
-from xrefer.core.state_machine import XReferStateMachine
+from xrefer.gui.action_handlers import ArtifactAnalysisHandler, ClusterEverythingHandler, ClusterInterestingFunctionsHandler, CopyInterestingStringsHandler, PeekViewToggleHandler
+from xrefer.gui.help import ContextHelp
+from xrefer.gui.helpers import (CollapseEventFilter, CollapseIndicator, FocusEventFilter, KeyEventFilter, create_cluster_relationship_graph, create_colored_table_from_cols,
+                                create_interesting_artifacts_table, create_xrefs_table_colored, draw_cluster_hierarchy, find_cluster_analysis, help_text, log, patch_asciinet,
+                                prepare_interesting_artifacts_table_rows, register_popup_action, set_focus_to_code, set_xref_coverage_color)
+from xrefer.gui.state_machine import XReferStateMachine
 from xrefer.legacy.shim import format_ribbon
 
 

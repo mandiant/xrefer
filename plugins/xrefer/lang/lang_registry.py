@@ -18,7 +18,7 @@ import inspect
 import os
 from typing import Any, List, Type
 
-from xrefer.core.helpers import log
+from xrefer.gui.helpers import log
 from xrefer.lang.lang_base import LanguageBase
 from xrefer.lang.lang_default import LangDefault
 

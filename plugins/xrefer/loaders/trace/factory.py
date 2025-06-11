@@ -14,7 +14,7 @@
 
 from typing import Any, Dict, List, Optional, Type
 
-from xrefer.core.helpers import log
+from xrefer.gui.helpers import log
 from xrefer.loaders.trace.base import BaseTraceParser
 from xrefer.loaders.trace.cape_parser import CapeTraceParser
 from xrefer.loaders.trace.vmray_parser import VMRayTraceParser

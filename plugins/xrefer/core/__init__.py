@@ -12,4 +12,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import action_handlers, analyzer, clusters, help, helpers, settings, state_machine, view
+from ..gui import help, helpers, state_machine, view
+from . import action_handlers, analyzer, clusters, settings

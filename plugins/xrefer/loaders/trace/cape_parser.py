@@ -18,7 +18,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 import ida_lines
-from xrefer.core.helpers import colorize_api_call, log
+from xrefer.gui.helpers import colorize_api_call, log
 from xrefer.loaders.trace import BaseTraceParser
 
 

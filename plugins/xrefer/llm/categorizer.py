@@ -14,7 +14,7 @@
 
 from typing import Dict, List, Tuple
 
-from xrefer.core.helpers import log
+from xrefer.gui.helpers import log
 from xrefer.llm.base import ModelConfig
 from xrefer.llm.processor import LLMProcessor
 from xrefer.llm.prompts import PromptType
