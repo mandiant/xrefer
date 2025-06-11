@@ -19,7 +19,7 @@ import ida_funcs
 import idaapi
 import idc
 from PyQt5 import QtCore, QtGui, QtWidgets
-from xrefer.core.settings import XReferSettingsDialog
+from xrefer.gui.settings import XReferSettingsDialog
 from xrefer.gui.helpers import dump_indirect_calls, handle_entrypoint_selection, log
 
 
@@ -634,6 +634,8 @@ class ClusterRenameHandler(idaapi.action_handler_t):
             return True
         except Exception as e:
             log(f"Error during cluster-based renaming: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return False
 
     def update(self, ctx: Any) -> int:
@@ -698,7 +700,7 @@ class DumpIndirectCallsHandler(idaapi.action_handler_t):
         """
         Handle indirect calls dump action.
 
-        Creates a file named <idb_path>_indirect_calls.txt containing
+        Creates a file named <sample>_indirect_calls.txt containing
         all identified indirect call sites.
 
         Args:
@@ -707,7 +709,7 @@ class DumpIndirectCallsHandler(idaapi.action_handler_t):
         Returns:
             bool: True after dump is complete
         """
-        path: str = f"{idc.get_idb_path()}_indirect_calls.txt"
+        path: str = f"{idaapi.get_input_file_path()}_indirect_calls.txt"
         dump_indirect_calls(path)
         return True
 

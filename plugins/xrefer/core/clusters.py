@@ -14,7 +14,7 @@
 
 from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
-
+import ida_idaapi
 import idc
 import networkx as nx
 from networkx import NetworkXError
@@ -155,7 +155,7 @@ class FunctionalCluster:
             Format function address and name with center alignment.
             """
             addr_str = f"0x{addr:x}"
-            name = idc.get_func_name(addr)
+            name = idc.get_func_name(ida_idaapi.ea_t(addr))
 
             if len(name) > max_name_length:
                 name = name[: max_name_length - 2] + ".."

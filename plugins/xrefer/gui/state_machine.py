@@ -501,8 +501,10 @@ def safe_transition(func):
             attempted_transition = getattr(func, "name", getattr(func, "__name__", "Unknown"))
             # log(f"[XReferStateMachine] Transition not allowed: {attempted_transition} from {current_state}")
         except Exception as e:
-            # log(f"[XReferStateMachine] Unexpected error during state transition: {str(e)}")
-            pass
+            from xrefer.gui.helpers import log
+
+            log(f"[XReferStateMachine] Unexpected error during state transition: {str(e)}")
+            return False
 
         return False
 

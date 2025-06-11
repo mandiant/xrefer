@@ -459,7 +459,6 @@ def dump_indirect_calls(path: str) -> None:
     Args:
         path (str): Output file path for the indirect calls list
     """
-    print(f"Dumping indirect calls to: {path}")
     from xrefer.backend import get_indirect_calls
 
     indirect_calls = get_indirect_calls()

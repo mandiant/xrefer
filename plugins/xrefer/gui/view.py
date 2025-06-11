@@ -20,6 +20,7 @@ from collections import OrderedDict, defaultdict
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import asciinet
+import ida_idaapi
 import ida_bytes
 import ida_funcs
 import ida_idp
@@ -1413,12 +1414,13 @@ class XReferView(idaapi.simplecustviewer_t):
         """
         Extract item content from a table cell with debug output.
         """
-        cell_match: Optional[re.Match] = self.cell_regex.search(line)
+        if line:
+            cell_match: Optional[re.Match] = self.cell_regex.search(line)
 
-        if cell_match:
-            xref_cell: str = cell_match.group(1)
-            xref_item: str = xref_cell.replace("\x04", "").strip()
-            return xref_cell, xref_item
+            if cell_match:
+                xref_cell: str = cell_match.group(1)
+                xref_item: str = xref_cell.replace("\x04", "").strip()
+                return xref_cell, xref_item
 
         return None, None
 
@@ -2618,6 +2620,7 @@ class XReferView(idaapi.simplecustviewer_t):
         except Exception as e:
             log(f"Error drawing cluster graph: {str(e)}")
             self.AddLine(f"{self.INDENT}Error: {str(e)}")
+            raise e
 
     def _print_cluster_header(self, cluster: "FunctionalCluster", cluster_data: Dict) -> None:
         """Print cluster header with wrapped text."""
@@ -2719,7 +2722,7 @@ class XReferView(idaapi.simplecustviewer_t):
         """Print xrefs to cluster root node with comprehensive membership information."""
         # Group xrefs by function
         func_xrefs = defaultdict(list)
-        for xref in idautils.XrefsTo(cluster.root_node):
+        for xref in idautils.XrefsTo(ida_idaapi.ea_t(cluster.root_node)):
             if ida_bytes.is_code(ida_bytes.get_full_flags(xref.frm)):
                 func = ida_funcs.get_func(xref.frm)
                 if func:
@@ -2843,7 +2846,7 @@ class XReferView(idaapi.simplecustviewer_t):
 
         # Add xrefs node before root node
         xref_addrs = set()
-        for xref in idautils.XrefsTo(cluster.root_node):
+        for xref in idautils.XrefsTo(ida_idaapi.ea_t(cluster.root_node)):
             # Only include code references
             if ida_bytes.is_code(ida_bytes.get_full_flags(xref.frm)):
                 xref_addrs.add(xref.frm)
