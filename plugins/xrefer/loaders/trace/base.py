@@ -17,6 +17,7 @@ import collections
 from abc import ABC, abstractmethod
 from typing import Any, DefaultDict, Dict, List
 
+import ida_funcs
 import ida_nalt
 import ida_ua
 import idaapi
@@ -85,9 +86,9 @@ class BaseTraceParser(ABC):
         if ida_ua.decode_prev_insn(cmd, return_addr):
             if cmd.ea != idc.BADADDR:
                 # Get the function of the return address
-                ret_func = idaapi.get_func(return_addr)
+                ret_func = ida_funcs.get_func(return_addr)
                 # Get the function of the call address
-                call_func = idaapi.get_func(cmd.ea)
+                call_func = ida_funcs.get_func(cmd.ea)
                 # Check if both addresses belong to the same function
                 if ret_func is not None and call_func is not None:
                     if ret_func == call_func:
@@ -104,7 +105,7 @@ class BaseTraceParser(ABC):
         Returns:
             int: Start address of containing function, or addr if not in function
         """
-        func = idaapi.get_func(addr)
+        func = ida_funcs.get_func(addr)
         return func.start_ea if func else addr
 
     def get_event_data_key(self, event_data: Dict[str, Any], api_name: str) -> tuple:

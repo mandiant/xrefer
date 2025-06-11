@@ -11,8 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import idautils
-import idc
+from xrefer.backend import FunctionType
 from xrefer.lang.lang_base import LanguageBase
 
 
@@ -24,8 +23,8 @@ class LangDefault(LanguageBase):
     other language-specific analyzers.
     """
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, backend=None):
+        super().__init__(backend=backend)
         self.id = "lang_default"
         self._process_lib_refs()
 
@@ -48,9 +47,7 @@ class LangDefault(LanguageBase):
          - 1: The category number as per the discussed format.
          - 'lib': The fallback category to be used if LLM-based categorization is not applied.
         """
-        for func_ea in idautils.Functions():
-            func_flags = idc.get_func_flags(func_ea)
-            if func_flags != -1 and (func_flags & idc.FUNC_LIB) != 0:
-                func_name = idc.get_func_name(func_ea)
+        for fn in self.backend.functions():
+            if fn.type == FunctionType.LIBRARY:
                 # Store the lib ref: address, lib_name, category=1, fallback_category='lib'
-                self.lib_refs.append((func_ea, func_name, 1, "uncategorized"))
+                self.lib_refs.append((fn.start, fn.name, 1, "uncategorized"))

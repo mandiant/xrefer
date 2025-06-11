@@ -31,11 +31,10 @@ import ida_bytes
 import ida_idp
 import ida_kernwin
 import ida_lines
+import ida_nalt
 import ida_registry
-import ida_segment
 import ida_ua
 import idaapi
-import idautils
 import idc
 import networkx as nx
 import requests
@@ -788,22 +787,14 @@ def dump_indirect_calls(path: str) -> None:
     Args:
         path (str): Output file path for the indirect calls list
     """
-    indirect_calls = ""
-    for segea in idautils.Segments():
-        for funcea in idautils.Functions(segea, idc.get_segm_end(segea)):
-            for startea, endea in idautils.Chunks(funcea):
-                for head in idautils.Heads(startea, endea):
-                    if ida_bytes.is_code(ida_bytes.get_full_flags(head)):
-                        if idaapi.is_call_insn(head):
-                            insn = idaapi.insn_t()
-                            idaapi.decode_insn(insn, head)
-                            operand = insn.ops[0]
-                            if operand.type in (idaapi.o_phrase, idaapi.o_displ, idaapi.o_reg):
-                                indirect_calls += f"\n0x{head:x}"
+    print(f"Dumping indirect calls to: {path}")
+    from xrefer.backend import get_indirect_calls
+
+    indirect_calls = get_indirect_calls()
 
     if indirect_calls:
         with open(path, "w") as outfile:
-            outfile.write(indirect_calls)
+            outfile.write("\n".join(indirect_calls))
         log(f"Dumped indirect calls to: {path}")
 
 
@@ -1901,28 +1892,6 @@ def is_ida_default_light_theme_enabled() -> Optional[bool]:
                 return False
             else:
                 return True
-    return None
-
-
-def get_segment_by_name(segment_name: str) -> Optional[ida_segment.segment_t]:
-    """
-    Get IDA segment object by its name.
-
-    Case-insensitive search for segment with specified name.
-
-    Args:
-        segment_name (str): Name of segment to find
-
-    Returns:
-        Optional[ida_segment.segment_t]: Segment object if found, None otherwise
-    """
-    curr = ida_segment.get_first_seg()
-    last = ida_segment.get_last_seg()
-
-    while curr.start_ea != last.start_ea:
-        if ida_segment.get_segm_name(curr).lower() == segment_name.lower():
-            return curr
-        curr = ida_segment.get_next_seg(curr.start_ea)
     return None
 
 

@@ -15,13 +15,12 @@
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
 
-import ida_bytes
 import ida_entry
-import ida_nalt
 import ida_ua
 import idaapi
 import idautils
 import idc
+from xrefer.backend import BackEnd, get_current_backend
 
 
 class LanguageBase(ABC):
@@ -36,18 +35,17 @@ class LanguageBase(ABC):
         strings (Dict[int, List[str]]): Dictionary mapping addresses to string content
         lib_refs (List[Tuple[int, str, int]]): List of library references
         user_xrefs (List[Tuple[int, int]]): List of user-defined cross-references
-        ep_name (str): Name of entry point function
         ep_annotation (str): Annotation for entry point function
         id (str): Identifier for language analyzer
     """
 
-    def __init__(self):
+    def __init__(self, backend: Optional[BackEnd] = None):
         """Initialize common attributes."""
+        self.backend = backend or get_current_backend()
         self.entry_point = self.get_entry_point()
         self.strings = self.get_strings()
         self.lib_refs = []
         self.user_xrefs = []
-        self.ep_name = idc.get_name(self.entry_point)
         self.ep_annotation = ""
         self.id = "base"
 
@@ -135,8 +133,7 @@ class LanguageBase(ABC):
 
         return None
 
-    @staticmethod
-    def get_strings(filters: Optional[List[str]] = None) -> Dict[int, List[str]]:
+    def get_strings(self, filters: Optional[List[str]] = None) -> Dict[int, List[str]]:
         """
         Extract strings from the IDB with optional filtering.
 
@@ -156,16 +153,9 @@ class LanguageBase(ABC):
             filters = []
 
         str_dict = {}
-        strings = idautils.Strings(False)
-        strings.setup(strtypes=[ida_nalt.STRTYPE_C, ida_nalt.STRTYPE_C_16, ida_nalt.STRTYPE_C_32])
-
-        for s in strings:
-            str_type = idc.get_str_type(s.ea)
-            if str_type is not None:
-                contents = ida_bytes.get_strlit_contents(s.ea, -1, str_type)
-                if not any(f in contents for f in filters):
-                    str_dict[s.ea] = [contents.decode("utf-8")]
-
+        for s in self.backend.strings():
+            if not any(f in s.content for f in filters):
+                str_dict[s.address.value] = [s.content]
         return str_dict
 
     @staticmethod

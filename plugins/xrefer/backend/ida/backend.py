@@ -3,6 +3,7 @@
 from typing import Iterator, Optional, Tuple
 
 import ida_bytes
+import ida_entry
 import ida_funcs
 import ida_nalt
 import ida_segment
@@ -11,14 +12,14 @@ import idaapi
 import idautils
 import idc
 
-from ..base import BackEnd, BasicBlock, Function, Segment, String, Xref
-from ..types import Address, FunctionType, XrefType
+from ..base import Address, BackEnd, BackendError, BasicBlock, Function, FunctionType, Segment, String, StringEncType, Xref, XrefType
 
 
 class IDAFunction(Function):
     """IDA function wrapper."""
 
     def __init__(self, ida_func: "ida_funcs.func_t"):
+        """Initialize with IDA function object."""
         self._func = ida_func
         self._name = None
         self._function_type = None
@@ -90,6 +91,7 @@ class IDAString(String):
     def __init__(self, string_info):
         self._info = string_info
         self._content = None
+        self._encoding = None
 
     @property
     def address(self) -> Address:
@@ -111,6 +113,19 @@ class IDAString(String):
     @property
     def length(self) -> int:
         return self._info.length
+
+    @property
+    def encoding(self) -> StringEncType:
+        """Get string encoding type (cached for performance)."""
+        if self._encoding is None:
+            str_type = idc.get_str_type(self._info.ea)
+            enc_map = {
+                ida_nalt.STRTYPE_C: StringEncType.ASCII,
+                ida_nalt.STRTYPE_C_16: StringEncType.UTF16,
+                ida_nalt.STRTYPE_C_32: StringEncType.UTF32,
+            }
+            self._encoding = enc_map.get(str_type, StringEncType.UTF8)
+        return self._encoding
 
 
 class IDAXref(Xref):
@@ -169,12 +184,24 @@ class IDABackend(BackEnd):
     """IDA Pro backend implementation."""
 
     def __init__(self):
+        """Initialize IDA backend with database validation."""
+        super().__init__()
         if not idaapi.get_default_radix():
-            raise RuntimeError("IDA database not loaded")
+            raise BackendError("IDA database not loaded")
 
-    # @property # TODO: I thought property is better, but pickle doesn't allow it. Refactor when drop pickle support.
-    def image_base(self):
-        return idaapi.get_imagebase()
+    @property
+    def image_base(self) -> Address:
+        """Get IDA image base address."""
+        return Address(idaapi.get_imagebase())
+
+    def _path_impl(self) -> str:
+        """Get the path of the currently opened IDA database."""
+        input_path = idaapi.get_input_file_path()
+        return input_path if input_path else ""
+
+    #
+    # Function Analysis
+    #
 
     def functions(self) -> Iterator[IDAFunction]:
         """Iterate over all functions."""
@@ -197,8 +224,25 @@ class IDABackend(BackEnd):
             if idc.get_str_type(s.ea) is not None:
                 yield IDAString(s)
 
+    #
+    # Symbol Resolution
+    #
+
+    def get_name_at(self, address: Address) -> str:
+        """Get symbol name at the specified address."""
+        return idc.get_name(int(address)) or ""
+
+    def get_address_for_name(self, name: str) -> Optional[Address]:
+        """Get address for the specified symbol name."""
+        ea = idc.get_name_ea_simple(name)
+        return None if ea == idaapi.BADADDR else Address(ea)
+
+    #
+    # Cross-Reference Analysis
+    #
+
     def get_xrefs_to(self, address: Address) -> Iterator[IDAXref]:
-        """Get references to address."""
+        """Get all references TO the specified address."""
         xref = ida_xref.xrefblk_t()
         if xref.first_to(address.value, ida_xref.XREF_ALL):
             yield IDAXref(xref)
@@ -206,7 +250,7 @@ class IDABackend(BackEnd):
                 yield IDAXref(xref)
 
     def get_xrefs_from(self, address: Address) -> Iterator[IDAXref]:
-        """Get references from address."""
+        """Get all references FROM the specified address."""
         xref = ida_xref.xrefblk_t()
         if xref.first_from(address.value, ida_xref.XREF_ALL):
             yield IDAXref(xref)
@@ -221,6 +265,15 @@ class IDABackend(BackEnd):
         except Exception:
             return None
 
+    def instructions(self, start: Address, end: Address) -> Iterator[Address]:
+        """Iterate over instruction addresses in the specified range."""
+        for ea in idautils.Heads(int(start), int(end)):
+            yield Address(ea)
+
+    #
+    # Segment Analysis
+    #
+
     def get_segments(self) -> Iterator[IDASegment]:
         """Iterate over all segments."""
         for seg_ea in idautils.Segments():
@@ -233,37 +286,63 @@ class IDABackend(BackEnd):
         seg = ida_segment.get_segm_by_name(name)
         return IDASegment(seg) if seg else None
 
-    def get_imports(self) -> Iterator[Tuple[Address, str, str]]:
-        """Get imported functions as (name, address) pairs."""
+    #
+    # Import/Export Analysis
+    #
+
+    def _get_raw_imports(self) -> Iterator[Tuple[Address, str, str]]:
+        """Get raw import data from IDA's import tables."""
         imports = []
+
         for module_idx in range(idaapi.get_import_module_qty()):
             module_name = str(idaapi.get_import_module_name(module_idx))
             if not module_name:
                 continue
 
-            clean_module_name = module_name.lower().split("/")[-1]
-
             def collect_import(ea: int, name: str, ordinal: int) -> bool:
-                final_name = name
-                final_module = clean_module_name
-
-                if "@@" in name:
-                    parts = name.split("@@")
-                    final_name = parts[0]
-                    if len(parts) > 1 and "_" in parts[1]:
-                        final_module = "_".join(parts[1].split("_")[:-1])
-                    elif len(parts) > 1:
-                        final_module = parts[1]
-
-                full_name = f"{final_module}.{final_name}"
-                imports.append((Address(ea), full_name, final_module))
+                """Callback to collect import information."""
+                imports.append((Address(ea), name, module_name))
                 return True
 
             idaapi.enum_import_names(module_idx, collect_import)
-        for import_addr, import_name, import_module in imports:
-            yield (import_addr, import_name, import_module)
 
-    def _path_impl(self) -> str:
-        """Get the path of the currently opened IDA database."""
-        input_path = idaapi.get_input_file_path()
-        return input_path if input_path else ""
+        for import_data in imports:
+            yield import_data
+
+    def get_exports(self) -> Iterator[tuple[str, Address]]:
+        """Get exported functions from the binary."""
+        entry_qty = ida_entry.get_entry_qty()
+        for i in range(entry_qty):
+            ordinal = ida_entry.get_entry_ordinal(i)
+            ea = ida_entry.get_entry(ordinal)
+            name = ida_entry.get_entry_name(ordinal)
+
+            if ea != idaapi.BADADDR and name:
+                yield (name, Address(ea))
+
+    # def get_exports(self) -> Iterator[tuple[str, Address]]:
+    #     """Get exported functions."""
+    #     entry_qty = ida_entry.get_entry_qty()
+    #     for i in range(entry_qty):
+    #         ordinal = ida_entry.get_entry_ordinal(i)
+    #         ea = ida_entry.get_entry(ordinal)
+    #         name = ida_entry.get_entry_name(ordinal)
+
+    #         if ea != idaapi.BADADDR and name:
+    #             yield (name, Address(ea))
+
+    #
+    # User Annotations
+    #
+
+    def _add_user_xref_impl(self, source: Address, target: Address) -> None:
+        """Add user-defined cross reference in IDA."""
+        ida_xref.add_cref(int(source), int(target), idc.XREF_USER)
+
+    def _set_comment_impl(self, address: Address, comment: str) -> None:
+        """Set comment at address in IDA."""
+        idc.set_cmt(int(address), comment, 0)
+
+    def _set_function_comment_impl(self, address: Address, comment: str) -> None:
+        """Set function comment in IDA."""
+        idc.set_func_cmt(int(address), comment, 0)

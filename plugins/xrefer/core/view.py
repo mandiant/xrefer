@@ -3470,7 +3470,7 @@ class XReferView(idaapi.simplecustviewer_t):
         self.ClearLines()
         self.print_ribbon()
 
-        if idaapi.get_func(self.func_ea):
+        if ida_funcs.get_func(self.func_ea):
             if self.func_ea in self.xrefer_obj.global_xrefs:
                 self.print_cluster_membership(self.func_ea)
                 self.draw_function_context_tables(self.func_ea)
@@ -3928,7 +3928,7 @@ class XReferView(idaapi.simplecustviewer_t):
             simplified_nodes = set()
 
             for xref in xrefs:
-                xref_func: ida_funcs.func_t = idaapi.get_func(xref)
+                xref_func: ida_funcs.func_t = ida_funcs.get_func(xref)
                 if not xref_func:
                     continue
 

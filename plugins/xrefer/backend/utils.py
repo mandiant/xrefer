@@ -1,13 +1,14 @@
 from typing import List
 
-from . import Backend
-from .base import BackEnd
-from .types import Address
+from .base import Address, BackEnd
 
 
 def sample_path() -> str:
-    """Return a sample path for the backend."""
-    return Backend().path
+    """Return a sample path for the active backend."""
+    from . import get_current_backend
+
+    backend = get_current_backend()
+    return backend.path
 
 
 def _dump_indirect_calls_ida():
@@ -52,3 +53,50 @@ def _dump_indirect_calls_bn(bv):
                         indirect_calls.append(f"0x{addr:x}")
     return indirect_calls
 
+
+class Mapping:
+    """A utility class for mapping addresses to symbols and vice-versa."""
+
+    def __init__(self, backend: BackEnd):
+        """
+        Initializes the Mapping utility.
+
+        Args:
+            backend: An instance of a backend (e.g., IDABackend or BNBackend).
+        """
+        self._backend = backend
+
+    def addr2sym(self, address: Address) -> List[str]:
+        """
+        Resolves an address to a list of symbol names.
+
+        Args:
+            address: The address to resolve.
+
+        Returns:
+            A list of symbol names, which may be empty if no symbols are found.
+        """
+        symbols = []
+        func = self._backend.get_function_at(address)
+        if func:
+            symbols.append(func.name)
+
+        # In some cases, a name might exist at an address without a function.
+        name = self._backend.get_name_at(address)
+        if name and name not in symbols:
+            symbols.append(name)
+
+        return symbols
+
+    def sym2addr(self, symbol: str) -> List[Address]:
+        """
+        Resolves a symbol name to a list of addresses.
+
+        Args:
+            symbol: The symbol name to resolve.
+
+        Returns:
+            A list of addresses, which may be empty if the symbol is not found.
+        """
+        address = self._backend.get_address_for_name(symbol)
+        return [address] if address else []

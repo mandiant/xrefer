@@ -17,13 +17,6 @@ import sys
 
 plugin_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(plugin_dir, "xrefer"))
-sys.path.append(os.path.join(plugin_dir, "xrefer", "core"))
-sys.path.append(os.path.join(plugin_dir, "xrefer", "lang"))
-sys.path.append(os.path.join(plugin_dir, "xrefer", "legacy"))
-sys.path.append(os.path.join(plugin_dir, "xrefer", "llm"))
-sys.path.append(os.path.join(plugin_dir, "xrefer", "llm", "templates"))
-sys.path.append(os.path.join(plugin_dir, "xrefer", "loaders"))
-sys.path.append(os.path.join(plugin_dir, "xrefer", "loaders", "trace"))
 
 from xrefer.plugin import XReferPlugin
 

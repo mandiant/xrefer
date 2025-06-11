@@ -15,6 +15,7 @@
 import os
 from typing import Any
 
+import ida_funcs
 import idaapi
 import idc
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -557,7 +558,7 @@ class AddEntrypointHandler(idaapi.action_handler_t):
 
         current_ea: int = idc.get_screen_ea()
         if current_ea != idc.BADADDR:
-            current_func = idaapi.get_func(current_ea)
+            current_func = ida_funcs.get_func(current_ea)
             if current_func:
                 custom_ep: int = current_func.start_ea
                 return handle_entrypoint_selection(plugin_instance, custom_ep)

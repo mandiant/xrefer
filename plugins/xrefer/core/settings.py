@@ -27,18 +27,23 @@ from xrefer.core.helpers import log
 
 from xrefer import backend
 
+PathType = str
+SamplePaths = Dict[str, Dict[PathType, str]]  # (current_idb: {path_type: path})
+ExclusionData = Dict[str, List[str]]  # (category: [exclusion_items])
+
+
 class XReferSettingsManager:
     """
     Manages persistent storage and retrieval of XRefer settings.
 
     Handles reading/writing settings files, resolving default paths,
-    and managing IDB-specific settings.
+    and managing sample-specific settings.
 
     Attributes:
         settings_dir (str): Directory for storing XRefer settings
         settings_file (str): Path to main settings JSON file
         exclusion_file (str): Path to exclusions JSON file
-        idb_specific_paths (Set[str]): Set of path settings that can be customized per IDB
+        idb_specific_paths (Set[str]): Set of path settings that can be customized per sample
         current_idb (str): Path of current IDB file
     """
 
@@ -137,8 +142,8 @@ class XReferSettingsManager:
                     if settings["use_default_paths"][path_type]:
                         settings["paths"][path_type] = self.resolve_default_path(path_type)
                     elif path_type in self.idb_specific_paths:
-                        # Use IDB-specific path if available and not using default
-                        idb_paths = settings.get("idb_specific_paths", {})
+                        # Use sample-specific path if available and not using default
+                        idb_paths: SamplePaths = settings.get("idb_specific_paths", {})
                         idb_settings = idb_paths.get(self.current_idb, {})
                         if path_type in idb_settings:
                             settings["paths"][path_type] = idb_settings[path_type]
@@ -231,10 +236,10 @@ class XReferSettingsManager:
             except Exception as e:
                 log(f"Error cleaning up temp file: {str(e)}")
 
-    def get_default_exclusions(self):
+    def get_default_exclusions(self) -> ExclusionData:
         return {"apis": [], "libs": [], "strings": [], "capa": []}
 
-    def load_exclusions(self):
+    def load_exclusions(self) -> ExclusionData:
         if not os.path.exists(self.exclusion_file):
             return self.get_default_exclusions()
         try:
@@ -243,7 +248,7 @@ class XReferSettingsManager:
         except:
             return self.get_default_exclusions()
 
-    def save_exclusions(self, exclusions):
+    def save_exclusions(self, exclusions: ExclusionData) -> None:
         with open(self.exclusion_file, "w") as f:
             json.dump(exclusions, f, indent=4)
 
@@ -587,7 +592,11 @@ class XReferSettingsDialog(QDialog):
         self.original_exclusions = copy.deepcopy(self.exclusions)
 
         self.llm_models = {
-            "google": ["gemini-1.5-pro"]  # currently gemini-1.5-pro provides the most accuracy with cluster analysis
+            "google": [
+                "gemini-1.5-pro",
+                "gemini-2.5-flash-preview-05-20",
+                "gemini-2.5-pro-preview-05-06",
+            ]  # currently gemini-1.5-pro provides the most accuracy with cluster analysis
             # "openai": ["gpt-4o-mini", "gpt-4o"]  # openai models have much smaller (128K) context windows, that are not ideal for cluster analysis of large binaries. disabling these models for the time being
         }
 
@@ -937,7 +946,7 @@ class XReferSettingsDialog(QDialog):
             settings["paths"][path_type] = self.path_widgets[path_type]["edit"].text()
 
         # Get current exclusions
-        exclusions = {list_type: list_widget.get_items() for list_type, list_widget in self.exclusion_lists.items()}
+        exclusions: ExclusionData = {list_type: list_widget.get_items() for list_type, list_widget in self.exclusion_lists.items()}
 
         # Check if exclusions have changed
         exclusions_changed = False
