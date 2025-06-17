@@ -58,6 +58,8 @@ def get_language_object() -> Any:
                 return lang_obj
         except Exception as e:
             log(f"Error instantiating {lang_class.__name__}: {e}")
+            import traceback
+            traceback.print_exc()
 
     # Return default as fallback
     return LangDefault()

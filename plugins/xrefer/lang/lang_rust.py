@@ -27,7 +27,7 @@ import idaapi
 import idautils
 import idc
 from tabulate import tabulate
-from xrefer.core.helpers import filter_null_string
+from xrefer.core.helpers import filter_null_string, normalize_path
 from xrefer.gui.helpers import log
 from xrefer.lang.lang_base import LanguageBase
 from xrefer.lang.lang_default import LangDefault

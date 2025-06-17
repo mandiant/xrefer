@@ -35,7 +35,7 @@ import idc
 from PyQt5.QtWidgets import QDialog
 from xrefer.backend import Address, BackEnd, FunctionType, get_current_backend
 from xrefer.core.clusters import ClusterManager, FunctionalCluster
-from xrefer.core.settings import MissingFilesDialog, XReferSettingsManager
+from xrefer.core.settings import XReferSettingsManager
 from xrefer.gui.helpers import create_xrefs_table_colored, enrich_string_data, log, log_elapsed_time
 from xrefer.lang import get_language_object
 from xrefer.llm.artifact_analyzer import ArtifactAnalyzer
@@ -305,7 +305,8 @@ class XRefer:
                 category_index = self.categories["libs"][lib_ref[1]]
                 category = self.categories["lib_categories"][category_index]
                 entity = (category, lib_ref[1], EntityType.LIBRARY)
-            except:
+            except (KeyError, IndexError) as e:
+                log(f"Warning: Failed to categorize library {lib_ref[1]}: {e}")
                 entity = (lib_ref[3], lib_ref[1], EntityType.LIBRARY)
             e_index = self.set_and_get_entity_index(entity)
             self.lib_refs.append(Reference(lib_ref[0], e_index, lib_ref[2]))
@@ -463,7 +464,7 @@ class XRefer:
 
         except Exception as e:
             log(f"Error during interesting artifact analysis: {str(e)}")
-            self.malicious_indicators = set()
+            self.interesting_artifacts = set()
 
     def process_api_trace(self) -> None:
         """
@@ -525,7 +526,8 @@ class XRefer:
                         category_index = self.categories["apis"][full_api_name]
                         category = self.categories["api_categories"][category_index]
                         entity = (category, full_api_name, EntityType.IMPORT)
-                    except:
+                    except (KeyError, IndexError) as e:
+                        log(f"Warning: Failed to categorize API {full_api_name}: {e}")
                         entity = (module_name, full_api_name, EntityType.IMPORT)
 
                     entity_index = self.set_and_get_entity_index(entity)
@@ -573,7 +575,7 @@ class XRefer:
                         else:
                             try:
                                 self.caller_xrefs_cache[start][ref.to].add(ref.frm)
-                            except:
+                            except KeyError:
                                 self.caller_xrefs_cache[start][ref.to] = {ref.frm}
 
     def get_user_xrefs(self, user_xrefs_path: str) -> List[Tuple[int, int]]:
@@ -654,7 +656,8 @@ class XRefer:
                 category_index = self.categories["apis"][name]
                 category = self.categories["api_categories"][category_index]
                 entity = (category, name, EntityType.IMPORT)
-            except:
+            except (KeyError, IndexError) as e:
+                log(f"Warning: Failed to categorize import {name}: {e}")
                 entity = (module_name, name, EntityType.IMPORT)
             self.entities.append(entity)
             self.imports.append(Reference(int(ea), len(self.entities) - 1, EntityType.IMPORT))
@@ -742,16 +745,16 @@ class XRefer:
             # print(f"{idc.func_contains(addr, addr)}, map_refs_to_leaf_functions, {addr = :#x}")
             # print(f"INVESTIGATE func_contains trick: {addr:#x}, {self._backend.get_function_at(addr)}")
 
-            for xref in self._backend.get_xrefs_to(Address(addr)):  # TODO: TypeError: in method 'get_func_name', argument 2 of type 'ea_t'
+            for xref in self._backend.get_xrefs_to(Address(addr)):
                 source_fn = self._backend.get_function_at(xref.source)
                 if source_fn and xref.source in source_fn:
                     # Cross-reference is within a function
                     if xref._xref.type == ida_xref.fl_F:
                         # Ordinary flow reference, use the original address
-                        self.mapped_refs.append(Reference(int(addr), item, type))  # TODO: TypeError: in method 'get_func_name', argument 2 of type 'ea_t'
+                        self.mapped_refs.append(Reference(int(addr), item, type))
                     # If not a library function, we map from the caller
                     elif source_fn.type != FunctionType.LIBRARY:
-                        self.mapped_refs.append((int(xref.source), item, type))  # TODO: TypeError: in method 'get_func_name', argument 2 of type 'ea_t'
+                        self.mapped_refs.append(Reference(int(xref.source), item, type))
                 elif xref._xref.type in (ida_xref.fl_U, ida_xref.dr_O, ida_xref.dr_W, ida_xref.dr_R, ida_xref.dr_T, ida_xref.dr_I):
                     # Indirect or data reference, we store it for another iteration
                     ref_to_search.append(Reference(ida_idaapi.ea_t(xref.source), item, type))
@@ -823,8 +826,8 @@ class XRefer:
                                     call_xrefs = self.caller_xrefs_cache[func_ea][child_func_ea]
                                     self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports_ea"][node] = call_xrefs
                                     self.entity_xrefs[node].update(call_xrefs)
-                            except:
-                                pass
+                            except (KeyError, AttributeError) as e:
+                                log(f"Warning: Failed to update thunk imports for function 0x{func_ea:x}: {e}")
                             self.global_xrefs[func_ea][self.INDIRECT_XREFS]["imports"].discard(node)
                             break
 
@@ -2031,7 +2034,11 @@ class XRefer:
             for e_index in self.global_xrefs[func_ea][self.DIRECT_XREFS]["strings"]:
                 if self.settings["enable_exclusions"] and e_index in self.excluded_entities:
                     continue
-                strings.append(self.entities[e_index][6])  # entity[6] contains the full string value
+                entity = self.entities[e_index]
+                if len(entity) > 6:
+                    strings.append(entity[6])  # entity[6] contains the full string value
+                else:
+                    strings.append(entity[1])  # Fall back to basic string content
         except KeyError:
             pass
         return strings
@@ -2525,7 +2532,9 @@ class XRefer:
         if not missing_files or (len(missing_files) == 1 and "xrefs" in missing_files) or self.settings["suppress_notifications"]:
             return True
 
-        # Show dialog
+        # Show dialog (lazy import to avoid circular dependency)
+        from xrefer.gui.settings import MissingFilesDialog
+
         dialog = MissingFilesDialog(missing_files)
         result = dialog.exec_()
 
@@ -2708,181 +2717,177 @@ class XRefer:
             log("No cluster data available for function renaming")
             return
 
-        try:
-            # Helper to parse cluster IDs from various formats
-            def parse_cluster_id(cluster_id_str: str) -> Optional[int]:
-                # Handle various formats: "cluster_XXXX", "cluster.id.XXXX", or pure integer strings.
-                if cluster_id_str.startswith("cluster_"):
-                    try:
-                        return int(cluster_id_str.split("_")[1])
-                    except (ValueError, IndexError):
-                        return None
-                elif cluster_id_str.startswith("cluster.id."):
-                    parts = cluster_id_str.split(".")
-                    if len(parts) >= 3:
-                        try:
-                            return int(parts[-1])
-                        except ValueError:
-                            return None
+        # Helper to parse cluster IDs from various formats
+        def parse_cluster_id(cluster_id_str: str) -> Optional[int]:
+            # Handle various formats: "cluster_XXXX", "cluster.id.XXXX", or pure integer strings.
+            if cluster_id_str.startswith("cluster_"):
+                try:
+                    return int(cluster_id_str.split("_")[1])
+                except (ValueError, IndexError):
                     return None
-                else:
+            elif cluster_id_str.startswith("cluster.id."):
+                parts = cluster_id_str.split(".")
+                if len(parts) >= 3:
                     try:
-                        return int(cluster_id_str)
+                        return int(parts[-1])
                     except ValueError:
                         return None
+                return None
+            else:
+                try:
+                    return int(cluster_id_str)
+                except ValueError:
+                    return None
 
-            # Step 1: Gather all necessary data
-            func_clusters = defaultdict(set)  # func_ea -> set of cluster IDs
+        # Step 1: Gather all necessary data
+        func_clusters = defaultdict(set)  # func_ea -> set of cluster IDs
 
-            def map_function_clusters(cluster):
-                for node in cluster.nodes:
-                    func_clusters[node].add(cluster.id)
-                for subcluster in cluster.subclusters:
-                    map_function_clusters(subcluster)
+        def map_function_clusters(cluster):
+            for node in cluster.nodes:
+                func_clusters[node].add(cluster.id)
+            for subcluster in cluster.subclusters:
+                map_function_clusters(subcluster)
 
-            for cluster in self.clusters:
-                map_function_clusters(cluster)
+        for cluster in self.clusters:
+            map_function_clusters(cluster)
 
-            all_functions = set(fn.start for fn in self._backend.functions())
+        all_functions = set(fn.start for fn in self._backend.functions())
 
-            # Recursively gather all cluster nodes, root nodes, and cluster_refs from all levels
-            def gather_all_cluster_nodes(clusters):
-                all_nodes = set()
+        # Recursively gather all cluster nodes, root nodes, and cluster_refs from all levels
+        def gather_all_cluster_nodes(clusters):
+            all_nodes = set()
 
-                def recurse(c):
-                    all_nodes.update(c.nodes)
-                    all_nodes.add(c.root_node)
-                    all_nodes.update(c.cluster_refs.keys())
-                    for sc in c.subclusters:
-                        recurse(sc)
+            def recurse(c):
+                all_nodes.update(c.nodes)
+                all_nodes.add(c.root_node)
+                all_nodes.update(c.cluster_refs.keys())
+                for sc in c.subclusters:
+                    recurse(sc)
 
-                for top_cluster in clusters:
-                    recurse(top_cluster)
-                return all_nodes
+            for top_cluster in clusters:
+                recurse(top_cluster)
+            return all_nodes
 
-            # Combine all cluster nodes (including nested subclusters) for quick membership checks
-            all_cluster_nodes = gather_all_cluster_nodes(self.clusters)
+        # Combine all cluster nodes (including nested subclusters) for quick membership checks
+        all_cluster_nodes = gather_all_cluster_nodes(self.clusters)
 
-            # Identify true intermediate functions
-            # A node is intermediate if it appears in intermediate_paths but is not:
-            # - In cluster nodes or cluster refs
-            # - In artifact_functions
-            potential_intermediates = set()
-            for cluster in self.clusters:
-                for _, paths in cluster.intermediate_paths.items():
-                    for path in paths:
-                        for node in path:
-                            if node not in cluster.nodes and node not in cluster.cluster_refs and node not in self.artifact_functions:
-                                potential_intermediates.add(node)
+        # Identify true intermediate functions
+        # A node is intermediate if it appears in intermediate_paths but is not:
+        # - In cluster nodes or cluster refs
+        # - In artifact_functions
+        potential_intermediates = set()
+        for cluster in self.clusters:
+            for _, paths in cluster.intermediate_paths.items():
+                for path in paths:
+                    for node in path:
+                        if node not in cluster.nodes and node not in cluster.cluster_refs and node not in self.artifact_functions:
+                            potential_intermediates.add(node)
 
-            intermediate_funcs = {f for f in potential_intermediates if f not in all_cluster_nodes and f not in self.artifact_functions}
+        intermediate_funcs = {f for f in potential_intermediates if f not in all_cluster_nodes and f not in self.artifact_functions}
 
-            # Step 2: Classify each function
-            func_classification = {}
+        # Step 2: Classify each function
+        func_classification = {}
 
-            # Identify multi-cluster functions
-            multi_cluster_funcs = {func_ea for func_ea, clusters in func_clusters.items() if len(clusters) > 1}
+        # Identify multi-cluster functions
+        multi_cluster_funcs = {func_ea for func_ea, clusters in func_clusters.items() if len(clusters) > 1}
 
-            # Identify single-cluster functions
-            single_cluster_funcs = {func_ea for func_ea, clusters in func_clusters.items() if len(clusters) == 1}
+        # Identify single-cluster functions
+        single_cluster_funcs = {func_ea for func_ea, clusters in func_clusters.items() if len(clusters) == 1}
 
-            # Functions not in any cluster
-            no_cluster_funcs = all_functions - single_cluster_funcs - multi_cluster_funcs
+        # Functions not in any cluster
+        no_cluster_funcs = all_functions - single_cluster_funcs - multi_cluster_funcs
 
-            # Classify according to priority
-            # - multi_cluster_funcs: 'xutil_'
-            # - single_cluster_funcs: 'cluster_specific'
-            # - no_cluster_funcs + intermediate: 'xint_'
-            # - no_cluster_funcs + not intermediate: 'xunc_'
-            for f_ea in multi_cluster_funcs:
-                func_classification[f_ea] = "xutil_"
-            for f_ea in single_cluster_funcs:
-                func_classification[f_ea] = "cluster_specific"
-            for f_ea in no_cluster_funcs:
-                if f_ea in intermediate_funcs:
-                    func_classification[f_ea] = "xint_"
+        # Classify according to priority
+        # - multi_cluster_funcs: 'xutil_'
+        # - single_cluster_funcs: 'cluster_specific'
+        # - no_cluster_funcs + intermediate: 'xint_'
+        # - no_cluster_funcs + not intermediate: 'xunc_'
+        for f_ea in multi_cluster_funcs:
+            func_classification[f_ea] = "xutil_"
+        for f_ea in single_cluster_funcs:
+            func_classification[f_ea] = "cluster_specific"
+        for f_ea in no_cluster_funcs:
+            if f_ea in intermediate_funcs:
+                func_classification[f_ea] = "xint_"
+            else:
+                func_classification[f_ea] = "xunc_"
+
+        # Step 3: Determine cluster-specific prefixes
+        cluster_prefix_map = {}
+        for cluster_id_str, analysis in self.cluster_analysis.get("clusters", {}).items():
+            prefix = analysis.get("function_prefix")
+            if prefix:
+                cid = parse_cluster_id(cluster_id_str)
+                if cid is None:
+                    log(f"Invalid cluster id format: {cluster_id_str}")
                 else:
-                    func_classification[f_ea] = "xunc_"
+                    cluster_prefix_map[cid] = prefix
 
-            # Step 3: Determine cluster-specific prefixes
-            cluster_prefix_map = {}
-            for cluster_id_str, analysis in self.cluster_analysis.get("clusters", {}).items():
-                prefix = analysis.get("function_prefix")
+        # Build reverse mapping: function -> cluster_id (for single cluster funcs)
+        func_single_cluster_id = {}
+        for f_ea in single_cluster_funcs:
+            # Exactly one cluster_id in func_clusters[f_ea]
+            cid = next(iter(func_clusters[f_ea]))
+            func_single_cluster_id[f_ea] = cid
+
+        # Step 4: Rename functions
+        def has_known_prefix(old_name):
+            if not old_name:
+                return True  # Not a valid function name, skip
+            return any(old_name.startswith(p) for p in KNOWN_PREFIXES)
+
+        def rename_function(func_ea, new_prefix, allow_cluster_prefix_check=False):
+            # Check if this is a simple API thunk
+            fn = self._backend.get_function_at(func_ea)
+            if self.is_simple_api_thunk(func_ea):
+                return
+
+            old_name = fn.name
+            if not old_name:
+                # Not a valid function name or no name known, skip
+                return
+
+            # If this function already has a known prefix, skip
+            if has_known_prefix(old_name):
+                return
+
+            # If applying a cluster-specific prefix, also check if old_name already starts with that prefix
+            if allow_cluster_prefix_check and new_prefix and old_name.startswith(new_prefix + "_"):
+                # Already has this cluster prefix
+                return
+
+            # If cluster prefix provided, ensure it ends with '_'
+            if new_prefix and not new_prefix.endswith("_"):
+                new_prefix += "_"
+
+            new_name = f"{new_prefix}{old_name}"
+            if idaapi.set_name(ida_idaapi.ea_t(func_ea), new_name, idaapi.SN_FORCE):
+                log(f"Renamed {old_name} -> {new_name}")
+            else:
+                log(f"Failed to rename {old_name} -> {new_name}")
+
+        # Handle multi-cluster (xutil_)
+        for f_ea, category in func_classification.items():
+            if category == "xutil_":
+                rename_function(f_ea, "xutil", allow_cluster_prefix_check=False)
+
+        # Handle cluster-specific functions
+        for f_ea, category in func_classification.items():
+            if category == "cluster_specific":
+                cid = func_single_cluster_id[f_ea]
+                prefix = cluster_prefix_map.get(cid, None)
                 if prefix:
-                    cid = parse_cluster_id(cluster_id_str)
-                    if cid is None:
-                        log(f"Invalid cluster id format: {cluster_id_str}")
-                    else:
-                        cluster_prefix_map[cid] = prefix
+                    # For cluster-specific prefixes, check again if prefix already applied
+                    rename_function(f_ea, prefix, allow_cluster_prefix_check=True)
 
-            # Build reverse mapping: function -> cluster_id (for single cluster funcs)
-            func_single_cluster_id = {}
-            for f_ea in single_cluster_funcs:
-                # Exactly one cluster_id in func_clusters[f_ea]
-                cid = next(iter(func_clusters[f_ea]))
-                func_single_cluster_id[f_ea] = cid
+        # Handle intermediate (xint_)
+        for f_ea, category in func_classification.items():
+            if category == "xint_":
+                rename_function(f_ea, "xint", allow_cluster_prefix_check=False)
 
-            # Step 4: Rename functions
-            def has_known_prefix(old_name):
-                if not old_name:
-                    return True  # Not a valid function name, skip
-                return any(old_name.startswith(p) for p in KNOWN_PREFIXES)
+        # Handle unclustered (xunc_)
+        for f_ea, category in func_classification.items():
+            if category == "xunc_":
+                rename_function(f_ea, "xunc", allow_cluster_prefix_check=False)
 
-            def rename_function(func_ea, new_prefix, allow_cluster_prefix_check=False):
-                # Check if this is a simple API thunk
-                fn = self._backend.get_function_at(func_ea)
-                if self.is_simple_api_thunk(func_ea):
-                    return
-
-                old_name = fn.name
-                if not old_name:
-                    # Not a valid function name or no name known, skip
-                    return
-
-                # If this function already has a known prefix, skip
-                if has_known_prefix(old_name):
-                    return
-
-                # If applying a cluster-specific prefix, also check if old_name already starts with that prefix
-                if allow_cluster_prefix_check and new_prefix and old_name.startswith(new_prefix + "_"):
-                    # Already has this cluster prefix
-                    return
-
-                # If cluster prefix provided, ensure it ends with '_'
-                if new_prefix and not new_prefix.endswith("_"):
-                    new_prefix += "_"
-
-                new_name = f"{new_prefix}{old_name}"
-                if idaapi.set_name(func_ea, new_name, idaapi.SN_FORCE):
-                    log(f"Renamed {old_name} -> {new_name}")
-                else:
-                    log(f"Failed to rename {old_name} -> {new_name}")
-
-            # Handle multi-cluster (xutil_)
-            for f_ea, category in func_classification.items():
-                if category == "xutil_":
-                    rename_function(f_ea, "xutil", allow_cluster_prefix_check=False)
-
-            # Handle cluster-specific functions
-            for f_ea, category in func_classification.items():
-                if category == "cluster_specific":
-                    cid = func_single_cluster_id[f_ea]
-                    prefix = cluster_prefix_map.get(cid, None)
-                    if prefix:
-                        # For cluster-specific prefixes, check again if prefix already applied
-                        rename_function(f_ea, prefix, allow_cluster_prefix_check=True)
-
-            # Handle intermediate (xint_)
-            for f_ea, category in func_classification.items():
-                if category == "xint_":
-                    rename_function(f_ea, "xint", allow_cluster_prefix_check=False)
-
-            # Handle unclustered (xunc_)
-            for f_ea, category in func_classification.items():
-                if category == "xunc_":
-                    rename_function(f_ea, "xunc", allow_cluster_prefix_check=False)
-
-            log("Function renaming complete")
-
-        except Exception as e:
-            log(f"Error during function renaming: {str(e)}")
+        log("Function renaming complete")
