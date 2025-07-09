@@ -542,13 +542,14 @@ class BackEnd(ABC):
             # Parse and normalize the import name
             if raw_name:
                 module_name, function_name = self.parse_import_name(raw_name)
-                if raw_module and raw_module != "unknown":
+                # Only use raw_module if we didn't extract a module from versioned symbol
+                if raw_module and raw_module != "unknown" and module_name == "unknown":
                     module_name = self.normalize_module_name(raw_module)
             else:
                 module_name = self.normalize_module_name(raw_module) if raw_module else "unknown"
                 function_name = raw_name or "unknown"
-
             full_name = f"{module_name}.{function_name}"
+            print(f"{addr=}, {full_name = }, {module_name = }")
             yield (addr, full_name, module_name)
 
     @abstractmethod
@@ -587,9 +588,9 @@ class BackEnd(ABC):
 
             # Extract module name from version info
             if "_" in version_info:
-                module_name = "_".join(version_info.split("_")[:-1]).lower()
+                module_name = "_".join(version_info.split("_")[:-1])
             else:
-                module_name = version_info.lower()
+                module_name = version_info
 
             return module_name, function_name
 
@@ -624,7 +625,7 @@ class BackEnd(ABC):
         # Remove path components (handle both Unix and Windows paths)
         module_name = module_name.split("/")[-1].split("\\")[-1]
 
-        return module_name.lower()
+        return module_name
 
     #
     # User Annotations
