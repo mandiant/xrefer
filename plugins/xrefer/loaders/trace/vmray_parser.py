@@ -19,8 +19,7 @@ import xml.etree.ElementTree as ET
 from typing import Any, Dict, List
 from zipfile import BadZipfile, ZipFile
 
-import ida_lines
-from xrefer.gui.helpers import colorize_api_call, log
+from xrefer.core.helpers import log
 from xrefer.loaders.trace.base import BaseTraceParser
 
 
@@ -57,7 +56,7 @@ class VMRayTraceParser(BaseTraceParser):
                 tree = ET.parse(flog_xml)
                 root = tree.getroot()
                 return root.find(".//monitor_process") is not None
-        except Exception:
+        except Exception as e:
             return False
 
     def process_param_val(self, pvalue: str) -> Any:
@@ -306,9 +305,9 @@ class VMRayTraceParser(BaseTraceParser):
                         args_str.append(str(value))
 
                 call_str_base = f"({', '.join(args_str)})"
-                colored_call = colorize_api_call(call_str_base)
-                return_str = ida_lines.COLSTR(str(return_value or "0"), ida_lines.SCOLOR_DSTR)
-                call_str = f"{colored_call} \x01{ida_lines.SCOLOR_DEMNAME}=\x02{ida_lines.SCOLOR_DEMNAME} {return_str}"
+                # TODO(rand0m): This is formatting. Should be in gui/. Refactoring the entire code is needed. No time for this now.  There was a colorize_api_call function in the original code.
+                return_str = str(return_value or "0")
+                call_str = f"{call_str_base} = {return_str}"
 
                 full_name = self.get_standard_api_name(api_name, known_imports)
                 formatted_args = self.format_arg_list(in_params)

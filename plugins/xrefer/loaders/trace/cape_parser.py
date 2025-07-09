@@ -17,8 +17,7 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
-import ida_lines
-from xrefer.gui.helpers import colorize_api_call, log
+from xrefer.core.helpers import log
 from xrefer.loaders.trace import BaseTraceParser
 
 
@@ -146,7 +145,7 @@ class CapeTraceParser(BaseTraceParser):
                 args.append(arg_value)
 
         args_str = f"({', '.join(args)})"
-        colored_args = colorize_api_call(args_str)
+        # TODO(rand0m): This is formatting. Should be in gui/. Refactoring the entire code is needed. No time for this now.  There was a colorize_api_call function in the original code.
 
         ret_val = api_call.get("return", "0x0")
         if isinstance(ret_val, str) and ret_val.startswith("0x"):
@@ -154,9 +153,9 @@ class CapeTraceParser(BaseTraceParser):
                 ret_val = hex(int(ret_val, 16))
             except ValueError:
                 pass
-        colored_ret = ida_lines.COLSTR(str(ret_val), ida_lines.SCOLOR_DSTR)
+        ret_str = str(ret_val)
 
-        return f"{colored_args} \x01{ida_lines.SCOLOR_DEMNAME}=\x02{ida_lines.SCOLOR_DEMNAME} {colored_ret}"
+        return f"{args_str} = {ret_str}"
 
     def parse_trace(self, known_imports: Dict[str, str], trace_path: str) -> Dict[int, Dict[str, List[Dict[str, Any]]]]:
         """

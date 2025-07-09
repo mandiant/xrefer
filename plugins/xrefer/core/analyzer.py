@@ -30,13 +30,11 @@ import ida_idaapi
 import ida_lines  # ignore this
 import ida_xref
 import idaapi
-import idautils
-import idc
 from PyQt5.QtWidgets import QDialog
-from xrefer.backend import Address, BackEnd, FunctionType, get_current_backend
+from xrefer.backend import Address, BackEnd, FunctionType, get_current_backend, XrefType
 from xrefer.core.clusters import ClusterManager, FunctionalCluster
+from xrefer.core.helpers import log, log_elapsed_time, _enrich_string_data
 from xrefer.core.settings import XReferSettingsManager
-from xrefer.gui.helpers import create_xrefs_table_colored, enrich_string_data, log, log_elapsed_time
 from xrefer.lang import get_language_object
 from xrefer.llm.artifact_analyzer import ArtifactAnalyzer
 from xrefer.llm.base import ModelConfig, ModelType
@@ -106,10 +104,10 @@ class XRefer:
             }
             self.entity_suffix_map: Dict[str, str] = {"libs": "libs_ea", "imports": "imports_ea", "strings": "strings_ea", "capa": "capa_ea", "api_trace": "api_trace_ea"}
             self.color_tags: Dict[str, int] = {
-                self.table_names[1]: ida_lines.SCOLOR_DEMNAME,
-                self.table_names[2]: ida_lines.SCOLOR_IMPNAME,
-                self.table_names[3]: ida_lines.SCOLOR_DSTR,
-                self.table_names[4]: ida_lines.SCOLOR_CODNAME,
+                self.table_names[1]: '', #ida_lines.SCOLOR_DEMNAME,
+                self.table_names[2]: '', #ida_lines.SCOLOR_IMPNAME,
+                self.table_names[3]: '', #ida_lines.SCOLOR_DSTR,
+                self.table_names[4]: '', #ida_lines.SCOLOR_CODNAME,
             }
             # global_xrefs >
             # {func_ea: {self.DIRECT_XREFS: {'libs': set() of entities,
@@ -560,23 +558,22 @@ class XRefer:
         for func in self._backend.functions():
             for block in func.basic_blocks:
                 # Iterate over the instructions in the basic block
-                for addr in idautils.Heads(int(block.start), int(block.end)):
+                for addr in self._backend.instructions(block.start, block.end):
                     # print(f"{idc.func_contains(addr, addr)}, create_xref_mapping, \t{addr = :#x}")
-                    func_refs_from = idautils.XrefsFrom(addr, ida_xref.XREF_FAR)
-                    for ref in func_refs_from:
+                    for ref in self._backend.get_xrefs_from(Address(addr)):
                         # Check if the reference points within the same function
-                        if Address(ref.to) in func:
+                        if Address(ref.target) in func:
                             continue
 
                         start = int(func.start)
                         if start not in self.caller_xrefs_cache:
                             # function A -> function B call locations
-                            self.caller_xrefs_cache[start] = {ref.to: {ref.frm}}
+                            self.caller_xrefs_cache[start] = {ref.target: {ref.source}}
                         else:
                             try:
-                                self.caller_xrefs_cache[start][ref.to].add(ref.frm)
+                                self.caller_xrefs_cache[start][ref.target].add(ref.source)
                             except KeyError:
-                                self.caller_xrefs_cache[start][ref.to] = {ref.frm}
+                                self.caller_xrefs_cache[start][ref.target] = {ref.source}
 
     def get_user_xrefs(self, user_xrefs_path: str) -> List[Tuple[int, int]]:
         try:
@@ -755,7 +752,7 @@ class XRefer:
                     # If not a library function, we map from the caller
                     elif source_fn.type != FunctionType.LIBRARY:
                         self.mapped_refs.append(Reference(int(xref.source), item, type))
-                elif xref._xref.type in (ida_xref.fl_U, ida_xref.dr_O, ida_xref.dr_W, ida_xref.dr_R, ida_xref.dr_T, ida_xref.dr_I):
+                elif xref.type in (XrefType.DATA_READ, XrefType.DATA_WRITE):
                     # Indirect or data reference, we store it for another iteration
                     ref_to_search.append(Reference(ida_idaapi.ea_t(xref.source), item, type))
 
@@ -1390,6 +1387,10 @@ class XRefer:
         capa_refs_index_end = str_refs_index_end + capa_refs_count
 
         # Assign color tags to index ranges
+        print(f"{ida_lines.SCOLOR_DEMNAME = }")
+        print(f"{ida_lines.SCOLOR_IMPNAME = }")
+        print(f"{ida_lines.SCOLOR_DSTR = }")
+        print(f"{ida_lines.SCOLOR_CODNAME = }")
         tag_index[ida_lines.SCOLOR_DEMNAME] = [2, lib_refs_index_end]
         tag_index[ida_lines.SCOLOR_IMPNAME] = [lib_refs_index_end, imp_refs_index_end]
         tag_index[ida_lines.SCOLOR_DSTR] = [imp_refs_index_end, str_refs_index_end]
@@ -2141,10 +2142,13 @@ class XRefer:
 
         function_api_calls = []
         for api_name, api_calls in self.api_trace_data[func_ea].items():
-            api_name = ida_lines.COLSTR(api_name.split(".")[1], ida_lines.SCOLOR_IMPNAME)
+            # TODO(rand0m): This is formatting. Should be in gui/. Refactoring the entire code is needed. No time for this now.
+            # api_name = ida_lines.COLSTR(api_name.split(".")[1], ida_lines.SCOLOR_IMPNAME)
+            api_name = api_name.split('.')[1]
 
             for call in api_calls:
-                call_addr = ida_lines.COLSTR(f"0x{call['call_addr']:x}", ida_lines.SCOLOR_LIBNAME)
+                # call_addr = ida_lines.COLSTR(f"0x{call['call_addr']:x}", ida_lines.SCOLOR_LIBNAME)
+                call_addr = f"0x{call['call_addr']:x}"
                 function_api_calls.append((call["index"], f"{call_addr}: {api_name}{call['call_str']} x {call['count']}"))
 
         return function_api_calls
@@ -2177,10 +2181,13 @@ class XRefer:
         for indirect_func_ea in indirect_func_addresses:
             if indirect_func_ea in self.api_trace_data:
                 for api_name, api_calls in self.api_trace_data[indirect_func_ea].items():
-                    api_name = ida_lines.COLSTR(api_name.split(".")[1], ida_lines.SCOLOR_IMPNAME)
+                    # TODO(rand0m): This is formatting. Should be in gui/. Refactoring the entire code is needed. No time for this now.
+                    # api_name = ida_lines.COLSTR(api_name.split(".")[1], ida_lines.SCOLOR_IMPNAME)
+                    api_name = api_name.split('.')[1]
 
                     for call in api_calls:
-                        call_addr = ida_lines.COLSTR(f"0x{call['call_addr']:x}", ida_lines.SCOLOR_LIBNAME)
+                        # call_addr = ida_lines.COLSTR(f"0x{call['call_addr']:x}", ida_lines.SCOLOR_LIBNAME)
+                        call_addr = f"0x{call['call_addr']:x}"
                         path_api_calls.append((call["index"], f"{call_addr}: {api_name}{call['call_str']} x {call['count']}"))
 
         function_api_calls = self._gather_sorted_function_api_calls(func_ea)
@@ -2194,10 +2201,13 @@ class XRefer:
         # Iterate through all functions and their API calls
         for func_calls in self.api_trace_data.values():
             for api_name, api_calls in func_calls.items():
-                api_name = ida_lines.COLSTR(api_name.split(".")[1], ida_lines.SCOLOR_IMPNAME)
+                # TODO(rand0m): This is formatting. Should be in gui/. Refactoring the entire code is needed. No time for this now.
+                # api_name = ida_lines.COLSTR(api_name.split(".")[1], ida_lines.SCOLOR_IMPNAME)
+                api_name = api_name.split('.')[1]
 
                 for call in api_calls:
-                    call_addr = ida_lines.COLSTR(f"0x{call['call_addr']:x}", ida_lines.SCOLOR_LIBNAME)
+                    # call_addr = ida_lines.COLSTR(f"0x{call['call_addr']:x}", ida_lines.SCOLOR_LIBNAME)
+                    call_addr = f"0x{call['call_addr']:x}"
                     all_calls.append((call["index"], f"{call_addr}: {api_name}{call['call_str']} x {call['count']}"))
 
         # Sort the list based on the index
@@ -2398,14 +2408,22 @@ class XRefer:
             if not rows:
                 continue
 
-            colored_table = create_xrefs_table_colored(key, rows, self.get_color_tags(func_ea, key))
-            prev_offset = 3
-            for inner_table_key in sorted_xref_table[key]["rows"]:
-                inner_table_length = len(sorted_xref_table[key]["rows"][inner_table_key])
-                if inner_table_length:
-                    sorted_xref_table[key]["rows"][inner_table_key] = colored_table[prev_offset : prev_offset + inner_table_length]
-                    prev_offset += inner_table_length
-            sorted_xref_table[key]["heading"] = colored_table[1:3] if sorted_xref_table[key]["rows"] else []
+            # Store raw data for GUI to format later - avoids circular import
+            try:
+                from xrefer.gui.helpers import create_xrefs_table_colored
+                colored_table = create_xrefs_table_colored(key, rows, self.get_color_tags(func_ea, key))
+                prev_offset = 3
+                for inner_table_key in sorted_xref_table[key]["rows"]:
+                    inner_table_length = len(sorted_xref_table[key]["rows"][inner_table_key])
+                    if inner_table_length:
+                        sorted_xref_table[key]["rows"][inner_table_key] = colored_table[prev_offset : prev_offset + inner_table_length]
+                        prev_offset += inner_table_length
+                sorted_xref_table[key]["heading"] = colored_table[1:3] if sorted_xref_table[key]["rows"] else []
+            except ImportError:
+                # Store raw data for GUI to format later
+                sorted_xref_table[key]["raw_rows"] = rows
+                sorted_xref_table[key]["color_tags"] = self.get_color_tags(func_ea, key)
+                sorted_xref_table[key]["heading"] = []
 
     def run_full_analysis(self) -> None:
         """
@@ -2423,7 +2441,9 @@ class XRefer:
         self.sift_strings()
         self.sift_libs()
         self.sift_capa_matches()
-        self.entities = enrich_string_data(self.string_index_cache, self.entities, self.git_lookups)
+        if self.git_lookups:
+            log("Querying strings in git repositories...")
+        self.entities = _enrich_string_data(self.string_index_cache, self.entities, self.git_lookups)
         self.load_imports()
         self.process_api_trace()
         self.save_categories()
@@ -2588,8 +2608,16 @@ class XRefer:
         """
         all_paths = []
         path_buffer = deque([[final]])
+        try:
+            func_name_initial = self._backend.get_function_at(Address(initial))
+            func_name_final = self._backend.get_function_at(Address(final)).name
+        except Exception as e:
+            import idc
+            import ida_idaapi
+            print(f"{idc.get_func_name(ida_idaapi.ea_t(initial)) = }")
+            raise e
 
-        log(f"Building call paths :: {idc.get_func_name(ida_idaapi.ea_t(initial))} -> {idc.get_func_name(ida_idaapi.ea_t(final))}")
+        log(f"Building call paths :: {func_name_initial} -> {func_name_final}")
         xref_cache = {}
         while path_buffer and len(all_paths) < max_limit and len(path_buffer) < max_limit:
             current_path = path_buffer.popleft()
@@ -2597,8 +2625,9 @@ class XRefer:
             target = current_path[-1]
             if target not in xref_cache:
                 refs = set()
-                for cross_ref in idautils.XrefsTo(ida_idaapi.ea_t(target)):
-                    fn = self._backend.get_function_at(cross_ref.frm)
+                # for cross_ref in idautils.XrefsTo(ida_idaapi.ea_t(target)):
+                for cross_ref in self._backend.get_xrefs_to(target):
+                    fn = self._backend.get_function_at(cross_ref.source)
                     if fn:
                         refs.add(fn.start)
                 xref_cache[target] = refs
@@ -2652,7 +2681,7 @@ class XRefer:
                     if node_ea in path:
                         ep_name = ""
                         try:
-                            ep_name = self._backend.get_function_at(self.current_analysis_ep).name
+                            ep_name = self._backend.get_function_at(Address(self.current_analysis_ep)).name
                         except Exception as err:
                             log(f"Exception: {err}")
                         log(f"Function @ 0x{self.current_analysis_ep:x} ({ep_name}) has already been analyzed in a prior analysis as a node.")
@@ -2838,7 +2867,7 @@ class XRefer:
 
         def rename_function(func_ea, new_prefix, allow_cluster_prefix_check=False):
             # Check if this is a simple API thunk
-            fn = self._backend.get_function_at(func_ea)
+            fn = self._backend.get_function_at(Address(func_ea))
             if self.is_simple_api_thunk(func_ea):
                 return
 
