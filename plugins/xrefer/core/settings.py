@@ -16,9 +16,7 @@ import json
 import os
 from time import time
 from typing import Any, Dict, List
-
-from xrefer.gui.helpers import log
-
+from xrefer.core.helpers import log
 from xrefer import backend
 
 PathType = str

@@ -18,7 +18,7 @@ from enum import Enum, auto
 from typing import Optional
 
 from xrefer.core.helpers import check_internet_connectivity
-from xrefer.gui.helpers import log
+from xrefer.core.helpers import log
 
 
 class PromptType(Enum):
