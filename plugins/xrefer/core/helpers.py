@@ -21,6 +21,7 @@ import threading
 import unicodedata
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple, Union
+from time import time
 
 import networkx as nx
 import requests
@@ -688,3 +689,35 @@ def sort_clusters(clusters, paths):
     sorted_secondary = sorted(secondary_clusters, key=lambda c: (c.parent_cluster_id, c.id))
 
     return sorted_primary + sorted_secondary
+
+
+def log(string: str) -> None:
+    """
+    Log message with XRefer prefix.
+
+    This is a backend-agnostic logging function that prints to stdout.
+    Backend-specific implementations can override or extend this behavior.
+
+    Args:
+        string (str): Message to log
+    """
+    print(f"[XRefer] {string}")
+
+
+def log_elapsed_time(msg: str, start_time: float) -> None:
+    """
+    Log elapsed time for an operation.
+
+    Calculates and logs time elapsed since start_time in hours,
+    minutes, and seconds format.
+
+    Args:
+        msg (str): Description of the operation
+        start_time (float): Start time from time.time()
+    """
+    end_time = time()
+    elapsed_time = end_time - start_time
+    hours = int(elapsed_time // 3600)
+    minutes = int((elapsed_time % 3600) // 60)
+    seconds = int(elapsed_time % 60)
+    log(f"[{msg}] {hours} hours, {minutes} minutes, {seconds} seconds")

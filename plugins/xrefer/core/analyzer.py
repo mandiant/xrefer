@@ -1136,7 +1136,7 @@ class XRefer:
 
             # Create clusters
             log(f"Creating clusters from {len(graph_paths)} paths with {len(root_nodes)} root nodes")
-            self.clusters = ClusterManager.decompose_into_clusters(graph_paths, intermediate_paths_map, root_nodes, self.artifact_functions)
+            self.clusters = ClusterManager.decompose_into_clusters(graph_paths, intermediate_paths_map, root_nodes, self.artifact_functions, backend=self._backend)
 
             # Setup and run cluster analysis
             try:
