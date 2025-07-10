@@ -744,19 +744,23 @@ class XRefer:
                 source_fn = self._backend.get_function_at(xref.source)
                 if source_fn and xref.source in source_fn:
                     # If not a library function, we map from the caller
+                    # import ida_xref
+                    # next_ins_addr = next(self._backend.instructions(xref.source, xref.target))
                     if source_fn.type != FunctionType.LIBRARY:
                         self.mapped_refs.append(Reference(int(xref.source), item, type))
-                    # '''
-                    # # Cross-reference is within a function
                     # elif xref._xref.type == ida_xref.fl_F:
+                    #     print(f"NO USAGE? {xref.source:#x} -> {xref.target:#x} is a flow reference")
+                    #     assert xref.target == next_ins_addr
+                    #     assert xref._xref.type == ida_xref.fl_F
                     #     # Ordinary flow reference, use the original address
                     #     self.mapped_refs.append(Reference(int(addr), item, type))
                     # else:
                     #     print(f"what is this flow? {xref._xref.type} at {xref.source:#x} -> {xref.target:#x}")
                     # '''
-                    else:
-                        # Let's hope this is an "Ordinary flow reference, use the original address"
-                        self.mapped_refs.append(Reference(int(addr), item, type))
+                    # else:
+                    #     # Let's hope this is an "Ordinary flow reference, use the original address"
+                    #     self.mapped_refs.append(Reference(int(addr), item, type))
+                    # '''
                 elif xref.type in (XrefType.DATA_READ, XrefType.DATA_WRITE):
                     # Indirect or data reference, we store it for another iteration
                     ref_to_search.append(Reference(xref.source, item, type))
