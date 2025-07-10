@@ -32,8 +32,8 @@ class CapeTraceParser(BaseTraceParser):
         parser_id (str): Identifier for this parser type ('Cape')
     """
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, backend=None):
+        super().__init__(backend)
         self.parser_id = "Cape"
 
     def supports_format(self, trace_path: str) -> bool:

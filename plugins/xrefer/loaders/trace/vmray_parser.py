@@ -38,8 +38,8 @@ class VMRayTraceParser(BaseTraceParser):
       perfect alignment with the primary sample in IDA Pro.
     """
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, backend=None):
+        super().__init__(backend)
         self.parser_id = "VMRay"
 
     def supports_format(self, trace_path: str) -> bool:
