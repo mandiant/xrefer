@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import re
+import typing
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -27,11 +28,14 @@ import idaapi
 import idautils
 import idc
 from tabulate import tabulate
-from xrefer.core.helpers import filter_null_string, normalize_path
-from xrefer.core.helpers import log
+
+from xrefer.core.helpers import filter_null_string, log, normalize_path
+from xrefer.gui.legacy.shim import BIN_SEARCH_FORWARD, SEARCH_DOWN, find_bytes, find_code, is_32bit
 from xrefer.lang.lang_base import LanguageBase
 from xrefer.lang.lang_default import LangDefault
-from xrefer.gui.legacy.shim import BIN_SEARCH_FORWARD, SEARCH_DOWN, find_bytes, find_code, is_32bit
+
+if typing.TYPE_CHECKING:
+    from xrefer.core.analyzer import XRefer
 
 
 @dataclass
@@ -556,7 +560,6 @@ class LangRust(LanguageBase):
         rust_main = idc.get_name_ea_simple("rust_main")
         if rust_main != idc.BADADDR:
             return rust_main
-
         # Try main/_main and analyze for rust_main pattern
         for main_name in ("main", "_main"):
             main_ea = idc.get_name_ea_simple(main_name)
@@ -566,7 +569,7 @@ class LangRust(LanguageBase):
                     return rust_main
 
         # Try finding main via __initenv analysis. just a hack for now, fix later.
-        main_ea = LanguageBase.fallback_cmain_detection()
+        main_ea = LanguageBase.fallback_cmain_detection(self.backend)
         if main_ea:
             rust_main = self._find_rust_main(main_ea)
             if rust_main:
@@ -628,7 +631,7 @@ class LangRust(LanguageBase):
 
         return False
 
-    def rename_functions(self, xrefer_obj):
+    def rename_functions(self, xrefer_obj: "XRefer") -> None:
         """
         Rename functions based on their references.
 

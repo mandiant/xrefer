@@ -18,7 +18,8 @@ import inspect
 import os
 from typing import Any, List, Type
 
-from xrefer.gui.helpers import log
+from xrefer.backend import list_available_backends
+from xrefer.core.helpers import log
 from xrefer.lang.lang_base import LanguageBase
 from xrefer.lang.lang_default import LangDefault
 
@@ -28,7 +29,7 @@ def get_language_modules() -> List[Type[LanguageBase]]:
     lang_classes = []
     lang_dir = os.path.dirname(__file__)
 
-    # Get all lang_*.py files except default and base
+    # First, check for legacy lang_*.py files
     lang_files = [f[:-3] for f in os.listdir(lang_dir) if f.startswith("lang_") and f.endswith(".py") and f not in ("lang_base.py", "lang_default.py", "lang_registry.py")]
 
     for module_name in lang_files:
@@ -45,6 +46,30 @@ def get_language_modules() -> List[Type[LanguageBase]]:
         except Exception as e:
             log(f"Error loading language module {module_name}: {e}")
 
+    # Now check for new backend-organized structure using available backends
+    available_backends = list_available_backends()
+    for backend_name in available_backends.keys():
+        backend_path = os.path.join(lang_dir, backend_name)
+        if os.path.isdir(backend_path):
+            # Scan for language modules in backend directory
+            for lang_file in os.listdir(backend_path):
+                if lang_file.endswith(".py") and not lang_file.startswith("__"):
+                    module_name = lang_file[:-3]
+                    log(f"Loading language module {backend_name}.{module_name}...")
+                    try:
+                        # Import module from backend subdirectory
+                        module = importlib.import_module(f".{backend_name}.{module_name}", package="xrefer.lang")
+
+                        # Find language class (subclass of LanguageBase)
+                        for name, obj in inspect.getmembers(module, inspect.isclass):
+                            if name == "LangDefault":
+                                continue
+                            if issubclass(obj, LanguageBase) and obj != LanguageBase:
+                                lang_classes.append(obj)
+                    except Exception as e:
+                        log(f"Error loading language module {backend_name}.{module_name}: {e}")
+    lang_str = ", ".join([cls.__name__ for cls in lang_classes])
+    log(f"Found language modules: {lang_str}")
     return lang_classes
 
 
@@ -59,6 +84,7 @@ def get_language_object() -> Any:
         except Exception as e:
             log(f"Error instantiating {lang_class.__name__}: {e}")
             import traceback
+
             traceback.print_exc()
 
     # Return default as fallback

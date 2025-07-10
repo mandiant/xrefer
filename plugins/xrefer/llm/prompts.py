@@ -232,8 +232,10 @@ class ClusterAnalyzerPrompt(PromptTemplate):
                     raise ValueError(f"Analysis for {cluster_id} must be a dictionary")
 
                 required_analysis_keys = {"label", "description", "relationships"}
-                if not all(key in analysis for key in required_analysis_keys):
-                    raise ValueError(f"Missing required analysis keys in {cluster_id}")
+                # if not all(key in analysis for key in required_analysis_keys):
+                for key in required_analysis_keys:
+                    if key not in analysis:
+                        raise ValueError(f"Missing required analysis key '{key}' in {cluster_id}")
 
             return result
 

@@ -12,12 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List
 
 from xrefer.core.helpers import log
 from xrefer.llm.base import ModelConfig
 from xrefer.llm.processor import LLMProcessor
 from xrefer.llm.prompts import PromptType
+
+if TYPE_CHECKING:
+    from xrefer.core.clusters import FunctionalCluster
 
 
 class ClusterAnalyzer:

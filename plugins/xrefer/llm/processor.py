@@ -287,6 +287,9 @@ class LLMProcessor:
                 # Cluster analysis always processes all data at once
                 return self.process_chunk([items], prompt_type, **kwargs)
             except Exception as e:
+                import traceback
+
+                traceback.print_exc()
                 log(f"Error in cluster {prompt_type.name.lower()}: {str(e)}")
                 return {}
 
