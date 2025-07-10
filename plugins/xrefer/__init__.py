@@ -58,4 +58,4 @@ import asciinet
 subprocess.Popen = _original_popen
 
 
-from . import core, lang, legacy, llm, loaders, plugin
+from . import core, lang, llm, loaders, plugin

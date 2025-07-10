@@ -15,6 +15,7 @@
 from typing import Optional
 
 import idaapi
+
 from xrefer.gui.action_handlers import *
 from xrefer.gui.helpers import *
 from xrefer.gui.view import XReferView

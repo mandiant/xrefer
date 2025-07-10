@@ -18,6 +18,7 @@ from enum import Enum, auto
 from typing import Dict, List, Set, Tuple
 
 import ida_lines
+
 from xrefer.gui.helpers import get_visible_width
 
 

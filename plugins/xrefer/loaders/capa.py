@@ -19,6 +19,7 @@ import capa.features.freeze as frz
 import capa.render.result_document as rd
 import capa.render.utils as rutils
 import idaapi
+
 from xrefer.core.helpers import log
 
 
