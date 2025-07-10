@@ -24,14 +24,11 @@ from dataclasses import dataclass
 from operator import itemgetter
 from pathlib import Path
 from time import time
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union, TYPE_CHECKING
 
-import ida_idaapi
-import ida_lines  # ignore this
-import ida_xref
 import idaapi
 from PyQt5.QtWidgets import QDialog
-from xrefer.backend import Address, BackEnd, FunctionType, get_current_backend, XrefType
+from xrefer.backend import Address, FunctionType, get_current_backend, XrefType
 from xrefer.core.clusters import ClusterManager, FunctionalCluster
 from xrefer.core.helpers import log, log_elapsed_time, _enrich_string_data
 from xrefer.core.settings import XReferSettingsManager
@@ -43,10 +40,12 @@ from xrefer.llm.cluster_analyzer import ClusterAnalyzer
 from xrefer.loaders.capa import load_capa_json
 from xrefer.loaders.trace import parse_api_trace
 
+if TYPE_CHECKING:
+    from xrefer.lang import LanguageBase
+    from xrefer.backend import BackEnd
 
 class EntityType(enum.IntEnum):
     """Entity types used throughout the analysis."""
-
     LIBRARY = 1
     IMPORT = 2
     STRING = 3
@@ -57,7 +56,6 @@ class EntityType(enum.IntEnum):
 @dataclass(frozen=True, slots=True)
 class Reference:
     """Represents a cross-reference in the binary."""
-
     address: int  # Address where the reference occurs
     entity_index: int  # Index into the entities list
     entity_type: EntityType  # Type of entity being referenced
@@ -149,7 +147,7 @@ class XRefer:
             # graph_cache >
             # {entity index: ascii text based graph string}
 
-            self.lang: Any = None
+            self.lang: 'LanguageBase' = None
             self.capa_matches: Optional[Dict[int, List[Dict[str, Any]]]] = None
             self.categories: Optional[Dict[str, Any]] = None
             self.current_analysis_ep: Optional[int] = ep
@@ -494,7 +492,7 @@ class XRefer:
                 known_imports[api_name] = entity[1]
 
         # Parse and standardize API trace data
-        self.api_trace_data = parse_api_trace(known_imports, self.settings["paths"]["trace"])
+        self.api_trace_data = parse_api_trace(known_imports, self.settings["paths"]["trace"], self._backend)
 
         # Process xrefs
         for parent_func_ea, api_calls in self.api_trace_data.items():
@@ -745,16 +743,23 @@ class XRefer:
             for xref in self._backend.get_xrefs_to(Address(addr)):
                 source_fn = self._backend.get_function_at(xref.source)
                 if source_fn and xref.source in source_fn:
-                    # Cross-reference is within a function
-                    if xref._xref.type == ida_xref.fl_F:
-                        # Ordinary flow reference, use the original address
-                        self.mapped_refs.append(Reference(int(addr), item, type))
                     # If not a library function, we map from the caller
-                    elif source_fn.type != FunctionType.LIBRARY:
+                    if source_fn.type != FunctionType.LIBRARY:
                         self.mapped_refs.append(Reference(int(xref.source), item, type))
+                    # '''
+                    # # Cross-reference is within a function
+                    # elif xref._xref.type == ida_xref.fl_F:
+                    #     # Ordinary flow reference, use the original address
+                    #     self.mapped_refs.append(Reference(int(addr), item, type))
+                    # else:
+                    #     print(f"what is this flow? {xref._xref.type} at {xref.source:#x} -> {xref.target:#x}")
+                    # '''
+                    else:
+                        # Let's hope this is an "Ordinary flow reference, use the original address"
+                        self.mapped_refs.append(Reference(int(addr), item, type))
                 elif xref.type in (XrefType.DATA_READ, XrefType.DATA_WRITE):
                     # Indirect or data reference, we store it for another iteration
-                    ref_to_search.append(Reference(ida_idaapi.ea_t(xref.source), item, type))
+                    ref_to_search.append(Reference(xref.source, item, type))
 
             # If ref_list is empty, swap in the refs we found this round
             if not ref_list:
@@ -1387,14 +1392,15 @@ class XRefer:
         capa_refs_index_end = str_refs_index_end + capa_refs_count
 
         # Assign color tags to index ranges
-        print(f"{ida_lines.SCOLOR_DEMNAME = }")
-        print(f"{ida_lines.SCOLOR_IMPNAME = }")
-        print(f"{ida_lines.SCOLOR_DSTR = }")
-        print(f"{ida_lines.SCOLOR_CODNAME = }")
-        tag_index[ida_lines.SCOLOR_DEMNAME] = [2, lib_refs_index_end]
-        tag_index[ida_lines.SCOLOR_IMPNAME] = [lib_refs_index_end, imp_refs_index_end]
-        tag_index[ida_lines.SCOLOR_DSTR] = [imp_refs_index_end, str_refs_index_end]
-        tag_index[ida_lines.SCOLOR_CODNAME] = [str_refs_index_end, capa_refs_index_end]
+        # TODO: huge tech debt here
+        # print(f"{ida_lines.SCOLOR_DEMNAME = }")  # '\x08'
+        # print(f"{ida_lines.SCOLOR_IMPNAME = }")  # '"'
+        # print(f"{ida_lines.SCOLOR_DSTR = }")     # '\x1d'
+        # print(f"{ida_lines.SCOLOR_CODNAME = }")  # '\x1a'
+        tag_index['\x08'] = [2, lib_refs_index_end]
+        tag_index['"'] = [lib_refs_index_end, imp_refs_index_end]
+        tag_index['\x1d'] = [imp_refs_index_end, str_refs_index_end]
+        tag_index['\x1a'] = [str_refs_index_end, capa_refs_index_end]
         return tag_index
 
     def load_analysis(self) -> None:
@@ -2625,7 +2631,6 @@ class XRefer:
             target = current_path[-1]
             if target not in xref_cache:
                 refs = set()
-                # for cross_ref in idautils.XrefsTo(ida_idaapi.ea_t(target)):
                 for cross_ref in self._backend.get_xrefs_to(target):
                     fn = self._backend.get_function_at(cross_ref.source)
                     if fn:
@@ -2890,10 +2895,11 @@ class XRefer:
                 new_prefix += "_"
 
             new_name = f"{new_prefix}{old_name}"
-            if idaapi.set_name(ida_idaapi.ea_t(func_ea), new_name, idaapi.SN_FORCE):
+            try:
+                fn.name = new_name
                 log(f"Renamed {old_name} -> {new_name}")
-            else:
-                log(f"Failed to rename {old_name} -> {new_name}")
+            except ValueError as e:
+                log(f"Failed to rename {old_name} -> {new_name}: {e}")
 
         # Handle multi-cluster (xutil_)
         for f_ea, category in func_classification.items():
