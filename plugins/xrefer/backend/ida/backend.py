@@ -34,6 +34,16 @@ class IDAFunction(Function):
         self._name = idc.get_func_name(self._func.start_ea)
         return self._name
 
+    @name.setter
+    def name(self, value: str) -> str:
+        """Set function name."""
+        if value:
+            idc.set_name(self._func.start_ea, value, idaapi.SN_FORCE)
+            self._name = value
+            return self._name
+        else:
+            raise ValueError("Function name cannot be empty")
+
     # @property
     # def total_bytes(self) -> int: # this is dead code
     #     # ref: https://github.com/Vector35/binaryninja-api/blob/dev/docs/dev/concepts.md#how-big-is-a-function

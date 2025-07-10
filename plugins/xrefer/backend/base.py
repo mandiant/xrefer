@@ -152,6 +152,12 @@ class Function(ABC):
         """Function name (may be auto-generated)."""
         pass
 
+    @name.setter
+    @abstractmethod
+    def name(self, value: str) -> str:
+        """Set the function name."""
+        pass
+
     @property
     @abstractmethod
     def type(self) -> FunctionType:
