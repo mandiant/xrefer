@@ -50,7 +50,7 @@ class BinaryNinjaFunction(Function):
 
     @property
     def is_thunk(self) -> bool:
-        return self._func.is_thunk()
+        return self._func.is_thunk
 
     def contains(self, address: Address) -> bool:
         return self._func.start <= int(address) <= self._func.highest_address

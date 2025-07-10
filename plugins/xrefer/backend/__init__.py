@@ -21,7 +21,14 @@ def _ensure_backend_initialized():
         return
 
     try:
-        Backend = get_backend()
+        # Check if there's already an active backend set by backend manager
+        active_backend = backend_manager.get_active_backend()
+        if active_backend is not None:
+            Backend = active_backend
+        else:
+            # Fallback to auto-detection (this will fail for Binary Ninja without bv parameter)
+            Backend = get_backend()
+        
         # Import appropriate classes based on detected backend
         available = list_available_backends()
         if "ida" in available:

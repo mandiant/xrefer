@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Set, Union
 import capa.features.freeze as frz
 import capa.render.result_document as rd
 import capa.render.utils as rutils
-import idaapi
+from xrefer.backend import get_current_backend
 
 from xrefer.core.helpers import log
 
@@ -46,7 +46,9 @@ def load_capa_json(capa_json_path: str) -> Dict[int, List[Dict[str, Any]]]:
 
     # Get image bases and calculate relocation delta if needed
     capa_base = doc.meta.analysis.base_address.value
-    ida_base = idaapi.get_imagebase()
+
+    # ida_base = idaapi.get_imagebase()
+    ida_base = get_current_backend().image_base
     relocation_delta = ida_base - capa_base if capa_base != ida_base else 0
 
     if relocation_delta:

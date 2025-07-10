@@ -62,7 +62,7 @@ def _analyze(file_path: Path, auto_analysis: bool = True, save_changes: bool = F
                 print(f"[+] Removing {file_to_remove}.")
                 file_to_remove.unlink()
     try:
-        print(f"[+] Opening database {file_path}.")
+        print(f"[+] Opening database {file_path}")
         idapro.open_database(str(file_path), run_auto_analysis=auto_analysis)
         if ida_undo.create_undo_point(b"Initial state, auto analysis"):
             print(f"[+] Successfully created an undo point.")
