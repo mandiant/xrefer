@@ -748,10 +748,6 @@ class XRefer:
                 # If it's a library function, do not continue here. We fall through to XrefsTo() below.
 
             # Find cross-references to 'addr' and try to resolve them
-            # TODO: hmmmmmm...........
-            # print(f"{idc.func_contains(addr, addr)}, map_refs_to_leaf_functions, {addr = :#x}")
-            # print(f"INVESTIGATE func_contains trick: {addr:#x}, {self._backend.get_function_at(addr)}")
-
             for xref in self._backend.get_xrefs_to(Address(addr)):
                 source_fn = self._backend.get_function_at(xref.source)
                 if source_fn and xref.source in source_fn:
@@ -2500,7 +2496,6 @@ class XRefer:
 
         if not self.current_analysis_ep:
             self.current_analysis_ep = self.lang.entry_point
-        print(f"woooooxw {self.lang = }, {self.lang.entry_point = :#x}, {self.current_analysis_ep = :#x}")
 
         self._backend.set_function_comment(Address(self.lang.entry_point), self.lang.ep_annotation)
         self.process_exclusions()

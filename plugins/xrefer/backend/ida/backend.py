@@ -317,7 +317,6 @@ class IDABackend(BackEnd):
             idaapi.enum_import_names(module_idx, collect_import)
 
         for import_data in imports:
-            print(f"{import_data = }")
             yield import_data
 
     def get_exports(self) -> Iterator[tuple[str, Address]]:

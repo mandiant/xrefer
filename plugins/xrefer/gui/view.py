@@ -3608,8 +3608,8 @@ class XReferView(idaapi.simplecustviewer_t):
         flag: Optional[bool] = None
 
         for xref_to in self.xrefer_obj.caller_xrefs_cache[func_ea].keys():
-            if idc.func_contains(xref_to, xref_to):
-                if idc.get_func_name(xref_to).startswith("sub_"):
+            if idc.func_contains(ida_idaapi.ea_t(xref_to), ida_idaapi.ea_t(xref_to)):
+                if idc.get_func_name(ida_idaapi.ea_t(xref_to)).startswith("sub_"):
                     flag = False
                 else:
                     flag = True

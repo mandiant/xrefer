@@ -555,7 +555,6 @@ class BackEnd(ABC):
                 module_name = self.normalize_module_name(raw_module) if raw_module else "unknown"
                 function_name = raw_name or "unknown"
             full_name = f"{module_name}.{function_name}"
-            print(f"{addr=}, {full_name = }, {module_name = }")
             yield (addr, full_name, module_name)
 
     @abstractmethod
@@ -604,7 +603,7 @@ class BackEnd(ABC):
         if "." in name:
             parts = name.rsplit(".", 1)
             if len(parts) == 2:
-                module_name = parts[0].lower()
+                module_name = parts[0]  # .lower()
                 function_name = parts[1]
                 return module_name, function_name
 

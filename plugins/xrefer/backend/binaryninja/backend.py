@@ -219,7 +219,7 @@ class BNBackend(BackEnd):
                 continue
             processed_addresses.add(address)
             target_name = ext_loc.target_symbol if ext_loc.has_target_symbol else source_symbol.raw_name
-            module_name = ext_loc.library.name.lower().split("/")[-1] if ext_loc.library else "unknown"
+            module_name = ext_loc.library.name.split("/")[-1] if ext_loc.library else "unknown"
 
             # Yield raw import data: (address, function_name, module_name)
             yield (Address(address), target_name, module_name)

@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import networkx as nx
 from networkx import NetworkXError
+
 from xrefer.backend import Address, BackEnd
 from xrefer.core.helpers import find_cluster_analysis, log
 

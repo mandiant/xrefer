@@ -20,8 +20,8 @@ import re
 import threading
 import unicodedata
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple, Union
 from time import time
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import networkx as nx
 import requests

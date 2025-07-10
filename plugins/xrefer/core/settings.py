@@ -16,8 +16,9 @@ import json
 import os
 from time import time
 from typing import Any, Dict, List
-from xrefer.core.helpers import log
+
 from xrefer import backend
+from xrefer.core.helpers import log
 
 PathType = str
 SamplePaths = Dict[str, Dict[PathType, str]]  # (current_idb: {path_type: path})
