@@ -24,13 +24,11 @@ from dataclasses import dataclass
 from operator import itemgetter
 from pathlib import Path
 from time import time
-from typing import Any, Dict, List, Optional, Set, Tuple, Union, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
 
-import idaapi
-from PyQt5.QtWidgets import QDialog
-from xrefer.backend import Address, FunctionType, get_current_backend, XrefType
+from xrefer.backend import Address, BackEnd, FunctionType, XrefType, get_current_backend
 from xrefer.core.clusters import ClusterManager, FunctionalCluster
-from xrefer.core.helpers import log, log_elapsed_time, _enrich_string_data
+from xrefer.core.helpers import _enrich_string_data, log, log_elapsed_time
 from xrefer.core.settings import XReferSettingsManager
 from xrefer.lang import get_language_object
 from xrefer.llm.artifact_analyzer import ArtifactAnalyzer
@@ -42,10 +40,23 @@ from xrefer.loaders.trace import parse_api_trace
 
 if TYPE_CHECKING:
     from xrefer.lang import LanguageBase
-    from xrefer.backend import BackEnd
+
+try:
+    from idaapi import hide_wait_box, show_wait_box
+except ImportError:
+
+    def show_wait_box(message: str, *args, **kwargs) -> None:
+        """Fallback for show_wait_box if idaapi is not available."""
+        print(f"Wait: {message}", *args, **kwargs)
+
+    def hide_wait_box(*args, **kwargs) -> None:
+        """Fallback for hide_wait_box if idaapi is not available."""
+        print("Wait box hidden", *args, **kwargs)
+
 
 class EntityType(enum.IntEnum):
     """Entity types used throughout the analysis."""
+
     LIBRARY = 1
     IMPORT = 2
     STRING = 3
@@ -56,6 +67,7 @@ class EntityType(enum.IntEnum):
 @dataclass(frozen=True, slots=True)
 class Reference:
     """Represents a cross-reference in the binary."""
+
     address: int  # Address where the reference occurs
     entity_index: int  # Index into the entities list
     entity_type: EntityType  # Type of entity being referenced
@@ -102,10 +114,10 @@ class XRefer:
             }
             self.entity_suffix_map: Dict[str, str] = {"libs": "libs_ea", "imports": "imports_ea", "strings": "strings_ea", "capa": "capa_ea", "api_trace": "api_trace_ea"}
             self.color_tags: Dict[str, int] = {
-                self.table_names[1]: '', #ida_lines.SCOLOR_DEMNAME,
-                self.table_names[2]: '', #ida_lines.SCOLOR_IMPNAME,
-                self.table_names[3]: '', #ida_lines.SCOLOR_DSTR,
-                self.table_names[4]: '', #ida_lines.SCOLOR_CODNAME,
+                self.table_names[1]: "",  # ida_lines.SCOLOR_DEMNAME,
+                self.table_names[2]: "",  # ida_lines.SCOLOR_IMPNAME,
+                self.table_names[3]: "",  # ida_lines.SCOLOR_DSTR,
+                self.table_names[4]: "",  # ida_lines.SCOLOR_CODNAME,
             }
             # global_xrefs >
             # {func_ea: {self.DIRECT_XREFS: {'libs': set() of entities,
@@ -147,7 +159,7 @@ class XRefer:
             # graph_cache >
             # {entity index: ascii text based graph string}
 
-            self.lang: 'LanguageBase' = None
+            self.lang: "LanguageBase" = None
             self.capa_matches: Optional[Dict[int, List[Dict[str, Any]]]] = None
             self.categories: Optional[Dict[str, Any]] = None
             self.current_analysis_ep: Optional[int] = ep
@@ -183,7 +195,7 @@ class XRefer:
                 self.load_analysis()
 
         finally:
-            idaapi.hide_wait_box()
+            hide_wait_box()
 
     def process_exclusions(self) -> None:
         """
@@ -1386,10 +1398,10 @@ class XRefer:
         # print(f"{ida_lines.SCOLOR_IMPNAME = }")  # '"'
         # print(f"{ida_lines.SCOLOR_DSTR = }")     # '\x1d'
         # print(f"{ida_lines.SCOLOR_CODNAME = }")  # '\x1a'
-        tag_index['\x08'] = [2, lib_refs_index_end]
+        tag_index["\x08"] = [2, lib_refs_index_end]
         tag_index['"'] = [lib_refs_index_end, imp_refs_index_end]
-        tag_index['\x1d'] = [imp_refs_index_end, str_refs_index_end]
-        tag_index['\x1a'] = [str_refs_index_end, capa_refs_index_end]
+        tag_index["\x1d"] = [imp_refs_index_end, str_refs_index_end]
+        tag_index["\x1a"] = [str_refs_index_end, capa_refs_index_end]
         return tag_index
 
     def load_analysis(self) -> None:
@@ -1407,7 +1419,7 @@ class XRefer:
             - Applies current exclusions settings
         """
 
-        idaapi.show_wait_box("HIDECANCEL\nStarting analysis...")
+        show_wait_box("HIDECANCEL\nStarting analysis...")
         start_time: float = time()
         analysis_file_path = self.settings["paths"]["analysis"]
 
@@ -1440,6 +1452,7 @@ class XRefer:
 
             if not self.current_analysis_ep:
                 self.current_analysis_ep = self.lang.entry_point
+            print(f"wooooow {self.lang = }, {self.lang.entry_point = :#x}, {self.current_analysis_ep = :#x}")
 
             if self.current_analysis_ep in self.paths:
                 return
@@ -1451,7 +1464,7 @@ class XRefer:
             self.clear_affected_graph_cache()
             self.save_analysis()
         elif not self.check_required_files():
-            idaapi.hide_wait_box()
+            hide_wait_box()
             return
         else:
             try:
@@ -1490,7 +1503,7 @@ class XRefer:
             - interesting_artifacts: LLM-identified interesting items
         """
 
-        idaapi.hide_wait_box()
+        hide_wait_box()
         analysis_file_path = self.settings["paths"]["analysis"]
         log("Saving analysis to: %s" % analysis_file_path)
         with gzip.open(analysis_file_path, "wb") as outfile:
@@ -1633,7 +1646,7 @@ class XRefer:
             return
 
         msg = f"Image base change detected, new base: 0x{image_base:x}"
-        idaapi.show_wait_box(f"HIDECANCEL\n{msg}")
+        show_wait_box(f"HIDECANCEL\n{msg}")
         log(msg)
 
         delta = image_base - self.image_base
@@ -1661,7 +1674,7 @@ class XRefer:
         log("Image-base synced, re-populating context tables for all functions...")
         self.table_data = {}
         self._populate_function_context_tables()
-        idaapi.hide_wait_box()
+        hide_wait_box()
         self.save_analysis()
 
     def sync_image_base_gx(self, delta: int) -> None:
@@ -2139,7 +2152,7 @@ class XRefer:
         for api_name, api_calls in self.api_trace_data[func_ea].items():
             # TODO(rand0m): This is formatting. Should be in gui/. Refactoring the entire code is needed. No time for this now.
             # api_name = ida_lines.COLSTR(api_name.split(".")[1], ida_lines.SCOLOR_IMPNAME)
-            api_name = api_name.split('.')[1]
+            api_name = api_name.split(".")[1]
 
             for call in api_calls:
                 # call_addr = ida_lines.COLSTR(f"0x{call['call_addr']:x}", ida_lines.SCOLOR_LIBNAME)
@@ -2178,7 +2191,7 @@ class XRefer:
                 for api_name, api_calls in self.api_trace_data[indirect_func_ea].items():
                     # TODO(rand0m): This is formatting. Should be in gui/. Refactoring the entire code is needed. No time for this now.
                     # api_name = ida_lines.COLSTR(api_name.split(".")[1], ida_lines.SCOLOR_IMPNAME)
-                    api_name = api_name.split('.')[1]
+                    api_name = api_name.split(".")[1]
 
                     for call in api_calls:
                         # call_addr = ida_lines.COLSTR(f"0x{call['call_addr']:x}", ida_lines.SCOLOR_LIBNAME)
@@ -2198,7 +2211,7 @@ class XRefer:
             for api_name, api_calls in func_calls.items():
                 # TODO(rand0m): This is formatting. Should be in gui/. Refactoring the entire code is needed. No time for this now.
                 # api_name = ida_lines.COLSTR(api_name.split(".")[1], ida_lines.SCOLOR_IMPNAME)
-                api_name = api_name.split('.')[1]
+                api_name = api_name.split(".")[1]
 
                 for call in api_calls:
                     # call_addr = ida_lines.COLSTR(f"0x{call['call_addr']:x}", ida_lines.SCOLOR_LIBNAME)
@@ -2405,7 +2418,9 @@ class XRefer:
 
             # Store raw data for GUI to format later - avoids circular import
             try:
+                # TODO: Danger import from GUI
                 from xrefer.gui.helpers import create_xrefs_table_colored
+
                 colored_table = create_xrefs_table_colored(key, rows, self.get_color_tags(func_ea, key))
                 prev_offset = 3
                 for inner_table_key in sorted_xref_table[key]["rows"]:
@@ -2456,6 +2471,13 @@ class XRefer:
             if not isinstance(ref, Reference):
                 ref = Reference(*ref)
             fn = self._backend.get_function_at(ref.address)
+            if fn is None:
+                import ida_idaapi
+                import idc
+
+                orig_name = idc.get_func_name(ida_idaapi.ea_t(ref.address))
+                log(f"ERROR? Function not found for address: {ref.address:#x} (should be {orig_name = })")
+                continue
             func_ea = fn.start
             self.leaf_funcs.add(func_ea)
 
@@ -2478,6 +2500,7 @@ class XRefer:
 
         if not self.current_analysis_ep:
             self.current_analysis_ep = self.lang.entry_point
+        print(f"woooooxw {self.lang = }, {self.lang.entry_point = :#x}, {self.current_analysis_ep = :#x}")
 
         self._backend.set_function_comment(Address(self.lang.entry_point), self.lang.ep_annotation)
         self.process_exclusions()
@@ -2511,7 +2534,7 @@ class XRefer:
         if self.is_node_in_existing_paths(self.current_analysis_ep):
             return
 
-        idaapi.show_wait_box(f"HIDECANCEL\nStarting Analysis...")
+        show_wait_box(f"HIDECANCEL\nStarting Analysis...")
         start_time = time()
         self.process_exclusions()
         self.run_secondary_analysis()
@@ -2552,6 +2575,7 @@ class XRefer:
 
         dialog = MissingFilesDialog(missing_files)
         result = dialog.exec_()
+        from PyQt5.QtWidgets import QDialog
 
         return result == QDialog.Accepted
 
@@ -2605,11 +2629,12 @@ class XRefer:
         path_buffer = deque([[final]])
         try:
             func_name_initial = self._backend.get_function_at(Address(initial))
-            func_name_final = self._backend.get_function_at(Address(final)).name
+            func_name_final = self._backend.get_function_at(Address(final))
         except Exception as e:
-            import idc
             import ida_idaapi
-            print(f"{idc.get_func_name(ida_idaapi.ea_t(initial)) = }")
+            import idc
+
+            print(f"Error {idc.get_func_name(ida_idaapi.ea_t(initial)) = }")
             raise e
 
         log(f"Building call paths :: {func_name_initial} -> {func_name_final}")
