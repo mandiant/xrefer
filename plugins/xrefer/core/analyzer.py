@@ -586,12 +586,14 @@ class XRefer:
                                 self.caller_xrefs_cache[start][ref.target] = {ref.source}
 
     def get_user_xrefs(self, user_xrefs_path: str) -> List[Tuple[int, int]]:
-        try:
-            _xrefs = []
+        _xrefs = []
+        if not os.path.exists(user_xrefs_path) or not os.path.isfile(user_xrefs_path):
+            log(f"User xrefs file not found: {user_xrefs_path}")
+            return []
 
+        try:
             with open(user_xrefs_path, "r") as infile:
                 xrefs = infile.read().splitlines()
-
             for line in xrefs:
                 if len(line) > 1:
                     xref_tup = line.split(",")
@@ -809,7 +811,7 @@ class XRefer:
         This method adjusts cross-references related to thunk functions
         to ensure proper analysis and display of references.
         """
-        log(f"Fixing thunk function references...")
+        log("Fixing thunk function references...")
 
         for index, (_, path_group) in enumerate(self.paths[self.current_analysis_ep].items()):
             for path in path_group:
@@ -1142,7 +1144,7 @@ class XRefer:
                 self.cluster_analysis = ClusterAnalyzer.analyze_clusters(self.clusters, self)
                 # self.cluster_analysis = ClusterAnalyzer.populate_dummy_cluster_analysis(self.clusters)
                 if not self.cluster_analysis:  # Empty results usually means network issue
-                    log(f"No analysis results obtained - likely network connectivity issue")
+                    log("No analysis results obtained - likely network connectivity issue")
                     self.clusters = current_clusters
                     self.cluster_analysis = current_analysis
                     return
@@ -1223,6 +1225,9 @@ class XRefer:
             self.save_analysis()
 
         except Exception as e:
+            import traceback
+
+            traceback.print_exc()
             log(f"Error in cluster_all_non_excluded: {str(e)}")
 
     def add_missing_intermediate_nodes(self, clusters: List["FunctionalCluster"], paths: Dict[int, Dict[int, List[List[int]]]]) -> None:
@@ -2449,7 +2454,7 @@ class XRefer:
         self.sift_capa_matches()
         if self.git_lookups:
             log("Querying strings in git repositories...")
-        self.entities = _enrich_string_data(self.string_index_cache, self.entities, self.git_lookups)
+            self.entities = _enrich_string_data(self.string_index_cache, self.entities, self.git_lookups)
         self.load_imports()
         self.process_api_trace()
         self.save_categories()
@@ -2529,7 +2534,7 @@ class XRefer:
         if self.is_node_in_existing_paths(self.current_analysis_ep):
             return
 
-        show_wait_box(f"HIDECANCEL\nStarting Analysis...")
+        show_wait_box("HIDECANCEL\nStarting Analysis...")
         start_time = time()
         self.process_exclusions()
         self.run_secondary_analysis()

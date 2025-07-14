@@ -13,3 +13,5 @@
 # limitations under the License.
 
 from . import shim
+
+__all__ = ["shim"]

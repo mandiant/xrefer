@@ -15,7 +15,6 @@
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
 
-
 from xrefer.backend import BackEnd, get_current_backend
 
 
@@ -45,6 +44,10 @@ class LanguageBase(ABC):
         self.user_xrefs = []
         self.ep_annotation = ""
         self.id = "base"
+
+    def __str__(self) -> str:
+        """Return a string representation of the language analyzer."""
+        return f"{self.__class__.__name__} (ID: {self.id}, Entry Point: {self.entry_point})"
 
     @abstractmethod
     def lang_match(self) -> bool:
@@ -124,7 +127,6 @@ class LanguageBase(ABC):
             if exports:
                 # If no main function found, return the first export as a last resort
                 return next(iter(exports.values())).value
-
         return None
 
     def get_strings(self, filters: Optional[List[str]] = None) -> Dict[int, List[str]]:
@@ -177,7 +179,7 @@ class LanguageBase(ABC):
                         for call_xref in backend.get_xrefs_from(xref.source):
                             target_func = backend.get_function_at(call_xref.target)
                             print(f"WARNING: we are fallbacking to {target_func = }")
-                            if target_func: # and target_func.name in ["main", "_main", "__main"]:
+                            if target_func:  # and target_func.name in ["main", "_main", "__main"]:
                                 return call_xref.target.value
 
         return None

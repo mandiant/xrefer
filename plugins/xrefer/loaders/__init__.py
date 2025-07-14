@@ -12,4 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 from . import capa, trace
+from .capa import load_capa_json
+from .trace import parse_api_trace
+
+__all__ = ["capa", "trace", "load_capa_json", "parse_api_trace"]

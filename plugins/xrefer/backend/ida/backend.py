@@ -208,7 +208,7 @@ class IDABackend(BackEnd):
         """Get the path of the currently opened IDA database."""
         input_path: Optional[str] = idc.get_idb_path()
         if input_path:
-            input_path = input_path.rsplit('.i64', 1)[0]
+            input_path = input_path.rsplit(".i64", 1)[0]
         return input_path if input_path else ""
 
     #

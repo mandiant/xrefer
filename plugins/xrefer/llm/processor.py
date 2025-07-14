@@ -290,7 +290,6 @@ class LLMProcessor:
                 import traceback
 
                 traceback.print_exc()
-                log(f"Error in cluster {prompt_type.name.lower()}: {str(e)}")
                 return {}
 
         if ignore_token_limit:

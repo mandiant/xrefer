@@ -31,7 +31,6 @@ import idautils
 import idc
 import networkx as nx
 from PyQt5 import QtCore, QtGui, QtWidgets
-
 from xrefer.core.analyzer import XRefer
 from xrefer.core.helpers import (find_cluster_analysis, get_addr_from_text, is_windows_or_linux, longest_line_length, parse_cluster_id, remove_non_displayable, strip_color_codes,
                                  wrap_substring_with_string)
@@ -2014,7 +2013,7 @@ class XReferView(idaapi.simplecustviewer_t):
             # Add legend
             self.AddLine("")
             self.AddLine(f"    \x01{ida_lines.SCOLOR_DNAME}Legend:\x02{ida_lines.SCOLOR_DNAME}")
-            self.AddLine(f"    \x01\x12■\x02\x12 Current Function")
+            self.AddLine("    \x01\x12■\x02\x12 Current Function")
             self.AddLine(f"    \x01{ida_lines.SCOLOR_DNAME}■\x02{ida_lines.SCOLOR_DNAME} Cluster Node")
             self.AddLine(f"    \x01{ida_lines.SCOLOR_VOIDOP}■\x02{ida_lines.SCOLOR_VOIDOP} Intermediate Node (i)")
 
@@ -2491,7 +2490,7 @@ class XReferView(idaapi.simplecustviewer_t):
         if intermediate_memberships:
             roles.append("intermediary node")
 
-        header = f"This function serves following roles in clusters:"
+        header = "This function serves following roles in clusters:"
         self.AddLine(f"    \x01{ida_lines.SCOLOR_DATNAME}{header}\x02{ida_lines.SCOLOR_DATNAME}")
         self.AddLine(f"    {'-' * len(header)}")
 
@@ -4033,7 +4032,7 @@ class XReferView(idaapi.simplecustviewer_t):
             except:
                 self.state_machine.go_back()
                 self.update(True)
-                log(f"Graph too large to draw")
+                log("Graph too large to draw")
                 return
 
         self.ClearLines()

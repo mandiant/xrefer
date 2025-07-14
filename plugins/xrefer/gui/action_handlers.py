@@ -19,7 +19,6 @@ import ida_funcs
 import idaapi
 import idc
 from PyQt5 import QtCore, QtGui, QtWidgets
-
 from xrefer.gui.helpers import dump_indirect_calls, handle_entrypoint_selection, log
 from xrefer.gui.settings import XReferSettingsDialog
 
@@ -87,7 +86,7 @@ class ArtifactAnalysisHandler(idaapi.action_handler_t):
         from xrefer.plugin import plugin_instance
 
         try:
-            idaapi.show_wait_box(f"HIDECANCEL\n")
+            idaapi.show_wait_box("HIDECANCEL\n")
             log("Running artifact analysis...")
             xrefer_obj = plugin_instance.xrefer_view.xrefer_obj
             xrefer_obj.find_interesting_artifacts()
@@ -636,6 +635,7 @@ class ClusterRenameHandler(idaapi.action_handler_t):
         except Exception as e:
             log(f"Error during cluster-based renaming: {str(e)}")
             import traceback
+
             traceback.print_exc()
             return False
 

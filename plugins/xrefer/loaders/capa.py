@@ -13,13 +13,13 @@
 # limitations under the License.
 
 import json
+import os
 from typing import Any, Dict, List, Set, Union
 
 import capa.features.freeze as frz
 import capa.render.result_document as rd
 import capa.render.utils as rutils
 from xrefer.backend import get_current_backend
-
 from xrefer.core.helpers import log
 
 
@@ -38,6 +38,10 @@ def load_capa_json(capa_json_path: str) -> Dict[int, List[Dict[str, Any]]]:
         Dict[int, List[Dict[str, Any]]]: Dictionary mapping addresses to lists of
             rule match information dictionaries
     """
+
+    if not os.path.exists(capa_json_path) or not os.path.isfile(capa_json_path):
+        log(f"CAPA JSON file not found: {capa_json_path}")
+        return {}
     try:
         doc = get_doc_json_file(capa_json_path)
     except Exception as e:
@@ -110,6 +114,8 @@ def to_locations(addresses: Set[frz.Address]) -> Set[int]:
         elif addr.type == frz.AddressType.RELATIVE:
             v = addr.value
         elif addr.type == frz.AddressType.FILE:
+            import idaapi
+
             v = idaapi.get_fileregion_ea(addr.value)
         elif addr.type in (frz.AddressType.DN_TOKEN, frz.AddressType.DN_TOKEN_OFFSET, frz.AddressType.NO_ADDRESS):
             continue
