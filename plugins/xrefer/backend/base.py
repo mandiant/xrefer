@@ -632,6 +632,15 @@ class BackEnd(ABC):
 
         return module_name
 
+    @abstractmethod
+    def get_exports(self) -> Iterator[Tuple[str, Address]]:
+        """
+        Get all exported symbols from the binary.
+        Returns:
+            Iterator of (name, Address) tuples for each export
+        """
+        raise NotImplementedError("get_exports() must be implemented by the backend to provide export symbols.")
+
     #
     # User Annotations
     #

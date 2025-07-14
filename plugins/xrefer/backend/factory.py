@@ -1,5 +1,6 @@
 """backend factory for pythonic backend selection."""
 
+import importlib.util
 from abc import ABC, abstractmethod
 from typing import Dict, Optional
 
@@ -58,12 +59,7 @@ class BinaryNinjaBackendFactory(BackendFactory):
 
     def is_available(self) -> bool:
         """Check if Binary Ninja is available."""
-        try:
-            import binaryninja
-
-            return True
-        except ImportError:
-            return False
+        return importlib.util.find_spec("binaryninja") is not None
 
     def create_backend(self, bv=None, **kwargs) -> BackEnd:
         """Create Binary Ninja backend instance."""

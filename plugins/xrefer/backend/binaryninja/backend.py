@@ -224,6 +224,12 @@ class BNBackend(BackEnd):
             # Yield raw import data: (address, function_name, module_name)
             yield (Address(address), target_name, module_name)
 
+    def get_exports(self) -> Iterator[Tuple[str, Address]]:
+        """Get all exports from the Binary Ninja binary."""
+        for sym in self._bv.entry_functions:
+            assert isinstance(sym, bn.Function)
+            yield (sym.name, Address(sym.start))
+
     def _path_impl(self) -> str:
         return self._bv.file.filename
 

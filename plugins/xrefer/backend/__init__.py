@@ -28,7 +28,7 @@ def _ensure_backend_initialized():
         else:
             # Fallback to auto-detection (this will fail for Binary Ninja without bv parameter)
             Backend = get_backend()
-        
+
         # Import appropriate classes based on detected backend
         available = list_available_backends()
         if "ida" in available:
