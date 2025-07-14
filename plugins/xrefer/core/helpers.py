@@ -54,7 +54,7 @@ def check_internet_connectivity(timeout: float = 3.0) -> bool:
     return False
 
 
-def _enrich_string_data(str_indexes: List[int], entity_list: List[str], lookup: bool = True, max_threads: int = 50) -> List[Tuple[str, str, int, str, dict, list]]:
+def enrich_string_data_core(str_indexes: List[int], entity_list: List[str], lookup: bool = True, max_threads: int = 50) -> List[Tuple[str, str, int, str, dict, list]]:
     """
     Enrich string information by searching in Git repositories.
 

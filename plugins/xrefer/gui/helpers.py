@@ -297,7 +297,7 @@ class CollapseIndicator(QtWidgets.QWidget):
         self.reposition()
 
 
-from xrefer.core.helpers import _enrich_string_data, convert_int_to_hex, create_table_from_rows, find_cluster_analysis, get_visible_width, sort_clusters, word_wrap_text
+from xrefer.core.helpers import enrich_string_data_core, convert_int_to_hex, create_table_from_rows, find_cluster_analysis, get_visible_width, sort_clusters, word_wrap_text
 
 
 def enrich_string_data(str_indexes: List[int], entity_list: List[str], lookup: bool = True, max_threads: int = 50) -> List[Tuple[str, str, int, str, dict, list]]:
@@ -324,7 +324,7 @@ def enrich_string_data(str_indexes: List[int], entity_list: List[str], lookup: b
     """
     if lookup:
         log("Querying strings in git repositories...")
-    return _enrich_string_data(str_indexes, entity_list, lookup, max_threads)
+    return enrich_string_data_core(str_indexes, entity_list, lookup, max_threads)
 
 
 def create_colored_table_from_cols(headings: List[str], columns: List[List[Any]], color_tag: int) -> List[str]:
