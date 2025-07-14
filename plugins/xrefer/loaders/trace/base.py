@@ -36,13 +36,9 @@ class BaseTraceParser(ABC):
     def __init__(self, backend: Optional[BackEnd] = None):
         self.backend = backend or get_current_backend()
         self.image_base = self.backend.image_base
-        self.sample_sha256 = self.backend.binary_hash()
+        self.sample_sha256 = self.backend.binary_hash
         self.parser_id = None
         self.current_index = 0
-
-    def _get_input_file_sha256(self) -> str:
-        """Get SHA256 hash of the input file."""
-        return self.backend.binary_hash()
 
     def get_standard_api_name(self, api_name: str, known_imports: Dict[str, str]) -> str:
         """

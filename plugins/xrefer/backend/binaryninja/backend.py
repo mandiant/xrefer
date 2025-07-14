@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Iterator, Optional, Tuple
 
 import binaryninja as bn
@@ -231,7 +232,15 @@ class BNBackend(BackEnd):
             yield (sym.name, Address(sym.start))
 
     def _path_impl(self) -> str:
-        return self._bv.file.filename
+        input_path = self._bv.file.filename
+        if ".bndb" in input_path:
+            input_path = input_path.rsplit(".bndb", 1)[0]
+        return input_path if input_path else ""
+
+    def _binary_hash_impl(self):
+        raw_bv = self._bv.file.raw
+        all_bytes = raw_bv.read(0, raw_bv.length)
+        return hashlib.sha256(all_bytes).hexdigest()
 
     def instructions(self, start: Address, end: Address) -> Iterator[Address]:
         """Iterate over instruction addresses in the specified range."""

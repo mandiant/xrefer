@@ -119,14 +119,16 @@ class LanguageBase(ABC):
                 return address.value
 
         # Fallback: try to find main function through common patterns
-        fallback = self.fallback_cmain_detection()
+        fallback = self.fallback_cmain_detection(self.backend)
         if fallback:
             return fallback
         else:
             exports = self.backend.get_exports()
-            if exports:
-                # If no main function found, return the first export as a last resort
-                return next(iter(exports.values())).value
+            # If no main function found, return the first export as a last resort
+            first_export = next(exports, None)
+            if first_export:
+                return first_export[1].value
+
         return None
 
     def get_strings(self, filters: Optional[List[str]] = None) -> Dict[int, List[str]]:
@@ -179,7 +181,7 @@ class LanguageBase(ABC):
                         for call_xref in backend.get_xrefs_from(xref.source):
                             target_func = backend.get_function_at(call_xref.target)
                             print(f"WARNING: we are fallbacking to {target_func = }")
-                            if target_func:  # and target_func.name in ["main", "_main", "__main"]:
+                            if target_func:
                                 return call_xref.target.value
 
         return None

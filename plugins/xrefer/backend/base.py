@@ -2,7 +2,6 @@
 base classes for backend abstraction.
 """
 
-import hashlib
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -344,6 +343,7 @@ class BackEnd(ABC):
         """Get image base address where binary is loaded."""
         pass
 
+    @property
     def binary_hash(self) -> str:
         """
         Get SHA256 hash of the binary file (cached).
@@ -355,15 +355,15 @@ class BackEnd(ABC):
             BackendError: If binary file cannot be read
         """
         if self._hash_cache is None:
-            try:
-                sha256 = hashlib.sha256()
-                with open(self.path, "rb") as f:
-                    while chunk := f.read(8192):
-                        sha256.update(chunk)
-                self._hash_cache = sha256.hexdigest()
-            except (OSError, IOError) as e:
-                raise BackendError(f"Failed to read binary file: {e}")
+            self._hash_cache = self._binary_hash_impl()
         return self._hash_cache
+
+    @abstractmethod
+    def _binary_hash_impl(self) -> str:
+        """Backend-specific implementation to compute binary hash.
+        This should return the hash without
+        """
+        raise NotImplementedError("Backend must implement _binary_hash_impl() to provide binary hash.")
 
     def is_valid_address(self, address: Address) -> bool:
         """

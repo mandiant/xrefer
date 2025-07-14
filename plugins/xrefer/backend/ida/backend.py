@@ -211,6 +211,9 @@ class IDABackend(BackEnd):
             input_path = input_path.rsplit(".i64", 1)[0]
         return input_path if input_path else ""
 
+    def _binary_hash_impl(self):
+        return ida_nalt.retrieve_input_file_sha256().hex()
+
     #
     # Function Analysis
     #
