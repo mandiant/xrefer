@@ -82,7 +82,7 @@ class PromptTemplate(ABC):
         try:
             return self._parse_response_impl(response, **kwargs)
         except json.JSONDecodeError as e:
-            raise json.JSONDecodeError(_format_json_error(e, response))
+            raise ValueError(_format_json_error(e, response))
 
     @abstractmethod
     def _parse_response_impl(self, response: str, **kwargs) -> Dict[str, Any] | Set[int]:
