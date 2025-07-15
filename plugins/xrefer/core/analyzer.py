@@ -2454,7 +2454,7 @@ class XRefer:
         self.sift_capa_matches()
         if self.git_lookups:
             log("Querying strings in git repositories...")
-            self.entities = _enrich_string_data(self.string_index_cache, self.entities, self.git_lookups)
+        self.entities = _enrich_string_data(self.string_index_cache, self.entities, self.git_lookups)
         self.load_imports()
         self.process_api_trace()
         self.save_categories()
