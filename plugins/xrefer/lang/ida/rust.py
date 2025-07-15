@@ -27,8 +27,8 @@ import ida_ua
 import idaapi
 import idautils
 import idc
+import pysnooper
 from tabulate import tabulate
-
 from xrefer.core.helpers import filter_null_string, log, normalize_path
 from xrefer.gui.legacy.shim import BIN_SEARCH_FORWARD, SEARCH_DOWN, find_bytes, find_code, is_32bit
 from xrefer.lang.lang_base import LanguageBase
@@ -282,6 +282,10 @@ class LangRust(LanguageBase):
         self.lib_refs = []
         self.crate_columns = [[], []]  # [names], [versions]
         self.user_xrefs = []  # Store thread xrefs here
+
+    def initialize(self) -> None:
+        """Initialize Rust-specific data after language matching."""
+        super().initialize()
         self._process_if_rust()
 
     def lang_match(self) -> bool:
@@ -556,6 +560,10 @@ class LangRust(LanguageBase):
 
     def get_entry_point(self) -> Optional[int]:
         """Get Rust program entry point."""
+        # Only perform Rust-specific analysis if this is actually a Rust binary
+        if not self.lang_match():
+            return super().get_entry_point()
+
         # Try explicit rust_main first
         rust_main = idc.get_name_ea_simple("rust_main")
         if rust_main != idc.BADADDR:
@@ -578,6 +586,7 @@ class LangRust(LanguageBase):
         # Fallback to default entry point finder if everything else fails
         return super().get_entry_point()
 
+    @pysnooper.snoop()
     def _find_rust_main(self, main_ea: int) -> Optional[int]:
         """Find rust_main by analyzing main function."""
         start = idc.get_func_attr(main_ea, idc.FUNCATTR_START)

@@ -80,6 +80,9 @@ def get_language_object() -> Any:
         try:
             lang_obj = lang_class()
             if lang_obj.lang_match():
+                print(f"{lang_class.__name__}  matches current binary, initializing...")
+                # Only initialize if language matches to avoid side effects
+                lang_obj.initialize()
                 return lang_obj
         except Exception as e:
             log(f"Error instantiating {lang_class.__name__}: {e}")
@@ -88,4 +91,6 @@ def get_language_object() -> Any:
             traceback.print_exc()
 
     # Return default as fallback
-    return LangDefault()
+    default_lang = LangDefault()
+    default_lang.initialize()
+    return default_lang

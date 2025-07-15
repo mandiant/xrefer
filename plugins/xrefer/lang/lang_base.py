@@ -15,7 +15,10 @@
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
 
+import pysnooper
+
 from xrefer.backend import BackEnd, get_current_backend
+from xrefer.core.helpers import log
 
 
 class LanguageBase(ABC):
@@ -38,12 +41,17 @@ class LanguageBase(ABC):
     def __init__(self, backend: Optional[BackEnd] = None):
         """Initialize common attributes."""
         self.backend: "BackEnd" = backend or get_current_backend()
-        self.entry_point = self.get_entry_point()
-        self.strings = self.get_strings()
+        self.entry_point = None
+        self.strings = None
         self.lib_refs = []
         self.user_xrefs = []
         self.ep_annotation = ""
         self.id = "base"
+
+    def initialize(self) -> None:
+        """Initialize language-specific data after language matching."""
+        self.entry_point = self.get_entry_point()
+        self.strings = self.get_strings()
 
     def __str__(self) -> str:
         """Return a string representation of the language analyzer."""
@@ -63,6 +71,7 @@ class LanguageBase(ABC):
         """Check if this language matches the current binary."""
         pass
 
+    @pysnooper.snoop()
     def get_entry_point(self) -> Optional[int]:
         """
         Get the user-defined entry point address by checking a prioritized list of common
@@ -116,6 +125,7 @@ class LanguageBase(ABC):
         for point in entry_points:
             address = self.backend.get_address_for_name(point)
             if address is not None:
+                log(f"DEBUG: Found entry point '{point}' at 0x{address.value:x}")
                 return address.value
 
         # Fallback: try to find main function through common patterns
@@ -180,7 +190,7 @@ class LanguageBase(ABC):
                         # Look for functions called within this function
                         for call_xref in backend.get_xrefs_from(xref.source):
                             target_func = backend.get_function_at(call_xref.target)
-                            print(f"WARNING: we are fallbacking to {target_func = }")
+                            log(f"WARNING: we are fallbacking to {target_func = }")
                             if target_func:
                                 return call_xref.target.value
 

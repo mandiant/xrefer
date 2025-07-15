@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import pysnooper
 from xrefer.backend import FunctionType
 from xrefer.lang.lang_base import LanguageBase
 
@@ -26,10 +27,16 @@ class LangDefault(LanguageBase):
     def __init__(self, backend=None):
         super().__init__(backend=backend)
         self.id = "lang_default"
+
+    def initialize(self) -> None:
+        """Initialize default language data."""
+        super().initialize()
         self._process_lib_refs()
 
+    @pysnooper.snoop()
     def lang_match(self) -> bool:
         """Always matches as fallback."""
+        print(f"lang_match.{self.id = } -> True")
         return True
 
     def _process_lib_refs(self) -> None:
