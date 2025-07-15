@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from xrefer.backend import FunctionType
+from xrefer.core.helpers import log
 from xrefer.lang.lang_base import LanguageBase
 
 
@@ -34,7 +35,7 @@ class LangDefault(LanguageBase):
 
     def lang_match(self) -> bool:
         """Always matches as fallback."""
-        print(f"lang_match.{self.id = } -> True")
+        log(f"lang_match.{self.id = } -> True")
         return True
 
     def _process_lib_refs(self) -> None:

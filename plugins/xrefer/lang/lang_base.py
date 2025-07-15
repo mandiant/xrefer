@@ -122,7 +122,6 @@ class LanguageBase(ABC):
         for point in entry_points:
             address = self.backend.get_address_for_name(point)
             if address is not None:
-                log(f"DEBUG: Found entry point '{point}' at 0x{address.value:x}")
                 return address.value
 
         # Fallback: try to find main function through common patterns

@@ -1453,7 +1453,6 @@ class XRefer:
 
             if not self.current_analysis_ep:
                 self.current_analysis_ep = self.lang.entry_point
-            print(f"wooooow {self.lang = }, {self.lang.entry_point = :#x}, {self.current_analysis_ep = :#x}")
 
             if self.current_analysis_ep in self.paths:
                 return
@@ -2634,7 +2633,7 @@ class XRefer:
             import ida_idaapi
             import idc
 
-            print(f"Error {idc.get_func_name(ida_idaapi.ea_t(initial)) = }")
+            log(f"Error {idc.get_func_name(ida_idaapi.ea_t(initial)) = }")
             raise e
 
         log(f"Building call paths :: {func_name_initial} -> {func_name_final}")
