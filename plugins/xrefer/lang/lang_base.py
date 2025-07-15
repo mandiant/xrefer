@@ -15,7 +15,6 @@
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
 
-import pysnooper
 
 from xrefer.backend import BackEnd, get_current_backend
 from xrefer.core.helpers import log
@@ -71,7 +70,6 @@ class LanguageBase(ABC):
         """Check if this language matches the current binary."""
         pass
 
-    @pysnooper.snoop()
     def get_entry_point(self) -> Optional[int]:
         """
         Get the user-defined entry point address by checking a prioritized list of common

@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
 
 from xrefer.backend import Address, BackEnd, FunctionType, XrefType, get_current_backend
 from xrefer.core.clusters import ClusterManager, FunctionalCluster
-from xrefer.core.helpers import _enrich_string_data, log, log_elapsed_time
+from xrefer.core.helpers import enrich_string_data_core, log, log_elapsed_time
 from xrefer.core.settings import XReferSettingsManager
 from xrefer.lang import get_language_object
 from xrefer.llm.artifact_analyzer import ArtifactAnalyzer
@@ -2454,7 +2454,7 @@ class XRefer:
         self.sift_capa_matches()
         if self.git_lookups:
             log("Querying strings in git repositories...")
-        self.entities = _enrich_string_data(self.string_index_cache, self.entities, self.git_lookups)
+        self.entities = enrich_string_data_core(self.string_index_cache, self.entities, self.git_lookups)
         self.load_imports()
         self.process_api_trace()
         self.save_categories()
