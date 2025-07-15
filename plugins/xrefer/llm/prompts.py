@@ -69,7 +69,7 @@ class PromptTemplate(ABC):
         """
         raise NotImplementedError
 
-    def parse_response(self, response: str, **kwargs) -> Any:
+    def parse_response(self, response: str, **kwargs) -> Dict[str, Any] | Set[int]:
         """
         Parse the LLM response into structured data.
 
@@ -80,12 +80,12 @@ class PromptTemplate(ABC):
             Parsed data in structured format
         """
         try:
-            return self._parse_response_impl(response)
+            return self._parse_response_impl(response, **kwargs)
         except json.JSONDecodeError as e:
             raise json.JSONDecodeError(_format_json_error(e, response))
 
     @abstractmethod
-    def _parse_response_impl(self, response: str) -> Dict:
+    def _parse_response_impl(self, response: str, **kwargs) -> Dict[str, Any] | Set[int]:
         """
         Parse LLM response into structured format.
         """
