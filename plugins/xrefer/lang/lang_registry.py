@@ -44,7 +44,7 @@ def get_language_modules() -> List[Type[LanguageBase]]:
                 if issubclass(obj, LanguageBase) and obj != LanguageBase:
                     lang_classes.append(obj)
         except Exception as e:
-            log(f"Error loading language module {module_name}: {e}")
+            log(f"[-] Error loading language module {module_name}: {e}")
 
     # Now check for new backend-organized structure using available backends
     available_backends = list_available_backends()
@@ -67,7 +67,7 @@ def get_language_modules() -> List[Type[LanguageBase]]:
                             if issubclass(obj, LanguageBase) and obj != LanguageBase:
                                 lang_classes.append(obj)
                     except Exception as e:
-                        log(f"Error loading language module {backend_name}.{module_name}: {e}")
+                        log(f"[-] Error loading language module {backend_name}.{module_name}: {e}")
     lang_str = ", ".join([cls.__name__ for cls in lang_classes])
     log(f"Found language modules: {lang_str}")
     return lang_classes
@@ -85,7 +85,7 @@ def get_language_object() -> Any:
                 lang_obj.initialize()
                 return lang_obj
         except Exception as e:
-            log(f"Error instantiating {lang_class.__name__}: {e}")
+            log(f"[-] Error instantiating {lang_class.__name__}: {e}")
             import traceback
 
             traceback.print_exc()

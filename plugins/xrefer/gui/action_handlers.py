@@ -19,6 +19,7 @@ import ida_funcs
 import idaapi
 import idc
 from PyQt5 import QtCore, QtGui, QtWidgets
+
 from xrefer.gui.helpers import dump_indirect_calls, handle_entrypoint_selection, log
 from xrefer.gui.settings import XReferSettingsDialog
 
@@ -103,7 +104,7 @@ class ArtifactAnalysisHandler(idaapi.action_handler_t):
 
         except Exception as e:
             idaapi.hide_wait_box()
-            log(f"Error during artifact analysis: {str(e)}")
+            log(f"[-] Error during artifact analysis: {str(e)}")
             return False
 
     def update(self, ctx: Any) -> int:
@@ -165,7 +166,7 @@ class ClusterInterestingFunctionsHandler(idaapi.action_handler_t):
 
         except Exception as e:
             idaapi.hide_wait_box()
-            log(f"Error during cluster analysis: {str(e)}")
+            log(f"[-] Error during cluster analysis: {str(e)}")
             return False
 
     def update(self, ctx: Any) -> int:
@@ -216,7 +217,7 @@ class ClusterEverythingHandler(idaapi.action_handler_t):
 
         except Exception as e:
             idaapi.hide_wait_box()
-            log(f"Error during full cluster analysis: {str(e)}")
+            log(f"[-] Error during full cluster analysis: {str(e)}")
             return False
 
     def update(self, ctx: Any) -> int:
@@ -263,7 +264,7 @@ class AboutDialogHandler(idaapi.action_handler_t):
                 log("Failed to load logo pixmap")
                 logo_label.setText("XR")
         except Exception as e:
-            log(f"Error loading logo: {str(e)}")
+            log(f"[-] Error loading logo: {str(e)}")
             logo_label.setText("XR")
 
         # Center the logo
@@ -475,7 +476,7 @@ class CopyInterestingStringsHandler(idaapi.action_handler_t):
             return True
 
         except Exception as e:
-            log(f"Error copying strings to clipboard: {str(e)}")
+            log(f"[-] Error copying strings to clipboard: {str(e)}")
             return False
 
     def update(self, ctx: Any) -> int:
@@ -633,7 +634,7 @@ class ClusterRenameHandler(idaapi.action_handler_t):
             plugin_instance.xrefer_view.xrefer_obj.rename_cluster_functions()
             return True
         except Exception as e:
-            log(f"Error during cluster-based renaming: {str(e)}")
+            log(f"[-] Error during cluster-based renaming: {str(e)}")
             import traceback
 
             traceback.print_exc()

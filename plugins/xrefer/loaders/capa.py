@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Set, Union
 import capa.features.freeze as frz
 import capa.render.result_document as rd
 import capa.render.utils as rutils
+
 from xrefer.backend import get_current_backend
 from xrefer.core.helpers import log
 

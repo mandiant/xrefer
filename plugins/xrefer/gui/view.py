@@ -31,6 +31,7 @@ import idautils
 import idc
 import networkx as nx
 from PyQt5 import QtCore, QtGui, QtWidgets
+
 from xrefer.core.analyzer import XRefer
 from xrefer.core.helpers import (find_cluster_analysis, get_addr_from_text, is_windows_or_linux, longest_line_length, parse_cluster_id, remove_non_displayable, strip_color_codes,
                                  wrap_substring_with_string)
@@ -176,7 +177,7 @@ class XReferView(idaapi.simplecustviewer_t):
                 self.qt_widget = None
 
         except Exception as e:
-            log(f"Error during cleanup: {str(e)}")
+            log(f"[-] Error during cleanup: {str(e)}")
 
     def s_view_activated(self) -> None:
         """
@@ -244,7 +245,7 @@ class XReferView(idaapi.simplecustviewer_t):
                 self.update(ea=self.func_ea)
 
         except Exception as e:
-            log(f"Error during create: {str(e)}")
+            log(f"[-] Error during create: {str(e)}")
             log(traceback.format_exc())
             self.cleanup()
 
@@ -285,7 +286,7 @@ class XReferView(idaapi.simplecustviewer_t):
             if self.qt_widget:
                 self.qt_widget.repaint()
         except Exception as e:
-            log(f"Error showing custom window: {str(e)}")
+            log(f"[-] Error showing custom window: {str(e)}")
             self.cleanup()
 
     def Show(self, *args) -> None:
@@ -441,7 +442,7 @@ class XReferView(idaapi.simplecustviewer_t):
                     QtCore.QTimer.singleShot(100, lambda: (self.collapse_indicator.reposition(), self.collapse_indicator.raise_()))
 
         except Exception as e:
-            log(f"Error creating dock widget: {str(e)}")
+            log(f"[-] Error creating dock widget: {str(e)}")
             self.cleanup()
             return
 
@@ -2018,7 +2019,7 @@ class XReferView(idaapi.simplecustviewer_t):
             self.AddLine(f"    \x01{ida_lines.SCOLOR_VOIDOP}■\x02{ida_lines.SCOLOR_VOIDOP} Intermediate Node (i)")
 
         except Exception as e:
-            log(f"Error creating intermediate path graph: {str(e)}")
+            log(f"[-] Error creating intermediate path graph: {str(e)}")
             self.AddLine(f"    Error: {str(e)}")
 
     def _classify_node_roles(self, func_ea: int) -> Dict[int, Dict[str, Union[str, Optional[int]]]]:
@@ -2248,14 +2249,14 @@ class XReferView(idaapi.simplecustviewer_t):
                 self.AddLine(f"    \x01{ida_lines.SCOLOR_SEGNAME}- Press ESC to return to previous view\x02{ida_lines.SCOLOR_SEGNAME}")
 
             except Exception as e:
-                log(f"Error converting graph to ASCII: {str(e)}")
+                log(f"[-] Error converting graph to ASCII: {str(e)}")
                 self.AddLine(f"{INDENT}Error visualizing graph: {str(e)}")
 
         except nx.NetworkXError as e:
             log(f"NetworkX error: {str(e)}")
             self.AddLine(f"{INDENT}Error creating graph: {str(e)}")
         except Exception as e:
-            log(f"Error in cluster graph generation: {str(e)}")
+            log(f"[-] Error in cluster graph generation: {str(e)}")
             self.AddLine(f"{INDENT}Unexpected error: {str(e)}")
 
     def _format_cluster_graph_line(self, line: str, highlight_addr: Optional[int] = None, format_type: str = "default") -> str:
@@ -2618,7 +2619,7 @@ class XReferView(idaapi.simplecustviewer_t):
             self._draw_cluster_nodes(cluster, self.func_ea)
 
         except Exception as e:
-            log(f"Error drawing cluster graph: {str(e)}")
+            log(f"[-] Error drawing cluster graph: {str(e)}")
             self.AddLine(f"{self.INDENT}Error: {str(e)}")
             raise e
 
@@ -2896,7 +2897,7 @@ class XReferView(idaapi.simplecustviewer_t):
                     self.Jump(total_line_offset, 0)
 
         except Exception as e:
-            log(f"Error drawing cluster nodes: {str(e)}")
+            log(f"[-] Error drawing cluster nodes: {str(e)}")
 
             self.AddLine(f"{self.INDENT}Error visualizing nodes: {str(e)}")
 

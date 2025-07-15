@@ -290,14 +290,14 @@ class CollapseIndicator(QtWidgets.QWidget):
             self.raise_()
 
         except Exception as e:
-            log(f"Error in reposition: {str(e)}")
+            log(f"[-] Error in reposition: {str(e)}")
 
     def showEvent(self, event):
         super().showEvent(event)
         self.reposition()
 
 
-from xrefer.core.helpers import enrich_string_data_core, convert_int_to_hex, create_table_from_rows, find_cluster_analysis, get_visible_width, sort_clusters, word_wrap_text
+from xrefer.core.helpers import convert_int_to_hex, create_table_from_rows, enrich_string_data_core, find_cluster_analysis, get_visible_width, sort_clusters, word_wrap_text
 
 
 def enrich_string_data(str_indexes: List[int], entity_list: List[str], lookup: bool = True, max_threads: int = 50) -> List[Tuple[str, str, int, str, dict, list]]:
@@ -908,7 +908,7 @@ def create_cluster_relationship_graph(clusters: List["FunctionalCluster"], analy
         return graph
 
     except Exception as e:
-        log(f"Error creating relationship graph: {str(e)}")
+        log(f"[-] Error creating relationship graph: {str(e)}")
         return None
 
 

@@ -471,7 +471,7 @@ class XRefer:
             log(f"Found {len(interesting_artifacts)} potential interesting artifacts: {summary}")
 
         except Exception as e:
-            log(f"Error during interesting artifact analysis: {str(e)}")
+            log(f"[-] Error during interesting artifact analysis: {str(e)}")
             self.interesting_artifacts = set()
 
     def process_api_trace(self) -> None:
@@ -1152,13 +1152,13 @@ class XRefer:
                 log(f"Generated analysis for {len(self.cluster_analysis.get('clusters', {}))} clusters")
 
             except Exception as e:
-                log(f"Error analyzing clusters: {str(e)}")
+                log(f"[-] Error analyzing clusters: {str(e)}")
                 # Restore previous state
                 self.clusters = current_clusters
                 self.cluster_analysis = current_analysis
 
         except Exception as e:
-            log(f"Error in cluster analysis: {str(e)}")
+            log(f"[-] Error in cluster analysis: {str(e)}")
             # Restore previous state
             self.clusters = current_clusters
             self.cluster_analysis = current_analysis
@@ -1215,7 +1215,7 @@ class XRefer:
                 except KeyError as e:
                     log(f"KeyError processing function 0x{func_ea:x}: {str(e)}")
                 except Exception as e:
-                    log(f"Error processing function 0x{func_ea:x}: {str(e)}")
+                    log(f"[-] Error processing function 0x{func_ea:x}: {str(e)}")
 
             log(f"Found {len(entities_to_cluster)} interesting entities")
 
@@ -1228,7 +1228,7 @@ class XRefer:
             import traceback
 
             traceback.print_exc()
-            log(f"Error in cluster_all_non_excluded: {str(e)}")
+            log(f"[-] Error in cluster_all_non_excluded: {str(e)}")
 
     def add_missing_intermediate_nodes(self, clusters: List["FunctionalCluster"], paths: Dict[int, Dict[int, List[List[int]]]]) -> None:
         """
@@ -1472,7 +1472,7 @@ class XRefer:
                 self.run_full_analysis()
                 self.save_analysis()
             except Exception as err:
-                log(f"Error running full analysis: {err}")
+                log(f"[-] Error running full analysis: {err}")
                 import traceback
 
                 traceback.print_exc()
@@ -1615,7 +1615,7 @@ class XRefer:
                 Categorizer.set_model_config(config_2)
 
         except Exception as err:
-            log(f"Error loading config: {str(err)}")
+            log(f"[-] Error loading config: {str(err)}")
 
     def sync_image_base(self, manual: bool = True) -> None:
         """

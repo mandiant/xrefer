@@ -147,7 +147,7 @@ class XReferSettingsManager:
             log("Could not acquire settings lock, using defaults")
             return default_settings
         except Exception as e:
-            log(f"Error loading settings: {str(e)}")
+            log(f"[-] Error loading settings: {str(e)}")
             return default_settings
 
     def migrate_settings(self, current_settings: dict, default_settings: dict) -> None:
@@ -198,7 +198,7 @@ class XReferSettingsManager:
                                     if idb != self.current_idb:
                                         settings_to_save["idb_specific_paths"][idb] = paths
                     except Exception as e:
-                        log(f"Error reading existing settings: {str(e)}")
+                        log(f"[-] Error reading existing settings: {str(e)}")
 
                 # Write to temp file first
                 try:
@@ -207,14 +207,14 @@ class XReferSettingsManager:
                         f.flush()
                         os.fsync(f.fileno())
                 except Exception as e:
-                    log(f"Error writing temp file: {str(e)}")
+                    log(f"[-] Error writing temp file: {str(e)}")
                     raise
 
                 # Atomic rename
                 try:
                     os.replace(temp_file, self.settings_file)
                 except Exception as e:
-                    log(f"Error during atomic rename: {str(e)}")
+                    log(f"[-] Error during atomic rename: {str(e)}")
                     raise
 
         except IOError as e:
@@ -227,7 +227,7 @@ class XReferSettingsManager:
                 if os.path.exists(temp_file):
                     os.unlink(temp_file)
             except Exception as e:
-                log(f"Error cleaning up temp file: {str(e)}")
+                log(f"[-] Error cleaning up temp file: {str(e)}")
 
     def get_default_exclusions(self) -> ExclusionData:
         return {"apis": [], "libs": [], "strings": [], "capa": []}

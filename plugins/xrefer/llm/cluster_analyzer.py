@@ -83,12 +83,12 @@ class ClusterAnalyzer:
                 results = processor.process_items(cluster_data, prompt_type=PromptType.CLUSTER_ANALYZER, ignore_token_limit=True)
 
                 if not isinstance(results, dict):
-                    log("Error: LLM returned invalid format")
+                    log("[-] Error: LLM returned invalid format")
                     return {}
 
                 required_keys = {"clusters", "binary_description", "binary_category"}
                 if not all(key in results for key in required_keys):
-                    log("Error: Missing required keys in LLM response")
+                    log("[-] Error: Missing required keys in LLM response")
                     log(f"Found keys: {list(results.keys())}")
                     return {}
 
@@ -111,7 +111,7 @@ class ClusterAnalyzer:
                     results = processor.process_items(cluster_data, prompt_type=PromptType.CLUSTER_ANALYZER, ignore_token_limit=True)
 
                     if not isinstance(results, dict) or not results:
-                        log("Error: LLM returned erroneous response, please re-start cluster analysis")
+                        log("[-] Error: LLM returned erroneous response, please re-start cluster analysis")
                         break
 
                     # Extract clusters from partial result
@@ -130,11 +130,11 @@ class ClusterAnalyzer:
 
                 # After processing all batches, ensure required fields are present
                 if not all_clusters_result:
-                    log("Error: No cluster data received after all batches")
+                    log("[-] Error: No cluster data received after all batches")
                     return {}
 
                 if binary_description is None or binary_category is None:
-                    log("Error: Missing binary_description or binary_category after batched analysis")
+                    log("[-] Error: Missing binary_description or binary_category after batched analysis")
                     return {}
 
                 final_result = {"clusters": all_clusters_result, "binary_description": binary_description, "binary_category": binary_category}
@@ -144,7 +144,7 @@ class ClusterAnalyzer:
                 return final_result
 
         except Exception as e:
-            log(f"Error analyzing clusters: {str(e)}")
+            log(f"[-] Error analyzing clusters: {str(e)}")
             return {}
 
     @staticmethod
@@ -217,7 +217,7 @@ class ClusterAnalyzer:
                                 formatted += f"{indent}  CAPA: {', '.join(capa)}\n"
 
                         except Exception as e:
-                            log(f"Error getting artifacts for function 0x{node:x}: {str(e)}")
+                            log(f"[-] Error getting artifacts for function 0x{node:x}: {str(e)}")
                             continue
 
                 # Add call flow

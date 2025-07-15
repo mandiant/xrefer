@@ -232,11 +232,11 @@ class VMRayTraceParser(BaseTraceParser):
             zf = ZipFile(fd)
             zf.setpassword(b"infected")
         except BadZipfile:
-            log("Error: Bad zip file")
+            log("[-] Error: Bad zip file")
             return {}
 
         if "logs/flog.xml" not in zf.namelist() or "logs/summary_v2.json" not in zf.namelist():
-            log("Error: flog.xml or summary_v2.json not found in archive.")
+            log("[-] Error: flog.xml or summary_v2.json not found in archive.")
             return {}
 
         try:
@@ -319,7 +319,7 @@ class VMRayTraceParser(BaseTraceParser):
                 )
 
         except Exception as e:
-            log(f"Error parsing VMRay trace: {str(e)}")
+            log(f"[-] Error parsing VMRay trace: {str(e)}")
             return {}
 
         return self.handle_duplicates(trace_dict)

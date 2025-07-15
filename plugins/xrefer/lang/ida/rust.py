@@ -28,6 +28,7 @@ import idaapi
 import idautils
 import idc
 from tabulate import tabulate
+
 from xrefer.core.helpers import filter_null_string, log, normalize_path
 from xrefer.gui.legacy.shim import BIN_SEARCH_FORWARD, SEARCH_DOWN, find_bytes, find_code, is_32bit
 from xrefer.lang.lang_base import LanguageBase

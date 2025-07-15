@@ -256,7 +256,7 @@ class CapeTraceParser(BaseTraceParser):
                 )
 
         except Exception as e:
-            log(f"Error parsing Cape sandbox trace: {str(e)}")
+            log(f"[-] Error parsing Cape sandbox trace: {str(e)}")
             return {}
 
         # Handle duplicates

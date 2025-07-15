@@ -15,7 +15,6 @@
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
 
-
 from xrefer.backend import BackEnd, get_current_backend
 from xrefer.core.helpers import log
 

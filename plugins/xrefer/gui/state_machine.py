@@ -221,7 +221,7 @@ class XReferStateMachine(StateMachine):
                             # log(f"Successfully transitioned to {self.current_state.name}")
                             return True, cursor_pos
                         except Exception as e:
-                            # log(f"Error during transition: {str(e)}")
+                            # log(f"[-] Error during transition: {str(e)}")
                             return False, None
                 # log(f"No transition found from {current_state.name} to {prev_state.name}")
                 return False, None
