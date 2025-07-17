@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import enum
 import gzip
 import json
 import os
@@ -19,21 +20,16 @@ import pickle
 import re
 import shutil
 from collections import OrderedDict, defaultdict, deque
+from dataclasses import dataclass
 from operator import itemgetter
 from pathlib import Path
 from time import time
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
 
-import ida_funcs
-import ida_lines
-import ida_xref
-import idaapi
-import idautils
-import idc
-from PyQt5.QtWidgets import QDialog
+from xrefer.backend import Address, BackEnd, FunctionType, XrefType, get_current_backend
 from xrefer.core.clusters import ClusterManager, FunctionalCluster
-from xrefer.core.helpers import create_xrefs_table_colored, enrich_string_data, log, log_elapsed_time
-from xrefer.core.settings import MissingFilesDialog, XReferSettingsManager
+from xrefer.core.helpers import enrich_string_data_core, log, log_elapsed_time
+from xrefer.core.settings import XReferSettingsManager
 from xrefer.lang import get_language_object
 from xrefer.llm.artifact_analyzer import ArtifactAnalyzer
 from xrefer.llm.base import ModelConfig, ModelType
@@ -41,6 +37,46 @@ from xrefer.llm.categorizer import CATEGORIES, Categorizer
 from xrefer.llm.cluster_analyzer import ClusterAnalyzer
 from xrefer.loaders.capa import load_capa_json
 from xrefer.loaders.trace import parse_api_trace
+
+if TYPE_CHECKING:
+    from xrefer.lang import LanguageBase
+
+try:
+    from idaapi import hide_wait_box, show_wait_box
+except ImportError:
+
+    def show_wait_box(message: str, *args, **kwargs) -> None:
+        """Fallback for show_wait_box if idaapi is not available."""
+        print(f"Wait: {message}", *args, **kwargs)
+
+    def hide_wait_box(*args, **kwargs) -> None:
+        """Fallback for hide_wait_box if idaapi is not available."""
+        print("Wait box hidden", *args, **kwargs)
+
+
+class EntityType(enum.IntEnum):
+    """Entity types used throughout the analysis."""
+
+    LIBRARY = 1
+    IMPORT = 2
+    STRING = 3
+    CAPA = 4
+    API_TRACE = 5
+
+
+@dataclass(frozen=True, slots=True)
+class Reference:
+    """Represents a cross-reference in the binary."""
+
+    address: int  # Address where the reference occurs
+    entity_index: int  # Index into the entities list
+    entity_type: EntityType  # Type of entity being referenced
+    detail: Optional[Any] = None  # Optional extra detail for some references
+
+    @property
+    def type_name(self) -> str:
+        """Get human-readable type name."""
+        return self.entity_type.name.lower()
 
 
 class XRefer:
@@ -56,7 +92,7 @@ class XRefer:
     INDIRECT_XREFS = 1
     COMBINED_XREFS = 2
 
-    def __init__(self, ep: Optional[int] = None) -> None:
+    def __init__(self, ep: Optional[int] = None, backend: Optional[BackEnd] = None, auto_analyze: bool = True) -> None:
         """
         Initialize the XRefer object.
 
@@ -69,13 +105,19 @@ class XRefer:
             self.exclusions = self.settings_manager.load_exclusions()
 
             self.table_names: Dict[int, str] = {1: "INDIRECT LIBRARY XREFS", 2: "INDIRECT IMPORT XREFS", 3: "INDIRECT STRING XREFS", 4: "INDIRECT CAPA XREFS"}
-            self.entity_type: Dict[int, str] = {1: "libs", 2: "imports", 3: "strings", 4: "capa", 5: "api_trace"}
+            self.entity_type: Dict[EntityType, str] = {
+                EntityType.LIBRARY: "libs",
+                EntityType.IMPORT: "imports",
+                EntityType.STRING: "strings",
+                EntityType.CAPA: "capa",
+                EntityType.API_TRACE: "api_trace",
+            }
             self.entity_suffix_map: Dict[str, str] = {"libs": "libs_ea", "imports": "imports_ea", "strings": "strings_ea", "capa": "capa_ea", "api_trace": "api_trace_ea"}
             self.color_tags: Dict[str, int] = {
-                self.table_names[1]: ida_lines.SCOLOR_DEMNAME,
-                self.table_names[2]: ida_lines.SCOLOR_IMPNAME,
-                self.table_names[3]: ida_lines.SCOLOR_DSTR,
-                self.table_names[4]: ida_lines.SCOLOR_CODNAME,
+                self.table_names[1]: "",  # ida_lines.SCOLOR_DEMNAME,
+                self.table_names[2]: "",  # ida_lines.SCOLOR_IMPNAME,
+                self.table_names[3]: "",  # ida_lines.SCOLOR_DSTR,
+                self.table_names[4]: "",  # ida_lines.SCOLOR_CODNAME,
             }
             # global_xrefs >
             # {func_ea: {self.DIRECT_XREFS: {'libs': set() of entities,
@@ -117,14 +159,14 @@ class XRefer:
             # graph_cache >
             # {entity index: ascii text based graph string}
 
-            self.lang: Any = None
+            self.lang: "LanguageBase" = None
             self.capa_matches: Optional[Dict[int, List[Dict[str, Any]]]] = None
             self.categories: Optional[Dict[str, Any]] = None
             self.current_analysis_ep: Optional[int] = ep
-            self.imports: List[Tuple[int, int, int]] = []
-            self.strings: List[List[Tuple[int, int, int]]] = [[], []]
-            self.lib_refs: List[Tuple[int, int, int]] = []
-            self.mapped_refs: List[Tuple[int, int, int]] = []
+            self.imports: List[Reference] = []
+            self.strings: List[List[Reference]] = [[], []]
+            self.lib_refs: List[Reference] = []
+            self.mapped_refs: List[Reference] = []
             self.api_trace_data: Dict[int, Dict[str, List[Dict[str, Any]]]] = {}
             self.global_xrefs: Dict[int, Dict[int, Dict[str, Union[Set[int], Dict[int, Set[int]]]]]] = {}
             self.string_index_cache: List[int] = []
@@ -140,17 +182,20 @@ class XRefer:
             self.leaf_funcs: Set[int] = set()
             self.git_lookups: bool = True
             self.llm_lookups: bool = True
-            self.image_base: int = idaapi.get_imagebase()
-            self.idb_path: str = idc.get_idb_path()
+            self._backend: BackEnd = backend or get_current_backend()
+            self.image_base: int = self._backend.image_base
             self.plugin_subdir_path: str = str(Path(__file__).resolve().parent.parent)
             self._processed_orphan_thunks: Set[int] = set()
             self.clusters = None
             self.cluster_analysis = None
             self.configure_llm_and_lookups()
-            self.load_analysis()
+
+            # Run analysis if requested
+            if auto_analyze:
+                self.load_analysis()
 
         finally:
-            idaapi.hide_wait_box()
+            hide_wait_box()
 
     def process_exclusions(self) -> None:
         """
@@ -167,10 +212,10 @@ class XRefer:
         exclusions = settings_manager.load_exclusions()
 
         exclusion_maps = {
-            1: set(name.lower() for name in exclusions["libs"]),  # lib type
-            2: set(name.lower() for name in exclusions["apis"]),  # api type
-            3: set(name.lower() for name in exclusions["strings"]),  # string type
-            4: set(name.lower() for name in exclusions["capa"]),  # capa type
+            EntityType.LIBRARY: set(name.lower() for name in exclusions["libs"]),  # lib type
+            EntityType.IMPORT: set(name.lower() for name in exclusions["apis"]),  # api type
+            EntityType.STRING: set(name.lower() for name in exclusions["strings"]),  # string type
+            EntityType.CAPA: set(name.lower() for name in exclusions["capa"]),  # capa type
         }
 
         # Pre-compile regex for API suffix extraction
@@ -191,7 +236,7 @@ class XRefer:
                 continue
 
             # Only extract suffix for APIs, use full name for others
-            if entity_type == 2 and "." in entity_name:  # API type
+            if entity_type == EntityType.IMPORT and "." in entity_name:  # API type
                 name = suffix_pattern.search(entity_name).group(0).lower()
             else:
                 name = entity_name.lower()
@@ -258,20 +303,21 @@ class XRefer:
             return
 
         log("Sifting library references...")
-        lib_list = [x[1] for x in self.lang.lib_refs]
 
         if self.llm_lookups:
+            lib_list = [x[1] for x in self.lang.lib_refs]
             _, self.categories["lib_categories"] = Categorizer.categorize(lib_list, self.categories["libs"], type="lib")
 
         for lib_ref in self.lang.lib_refs:
             try:
                 category_index = self.categories["libs"][lib_ref[1]]
                 category = self.categories["lib_categories"][category_index]
-                entity = (category, lib_ref[1], 1)
-            except:
-                entity = (lib_ref[3], lib_ref[1], 1)
+                entity = (category, lib_ref[1], EntityType.LIBRARY)
+            except (KeyError, IndexError) as e:
+                log(f"Warning: Failed to categorize library {lib_ref[1]}: {e}")
+                entity = (lib_ref[3], lib_ref[1], EntityType.LIBRARY)
             e_index = self.set_and_get_entity_index(entity)
-            self.lib_refs.append((lib_ref[0], e_index, lib_ref[2]))
+            self.lib_refs.append(Reference(lib_ref[0], e_index, lib_ref[2]))
 
     def sift_strings(self) -> None:
         """
@@ -303,9 +349,9 @@ class XRefer:
                 e_index = self.set_and_get_entity_index(entity)
 
                 if len(self.lang.strings[str_ea]) == 3:
-                    self.strings[1].append((str_ea, e_index, 3, self.lang.strings[str_ea][2]))
+                    self.strings[1].append(Reference(str_ea, e_index, EntityType.STRING, self.lang.strings[str_ea][2]))
                 else:
-                    self.strings[0].append((str_ea, e_index, 3))
+                    self.strings[0].append(Reference(str_ea, e_index, EntityType.STRING))
 
                 if e_index not in self.string_index_cache:
                     self.string_index_cache.append(e_index)
@@ -331,11 +377,12 @@ class XRefer:
                         namespace = namespace[0]
                     else:
                         namespace = "/".join(namespace[0:2])
-                    entity = (namespace, rule_match["rule_name"], 4)
+                    entity = (namespace, rule_match["rule_name"], EntityType.CAPA)
                     e_index = self.set_and_get_entity_index(entity)
                     for _addr in rule_match["locations"]:
-                        if idc.func_contains(_addr, _addr):
-                            sifted_list.append((_addr, e_index, 4))
+                        fn = self._backend.get_function_at(Address(_addr))
+                        if fn and Address(_addr) in fn:
+                            sifted_list.append(Reference(_addr, e_index, EntityType.CAPA))
 
         self.capa_matches = sifted_list
 
@@ -389,7 +436,7 @@ class XRefer:
                 artifact = {"type": type_mapping[type_id], "index": idx, "content": content, "category": category}
 
                 # Handle enriched string entities
-                if type_id == 3 and len(entity) > 4:  # String type with Git enrichment
+                if type_id == EntityType.STRING and len(entity) > 4:  # String type with Git enrichment
                     try:
                         # Index 4 has matched lines dictionary
                         artifact["context"] = entity[4]
@@ -424,8 +471,8 @@ class XRefer:
             log(f"Found {len(interesting_artifacts)} potential interesting artifacts: {summary}")
 
         except Exception as e:
-            log(f"Error during interesting artifact analysis: {str(e)}")
-            self.malicious_indicators = set()
+            log(f"[-] Error during interesting artifact analysis: {str(e)}")
+            self.interesting_artifacts = set()
 
     def process_api_trace(self) -> None:
         """
@@ -452,12 +499,12 @@ class XRefer:
         # Create a mapping of API names to their full names (including module)
         known_imports = {}
         for entity in self.entities:
-            if len(entity) >= 3 and entity[2] == 2:
+            if len(entity) >= 3 and EntityType(entity[2]) == EntityType.IMPORT:
                 api_name = entity[1].split(".")[-1]
                 known_imports[api_name] = entity[1]
 
         # Parse and standardize API trace data
-        self.api_trace_data = parse_api_trace(known_imports, self.settings["paths"]["trace"])
+        self.api_trace_data = parse_api_trace(known_imports, self.settings["paths"]["trace"], self._backend)
 
         # Process xrefs
         for parent_func_ea, api_calls in self.api_trace_data.items():
@@ -471,24 +518,25 @@ class XRefer:
                 is_dynamic = full_api_name.startswith("dynamic.")
                 module_name, api_name = full_api_name.split(".")
                 if is_dynamic:
-                    entity = ("Non-Static API References", full_api_name, 2)
+                    entity = ("Non-Static API References", full_api_name, EntityType.IMPORT)
                     entity_index = self.set_and_get_entity_index(entity)
                     for api_call in self.api_trace_data[parent_func_ea][full_api_name]:
                         ea = api_call["call_addr"]
-                        self.imports.append((ea, entity_index, 2))
+                        self.imports.append(Reference(ea, entity_index, EntityType.IMPORT))
                 elif full_api_name.startswith("ntdll."):
-                    entity = ("Low-level API References", full_api_name, 2)
+                    entity = ("Low-level API References", full_api_name, EntityType.IMPORT)
                     entity_index = self.set_and_get_entity_index(entity)
                     for api_call in self.api_trace_data[parent_func_ea][full_api_name]:
                         ea = api_call["call_addr"]
-                        self.imports.append((ea, entity_index, 2))
+                        self.imports.append(Reference(ea, entity_index, EntityType.IMPORT))
                 else:
                     try:
                         category_index = self.categories["apis"][full_api_name]
                         category = self.categories["api_categories"][category_index]
-                        entity = (category, full_api_name, 2)
-                    except:
-                        entity = (module_name, full_api_name, 2)
+                        entity = (category, full_api_name, EntityType.IMPORT)
+                    except (KeyError, IndexError) as e:
+                        log(f"Warning: Failed to categorize API {full_api_name}: {e}")
+                        entity = (module_name, full_api_name, EntityType.IMPORT)
 
                     entity_index = self.set_and_get_entity_index(entity)
 
@@ -517,43 +565,35 @@ class XRefer:
         """
 
         log("Generating xref mappings...")
-        for func in idautils.Functions():
-            start = idc.get_func_attr(func, idc.FUNCATTR_START)
-            end = idc.prev_addr(idc.get_func_attr(func, idc.FUNCATTR_END))
-
-            _func = idaapi.get_func(func)
-
-            if not _func:
-                continue
-
-            # Iterate over basic blocks in the function
-            flowchart = idaapi.FlowChart(_func)
-            for block in flowchart:
+        for func in self._backend.functions():
+            for block in func.basic_blocks:
                 # Iterate over the instructions in the basic block
-                for addr in idautils.Heads(block.start_ea, block.end_ea):
-                    func_refs_from = idautils.XrefsFrom(addr, 1)
-                    for ref in func_refs_from:
+                for addr in self._backend.instructions(block.start, block.end):
+                    # print(f"{idc.func_contains(addr, addr)}, create_xref_mapping, \t{addr = :#x}")
+                    for ref in self._backend.get_xrefs_from(Address(addr)):
                         # Check if the reference points within the same function
-                        ref_to = ida_funcs.get_func(ref.to)
-                        if ref_to and ref_to == ida_funcs.get_func(start):
+                        if Address(ref.target) in func:
                             continue
 
+                        start = int(func.start)
                         if start not in self.caller_xrefs_cache:
                             # function A -> function B call locations
-                            self.caller_xrefs_cache[start] = {ref.to: {ref.frm}}
+                            self.caller_xrefs_cache[start] = {ref.target: {ref.source}}
                         else:
                             try:
-                                self.caller_xrefs_cache[start][ref.to].add(ref.frm)
-                            except:
-                                self.caller_xrefs_cache[start][ref.to] = {ref.frm}
+                                self.caller_xrefs_cache[start][ref.target].add(ref.source)
+                            except KeyError:
+                                self.caller_xrefs_cache[start][ref.target] = {ref.source}
 
-    def get_user_xrefs(self, user_xrefs_path: str):
+    def get_user_xrefs(self, user_xrefs_path: str) -> List[Tuple[int, int]]:
+        _xrefs = []
+        if not os.path.exists(user_xrefs_path) or not os.path.isfile(user_xrefs_path):
+            log(f"User xrefs file not found: {user_xrefs_path}")
+            return []
+
         try:
-            _xrefs = []
-
             with open(user_xrefs_path, "r") as infile:
                 xrefs = infile.read().splitlines()
-
             for line in xrefs:
                 if len(line) > 1:
                     xref_tup = line.split(",")
@@ -564,7 +604,7 @@ class XRefer:
             return _xrefs
 
         except Exception as err:
-            log(f"No user xrefs loaded")
+            log(f"No user xrefs loaded: {err} ({user_xrefs_path})")
             return []
 
     def add_user_xrefs(self) -> None:
@@ -579,8 +619,8 @@ class XRefer:
 
         for xref in self.lang.user_xrefs:
             log(f"Adding indirect xref: 0x{xref[0]:x} -> 0x{xref[1]:x}")
-            ida_xref.add_cref(xref[0], xref[1], idc.XREF_USER)
-            idc.set_cmt(xref[0], "[xrefer] 0x%x" % xref[1], 0)
+            self._backend.add_user_xref(Address(xref[0]), Address(xref[1]))
+            self._backend.set_comment(Address(xref[0]), f"[xrefer] 0x{xref[1]:x}")
 
     def init_global_xrefs_template(self) -> Dict[str, Union[Set[int], Dict[int, Set[int]]]]:
         """
@@ -591,12 +631,12 @@ class XRefer:
         """
         return {"libs": set(), "imports": set(), "strings": set(), "capa": set(), "api_trace": set(), "libs_ea": {}, "imports_ea": {}, "strings_ea": {}, "capa_ea": {}, "api_trace_ea": {}}
 
-    def set_and_get_entity_index(self, entity: Tuple[str, str, int]) -> int:
+    def set_and_get_entity_index(self, entity: Tuple[str, str, EntityType]) -> int:
         """
         Get the index of an entity, adding it to the list if not already present.
 
         Args:
-            entity (Tuple[str, str, int]): The entity to look up or add.
+            entity (Tuple[str, str, EntityType]): The entity to look up or add.
 
         Returns:
             int: The index of the entity in the entities list.
@@ -616,45 +656,20 @@ class XRefer:
         categorizes them if enabled, and adds them to the imports list.
         """
         log("Getting imports...")
-        entries = []
-        for i in range(idaapi.get_import_module_qty()):
-            module_name = idaapi.get_import_module_name(i)
-            if not module_name:
-                continue
-
-            module_name = module_name.lower().split("/")[-1]
-
-            def cb(ea: int, name: str, ordinal: int) -> bool:
-                _module_name = None
-                if "@@" in name:  # elf dynsyms
-                    splitted = name.split("@@")
-                    name = splitted[0]
-                    if "_" in splitted[1]:
-                        _module_name = "_".join(splitted[1].split("_")[:-1])
-                    else:
-                        _module_name = splitted[1]
-                if _module_name is None:
-                    entries.append((ea, f"{module_name}.{name}", ordinal, module_name))
-                else:
-                    entries.append((ea, f"{_module_name}.{name}", ordinal, _module_name))
-                return True
-
-            idaapi.enum_import_names(i, cb)
-
-        api_list = [x[1] for x in entries]
+        entries = list(self._backend.get_imports())
         if self.llm_lookups:
+            api_list = [x[1] for x in entries]
             _, self.categories["api_categories"] = Categorizer.categorize(api_list, self.categories["apis"])
-
-        for ea, name, _, module_name in entries:
+        for ea, name, module_name in entries:
             try:
                 category_index = self.categories["apis"][name]
                 category = self.categories["api_categories"][category_index]
-                entity = (category, name, 2)
-            except:
-                entity = (module_name, name, 2)
-
+                entity = (category, name, EntityType.IMPORT)
+            except (KeyError, IndexError) as e:
+                log(f"Warning: Failed to categorize import {name}: {e}")
+                entity = (module_name, name, EntityType.IMPORT)
             self.entities.append(entity)
-            self.imports.append((ea, len(self.entities) - 1, 2))
+            self.imports.append(Reference(int(ea), len(self.entities) - 1, EntityType.IMPORT))
 
     def merge_xrefs(self, func_ea: int, child_func_ea: int) -> bool:
         """
@@ -694,7 +709,7 @@ class XRefer:
 
         return modified
 
-    def map_refs_to_leaf_functions(self, ref_list: List[Tuple[int, int, int]]) -> None:
+    def map_refs_to_leaf_functions(self, ref_list: List[Reference]) -> None:
         """
         Map references to their containing leaf functions.
 
@@ -717,34 +732,33 @@ class XRefer:
             - Indirect references
         """
         log("Mapping references to leaf functions...")
-        ref_to_search = []
+        ref_to_search: List[Reference] = []
 
         while ref_list:
-            addr, item, type = ref_list.pop()
-            func = idaapi.get_func(addr)
-
+            # addr, item, type = ref_list.pop()
+            ref = ref_list.pop()
+            if not isinstance(ref, Reference):
+                ref = Reference(*ref)
+            addr, item, type = ref.address, ref.entity_index, ref.entity_type
+            fn = self._backend.get_function_at(addr)
             # If 'addr' is the start of a function, check if it's a library function
-            if func and func.start_ea != idaapi.BADADDR and func.start_ea == addr:
-                func_flags = idc.get_func_flags(func.start_ea)
+            if fn and fn.start == addr:
                 # If it's a user-defined function, map directly
-                if (func_flags & idc.FUNC_LIB) == 0:
-                    self.mapped_refs.append((addr, item, type))
+                if fn.type != FunctionType.LIBRARY:
+                    self.mapped_refs.append(Reference(addr, item, type))
                     continue
                 # If it's a library function, do not continue here. We fall through to XrefsTo() below.
 
             # Find cross-references to 'addr' and try to resolve them
-            for xref in idautils.XrefsTo(addr):
-                if idc.func_contains(xref.frm, xref.frm):
-                    # Cross-reference is within a function
-                    if xref.type == ida_xref.fl_F:
-                        # Ordinary flow reference, use the original address
-                        self.mapped_refs.append((addr, item, type))
+            for xref in self._backend.get_xrefs_to(Address(addr)):
+                source_fn = self._backend.get_function_at(xref.source)
+                if source_fn and xref.source in source_fn:
                     # If not a library function, we map from the caller
-                    elif (idc.get_func_flags(xref.frm) & idc.FUNC_LIB) == 0:
-                        self.mapped_refs.append((xref.frm, item, type))
-                elif xref.type in (ida_xref.fl_U, ida_xref.dr_O, ida_xref.dr_W, ida_xref.dr_R, ida_xref.dr_T, ida_xref.dr_I):
+                    if source_fn.type != FunctionType.LIBRARY:
+                        self.mapped_refs.append(Reference(int(xref.source), item, type))
+                elif xref.type in (XrefType.DATA_READ, XrefType.DATA_WRITE):
                     # Indirect or data reference, we store it for another iteration
-                    ref_to_search.append((xref.frm, item, type))
+                    ref_to_search.append(Reference(xref.source, item, type))
 
             # If ref_list is empty, swap in the refs we found this round
             if not ref_list:
@@ -797,24 +811,26 @@ class XRefer:
         This method adjusts cross-references related to thunk functions
         to ensure proper analysis and display of references.
         """
-        log(f"Fixing thunk function references...")
+        log("Fixing thunk function references...")
 
         for index, (_, path_group) in enumerate(self.paths[self.current_analysis_ep].items()):
             for path in path_group:
                 child_func_ea = None
                 for _index, func_ea in enumerate(reversed(path)):
-                    if _index == 1 and idc.get_func_flags(child_func_ea) & idc.FUNC_THUNK and self.global_xrefs[child_func_ea][self.DIRECT_XREFS]["imports"]:
-                        node = next(iter(self.global_xrefs[child_func_ea][self.DIRECT_XREFS]["imports"]))
-                        self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports"].add(node)
-                        try:
-                            if node not in self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports_ea"]:
-                                call_xrefs = self.caller_xrefs_cache[func_ea][child_func_ea]
-                                self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports_ea"][node] = call_xrefs
-                                self.entity_xrefs[node].update(call_xrefs)
-                        except:
-                            pass
-                        self.global_xrefs[func_ea][self.INDIRECT_XREFS]["imports"].discard(node)
-                        break
+                    if _index == 1 and self.global_xrefs[child_func_ea][self.DIRECT_XREFS]["imports"]:
+                        fn = self._backend.get_function_at(child_func_ea)
+                        if fn.is_thunk:
+                            node = next(iter(self.global_xrefs[child_func_ea][self.DIRECT_XREFS]["imports"]))
+                            self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports"].add(node)
+                            try:
+                                if node not in self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports_ea"]:
+                                    call_xrefs = self.caller_xrefs_cache[func_ea][child_func_ea]
+                                    self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports_ea"][node] = call_xrefs
+                                    self.entity_xrefs[node].update(call_xrefs)
+                            except (KeyError, AttributeError) as e:
+                                log(f"Warning: Failed to update thunk imports for function 0x{func_ea:x}: {e}")
+                            self.global_xrefs[func_ea][self.INDIRECT_XREFS]["imports"].discard(node)
+                            break
 
                     child_func_ea = func_ea
 
@@ -829,32 +845,32 @@ class XRefer:
         artifact_sorted = False
         # Create a copy of xrefs set to safely iterate over
         for xref in set(xrefs):  # Create a copy here
-            func = idaapi.get_func(xref)
+            func = self._backend.get_function_at(xref)
             if not func:
                 continue
 
-            func_ea = func.start_ea
-            if idc.get_func_flags(func_ea) & idc.FUNC_THUNK:
+            if func.is_thunk:
                 continue
+            fn_start = func.start
 
             # Use orphan check that considers indirect xrefs
-            is_orphan = self.is_orphan_function(func_ea)
+            is_orphan = self.is_orphan_function(fn_start)
 
             if not is_orphan:
-                if func_ea not in func_artifacts:
-                    func_artifacts[func_ea] = []
+                if fn_start not in func_artifacts:
+                    func_artifacts[fn_start] = []
                 artifact_entry = (entity[2], entity[1], xref)
-                if artifact_entry[:2] not in [(x[0], x[1]) for x in func_artifacts[func_ea]]:
-                    func_artifacts[func_ea].append(artifact_entry)
+                if artifact_entry[:2] not in [(x[0], x[1]) for x in func_artifacts[fn_start]]:
+                    func_artifacts[fn_start].append(artifact_entry)
                 artifact_sorted = True
             else:
-                if func_ea in self.table_data:
-                    self.table_data[func_ea] = self.create_sorted_table(func_ea)
-                if func_ea not in orphan_func_artifacts:
-                    orphan_func_artifacts[func_ea] = []
+                if fn_start in self.table_data:
+                    self.table_data[fn_start] = self.create_sorted_table(fn_start)
+                if fn_start not in orphan_func_artifacts:
+                    orphan_func_artifacts[fn_start] = []
                 artifact_entry = (entity[2], entity[1], xref)
-                if artifact_entry[:2] not in [(x[0], x[1]) for x in orphan_func_artifacts[func_ea]]:
-                    orphan_func_artifacts[func_ea].append(artifact_entry)
+                if artifact_entry[:2] not in [(x[0], x[1]) for x in orphan_func_artifacts[fn_start]]:
+                    orphan_func_artifacts[fn_start].append(artifact_entry)
                 artifact_sorted = True
 
         if not artifact_sorted:
@@ -912,10 +928,10 @@ class XRefer:
 
         # Search through mapped refs to find xrefs for this entity
         for ref in self.mapped_refs:
-            if ref[1] == entity_idx:  # If entity index matches
+            if ref.entity_index == entity_idx:  # If entity index matches
                 if entity_idx not in self.entity_xrefs:
                     self.entity_xrefs[entity_idx] = set()
-                self.entity_xrefs[entity_idx].add(ref[0])
+                self.entity_xrefs[entity_idx].add(ref.address)
 
     def has_indirect_xrefs(self, func_ea: int) -> bool:
         """
@@ -1121,14 +1137,14 @@ class XRefer:
 
             # Create clusters
             log(f"Creating clusters from {len(graph_paths)} paths with {len(root_nodes)} root nodes")
-            self.clusters = ClusterManager.decompose_into_clusters(graph_paths, intermediate_paths_map, root_nodes, self.artifact_functions)
+            self.clusters = ClusterManager.decompose_into_clusters(graph_paths, intermediate_paths_map, root_nodes, self.artifact_functions, backend=self._backend)
 
             # Setup and run cluster analysis
             try:
                 self.cluster_analysis = ClusterAnalyzer.analyze_clusters(self.clusters, self)
                 # self.cluster_analysis = ClusterAnalyzer.populate_dummy_cluster_analysis(self.clusters)
                 if not self.cluster_analysis:  # Empty results usually means network issue
-                    log(f"No analysis results obtained - likely network connectivity issue")
+                    log("No analysis results obtained - likely network connectivity issue")
                     self.clusters = current_clusters
                     self.cluster_analysis = current_analysis
                     return
@@ -1136,13 +1152,13 @@ class XRefer:
                 log(f"Generated analysis for {len(self.cluster_analysis.get('clusters', {}))} clusters")
 
             except Exception as e:
-                log(f"Error analyzing clusters: {str(e)}")
+                log(f"[-] Error analyzing clusters: {str(e)}")
                 # Restore previous state
                 self.clusters = current_clusters
                 self.cluster_analysis = current_analysis
 
         except Exception as e:
-            log(f"Error in cluster analysis: {str(e)}")
+            log(f"[-] Error in cluster analysis: {str(e)}")
             # Restore previous state
             self.clusters = current_clusters
             self.cluster_analysis = current_analysis
@@ -1199,7 +1215,7 @@ class XRefer:
                 except KeyError as e:
                     log(f"KeyError processing function 0x{func_ea:x}: {str(e)}")
                 except Exception as e:
-                    log(f"Error processing function 0x{func_ea:x}: {str(e)}")
+                    log(f"[-] Error processing function 0x{func_ea:x}: {str(e)}")
 
             log(f"Found {len(entities_to_cluster)} interesting entities")
 
@@ -1209,7 +1225,10 @@ class XRefer:
             self.save_analysis()
 
         except Exception as e:
-            log(f"Error in cluster_all_non_excluded: {str(e)}")
+            import traceback
+
+            traceback.print_exc()
+            log(f"[-] Error in cluster_all_non_excluded: {str(e)}")
 
     def add_missing_intermediate_nodes(self, clusters: List["FunctionalCluster"], paths: Dict[int, Dict[int, List[List[int]]]]) -> None:
         """
@@ -1375,10 +1394,15 @@ class XRefer:
         capa_refs_index_end = str_refs_index_end + capa_refs_count
 
         # Assign color tags to index ranges
-        tag_index[ida_lines.SCOLOR_DEMNAME] = [2, lib_refs_index_end]
-        tag_index[ida_lines.SCOLOR_IMPNAME] = [lib_refs_index_end, imp_refs_index_end]
-        tag_index[ida_lines.SCOLOR_DSTR] = [imp_refs_index_end, str_refs_index_end]
-        tag_index[ida_lines.SCOLOR_CODNAME] = [str_refs_index_end, capa_refs_index_end]
+        # TODO: huge tech debt here
+        # print(f"{ida_lines.SCOLOR_DEMNAME = }")  # '\x08'
+        # print(f"{ida_lines.SCOLOR_IMPNAME = }")  # '"'
+        # print(f"{ida_lines.SCOLOR_DSTR = }")     # '\x1d'
+        # print(f"{ida_lines.SCOLOR_CODNAME = }")  # '\x1a'
+        tag_index["\x08"] = [2, lib_refs_index_end]
+        tag_index['"'] = [lib_refs_index_end, imp_refs_index_end]
+        tag_index["\x1d"] = [imp_refs_index_end, str_refs_index_end]
+        tag_index["\x1a"] = [str_refs_index_end, capa_refs_index_end]
         return tag_index
 
     def load_analysis(self) -> None:
@@ -1396,7 +1420,7 @@ class XRefer:
             - Applies current exclusions settings
         """
 
-        idaapi.show_wait_box("HIDECANCEL\nStarting analysis...")
+        show_wait_box("HIDECANCEL\nStarting analysis...")
         start_time: float = time()
         analysis_file_path = self.settings["paths"]["analysis"]
 
@@ -1440,14 +1464,17 @@ class XRefer:
             self.clear_affected_graph_cache()
             self.save_analysis()
         elif not self.check_required_files():
-            idaapi.hide_wait_box()
+            hide_wait_box()
             return
         else:
             try:
                 self.run_full_analysis()
                 self.save_analysis()
             except Exception as err:
-                log("Error running full analysis {err}")
+                log(f"[-] Error running full analysis: {err}")
+                import traceback
+
+                traceback.print_exc()
 
         log_elapsed_time("Analysis Time", start_time)
 
@@ -1476,7 +1503,7 @@ class XRefer:
             - interesting_artifacts: LLM-identified interesting items
         """
 
-        idaapi.hide_wait_box()
+        hide_wait_box()
         analysis_file_path = self.settings["paths"]["analysis"]
         log("Saving analysis to: %s" % analysis_file_path)
         with gzip.open(analysis_file_path, "wb") as outfile:
@@ -1587,7 +1614,7 @@ class XRefer:
                 Categorizer.set_model_config(config_2)
 
         except Exception as err:
-            log(f"Error loading config: {str(err)}")
+            log(f"[-] Error loading config: {str(err)}")
 
     def sync_image_base(self, manual: bool = True) -> None:
         """
@@ -1612,14 +1639,14 @@ class XRefer:
             - Repopulates function context tables
             - Saves updated analysis state
         """
-        image_base = idaapi.get_imagebase()
+        image_base = self._backend.image_base
         if image_base == self.image_base:
             if manual:
                 log(f"Imagebase already synced with IDB imagebase: 0x{image_base:x}")
             return
 
         msg = f"Image base change detected, new base: 0x{image_base:x}"
-        idaapi.show_wait_box(f"HIDECANCEL\n{msg}")
+        show_wait_box(f"HIDECANCEL\n{msg}")
         log(msg)
 
         delta = image_base - self.image_base
@@ -1647,7 +1674,7 @@ class XRefer:
         log("Image-base synced, re-populating context tables for all functions...")
         self.table_data = {}
         self._populate_function_context_tables()
-        idaapi.hide_wait_box()
+        hide_wait_box()
         self.save_analysis()
 
     def sync_image_base_gx(self, delta: int) -> None:
@@ -1842,13 +1869,13 @@ class XRefer:
         for e_index in scan_entities:
             path_count = 0
             for xref in self.entity_xrefs[e_index]:
-                func = idaapi.get_func(xref)
+                fn = self._backend.get_function_at(xref)
 
-                if not func:
+                if not fn:
                     continue  # there will be no function present at unloaded/encrypted regions of the binary, while api calls from traces might actually be present
 
                 try:
-                    path_count += len(self.paths[ep][func.start_ea])
+                    path_count += len(self.paths[ep][fn.start])
                 except KeyError:
                     pass
 
@@ -1880,15 +1907,15 @@ class XRefer:
         boundary_methods = set()
 
         for xref in self.entity_xrefs[e_index]:
-            func = idaapi.get_func(xref)
+            func = self._backend.get_function_at(xref)
 
             if not func:
                 continue  # there will be no function present at unloaded/encrypted regions of the binary, while api calls from traces might actually be present
 
-            if func.start_ea not in self.paths[ep]:
+            if func.start not in self.paths[ep]:
                 continue
 
-            for path in self.paths[ep][func.start_ea]:
+            for path in self.paths[ep][func.start]:
                 for node_ea in reversed(path):
                     combined_xrefs = self.global_xrefs[node_ea][self.COMBINED_XREFS]
                     if scan_entities.issubset(combined_xrefs):
@@ -1933,14 +1960,12 @@ class XRefer:
         xref_items = []
 
         for xref in xrefs:
-            xref_func = idaapi.get_func(xref)
-
+            xref_func = self._backend.get_function_at(xref)
             if not xref_func:  # Skip if no function (e.g., unloaded/encrypted regions)
                 continue
 
-            xref_func_ea = xref_func.start_ea
-            orphan = "Yes" if self.is_orphan_function(xref_func_ea) else "No"
-            xref_item = [xref_func.start_ea, orphan, idc.get_func_name(xref_func_ea)]
+            orphan = "Yes" if self.is_orphan_function(xref_func.start) else "No"
+            xref_item = [xref_func.start, orphan, xref_func.name]
             if xref_item not in xref_items:
                 xref_items.append(xref_item)
 
@@ -2018,7 +2043,11 @@ class XRefer:
             for e_index in self.global_xrefs[func_ea][self.DIRECT_XREFS]["strings"]:
                 if self.settings["enable_exclusions"] and e_index in self.excluded_entities:
                     continue
-                strings.append(self.entities[e_index][6])  # entity[6] contains the full string value
+                entity = self.entities[e_index]
+                if len(entity) > 6:
+                    strings.append(entity[6])  # entity[6] contains the full string value
+                else:
+                    strings.append(entity[1])  # Fall back to basic string content
         except KeyError:
             pass
         return strings
@@ -2121,10 +2150,13 @@ class XRefer:
 
         function_api_calls = []
         for api_name, api_calls in self.api_trace_data[func_ea].items():
-            api_name = ida_lines.COLSTR(api_name.split(".")[1], ida_lines.SCOLOR_IMPNAME)
+            # TODO(rand0m): This is formatting. Should be in gui/. Refactoring the entire code is needed. No time for this now.
+            # api_name = ida_lines.COLSTR(api_name.split(".")[1], ida_lines.SCOLOR_IMPNAME)
+            api_name = api_name.split(".")[1]
 
             for call in api_calls:
-                call_addr = ida_lines.COLSTR(f"0x{call['call_addr']:x}", ida_lines.SCOLOR_LIBNAME)
+                # call_addr = ida_lines.COLSTR(f"0x{call['call_addr']:x}", ida_lines.SCOLOR_LIBNAME)
+                call_addr = f"0x{call['call_addr']:x}"
                 function_api_calls.append((call["index"], f"{call_addr}: {api_name}{call['call_str']} x {call['count']}"))
 
         return function_api_calls
@@ -2157,10 +2189,13 @@ class XRefer:
         for indirect_func_ea in indirect_func_addresses:
             if indirect_func_ea in self.api_trace_data:
                 for api_name, api_calls in self.api_trace_data[indirect_func_ea].items():
-                    api_name = ida_lines.COLSTR(api_name.split(".")[1], ida_lines.SCOLOR_IMPNAME)
+                    # TODO(rand0m): This is formatting. Should be in gui/. Refactoring the entire code is needed. No time for this now.
+                    # api_name = ida_lines.COLSTR(api_name.split(".")[1], ida_lines.SCOLOR_IMPNAME)
+                    api_name = api_name.split(".")[1]
 
                     for call in api_calls:
-                        call_addr = ida_lines.COLSTR(f"0x{call['call_addr']:x}", ida_lines.SCOLOR_LIBNAME)
+                        # call_addr = ida_lines.COLSTR(f"0x{call['call_addr']:x}", ida_lines.SCOLOR_LIBNAME)
+                        call_addr = f"0x{call['call_addr']:x}"
                         path_api_calls.append((call["index"], f"{call_addr}: {api_name}{call['call_str']} x {call['count']}"))
 
         function_api_calls = self._gather_sorted_function_api_calls(func_ea)
@@ -2174,10 +2209,13 @@ class XRefer:
         # Iterate through all functions and their API calls
         for func_calls in self.api_trace_data.values():
             for api_name, api_calls in func_calls.items():
-                api_name = ida_lines.COLSTR(api_name.split(".")[1], ida_lines.SCOLOR_IMPNAME)
+                # TODO(rand0m): This is formatting. Should be in gui/. Refactoring the entire code is needed. No time for this now.
+                # api_name = ida_lines.COLSTR(api_name.split(".")[1], ida_lines.SCOLOR_IMPNAME)
+                api_name = api_name.split(".")[1]
 
                 for call in api_calls:
-                    call_addr = ida_lines.COLSTR(f"0x{call['call_addr']:x}", ida_lines.SCOLOR_LIBNAME)
+                    # call_addr = ida_lines.COLSTR(f"0x{call['call_addr']:x}", ida_lines.SCOLOR_LIBNAME)
+                    call_addr = f"0x{call['call_addr']:x}"
                     all_calls.append((call["index"], f"{call_addr}: {api_name}{call['call_str']} x {call['count']}"))
 
         # Sort the list based on the index
@@ -2243,7 +2281,6 @@ class XRefer:
 
         # List of keys that need to be pre-populated with OrderedDict
         prepopulated_keys = ["INDIRECT IMPORT XREFS", "INDIRECT LIBRARY XREFS"]
-
         # Initialize the table with conditional pre-population for sorting
         sorted_xref_table = {key: {"rows": OrderedDict((ct, None) for ct in CATEGORIES)} if key in prepopulated_keys else {"rows": OrderedDict()} for key in table_types}
 
@@ -2379,14 +2416,24 @@ class XRefer:
             if not rows:
                 continue
 
-            colored_table = create_xrefs_table_colored(key, rows, self.get_color_tags(func_ea, key))
-            prev_offset = 3
-            for inner_table_key in sorted_xref_table[key]["rows"]:
-                inner_table_length = len(sorted_xref_table[key]["rows"][inner_table_key])
-                if inner_table_length:
-                    sorted_xref_table[key]["rows"][inner_table_key] = colored_table[prev_offset : prev_offset + inner_table_length]
-                    prev_offset += inner_table_length
-            sorted_xref_table[key]["heading"] = colored_table[1:3] if sorted_xref_table[key]["rows"] else []
+            # Store raw data for GUI to format later - avoids circular import
+            try:
+                # TODO: Danger import from GUI
+                from xrefer.gui.helpers import create_xrefs_table_colored
+
+                colored_table = create_xrefs_table_colored(key, rows, self.get_color_tags(func_ea, key))
+                prev_offset = 3
+                for inner_table_key in sorted_xref_table[key]["rows"]:
+                    inner_table_length = len(sorted_xref_table[key]["rows"][inner_table_key])
+                    if inner_table_length:
+                        sorted_xref_table[key]["rows"][inner_table_key] = colored_table[prev_offset : prev_offset + inner_table_length]
+                        prev_offset += inner_table_length
+                sorted_xref_table[key]["heading"] = colored_table[1:3] if sorted_xref_table[key]["rows"] else []
+            except ImportError:
+                # Store raw data for GUI to format later
+                sorted_xref_table[key]["raw_rows"] = rows
+                sorted_xref_table[key]["color_tags"] = self.get_color_tags(func_ea, key)
+                sorted_xref_table[key]["heading"] = []
 
     def run_full_analysis(self) -> None:
         """
@@ -2404,7 +2451,9 @@ class XRefer:
         self.sift_strings()
         self.sift_libs()
         self.sift_capa_matches()
-        self.entities = enrich_string_data(self.string_index_cache, self.entities, self.git_lookups)
+        if self.git_lookups:
+            log("Querying strings in git repositories...")
+        self.entities = enrich_string_data_core(self.string_index_cache, self.entities, self.git_lookups)
         self.load_imports()
         self.process_api_trace()
         self.save_categories()
@@ -2412,40 +2461,47 @@ class XRefer:
         self.generate_reverse_entity_lookup_index()
 
         for _tuple in self.strings[1]:
-            for xref in _tuple[3]:
-                self.mapped_refs.append((xref, _tuple[1], _tuple[2]))
+            for xref in _tuple.detail:
+                self.mapped_refs.append(Reference(xref, _tuple.entity_index, _tuple.entity_type))
 
         self.mapped_refs += self.capa_matches
         log("Generating context table data...")
 
         for ref in self.mapped_refs:
-            orig_name = idc.get_func_name(ref[0])
-            func_ea = idc.get_name_ea(0, orig_name)
+            if not isinstance(ref, Reference):
+                ref = Reference(*ref)
+            fn = self._backend.get_function_at(ref.address)
+            if fn is None:
+                import ida_idaapi
+                import idc
+
+                orig_name = idc.get_func_name(ida_idaapi.ea_t(ref.address))
+                log(f"ERROR? Function not found for address: {ref.address:#x} (should be {orig_name = })")
+                continue
+            func_ea = fn.start
             self.leaf_funcs.add(func_ea)
 
-            entity_index = ref[1]
-            ref_addr = ref[0]
-            entity_type_key = self.entity_type[ref[2]]
+            entity_type_key = self.entity_type[ref.entity_type]
             entity_suffix_key = self.entity_suffix_map[entity_type_key]
 
-            if entity_index not in self.entity_xrefs:
-                self.entity_xrefs[entity_index] = set()
-            self.entity_xrefs[entity_index].add(ref_addr)
+            if ref.entity_index not in self.entity_xrefs:
+                self.entity_xrefs[ref.entity_index] = set()
+            self.entity_xrefs[ref.entity_index].add(ref.address)
 
             if func_ea not in self.global_xrefs:
                 self.global_xrefs[func_ea] = {self.DIRECT_XREFS: self.init_global_xrefs_template(), self.INDIRECT_XREFS: self.init_global_xrefs_template(), self.COMBINED_XREFS: set()}
 
             direct_xrefs = self.global_xrefs[func_ea][self.DIRECT_XREFS]
-            direct_xrefs[entity_type_key].add(entity_index)
+            direct_xrefs[entity_type_key].add(ref.entity_index)
 
-            if entity_index not in direct_xrefs[entity_suffix_key]:
-                direct_xrefs[entity_suffix_key][entity_index] = set()
-            direct_xrefs[entity_suffix_key][entity_index].add(ref_addr)
+            if ref.entity_index not in direct_xrefs[entity_suffix_key]:
+                direct_xrefs[entity_suffix_key][ref.entity_index] = set()
+            direct_xrefs[entity_suffix_key][ref.entity_index].add(ref.address)
 
         if not self.current_analysis_ep:
             self.current_analysis_ep = self.lang.entry_point
 
-        idc.set_func_cmt(self.lang.entry_point, self.lang.ep_annotation, 0)
+        self._backend.set_function_comment(Address(self.lang.entry_point), self.lang.ep_annotation)
         self.process_exclusions()
         self.run_secondary_analysis()
 
@@ -2470,14 +2526,14 @@ class XRefer:
         Run a standalone secondary analysis for the current entry point.
         """
         if self.current_analysis_ep in self.paths:
-            ep_name = idc.get_func_name(self.current_analysis_ep)
+            ep_name = self._backend.get_function_at(self.current_analysis_ep).start
             log(f"Entrypoint already analyzed: 0x{self.current_analysis_ep:x} ({ep_name})")
             return
 
         if self.is_node_in_existing_paths(self.current_analysis_ep):
             return
 
-        idaapi.show_wait_box(f"HIDECANCEL\nStarting Analysis...")
+        show_wait_box("HIDECANCEL\nStarting Analysis...")
         start_time = time()
         self.process_exclusions()
         self.run_secondary_analysis()
@@ -2513,9 +2569,12 @@ class XRefer:
         if not missing_files or (len(missing_files) == 1 and "xrefs" in missing_files) or self.settings["suppress_notifications"]:
             return True
 
-        # Show dialog
+        # Show dialog (lazy import to avoid circular dependency)
+        from xrefer.gui.settings import MissingFilesDialog
+
         dialog = MissingFilesDialog(missing_files)
         result = dialog.exec_()
+        from PyQt5.QtWidgets import QDialog
 
         return result == QDialog.Accepted
 
@@ -2567,8 +2626,17 @@ class XRefer:
         """
         all_paths = []
         path_buffer = deque([[final]])
+        try:
+            func_name_initial = self._backend.get_function_at(Address(initial))
+            func_name_final = self._backend.get_function_at(Address(final))
+        except Exception as e:
+            import ida_idaapi
+            import idc
 
-        log(f"Building call paths :: {idc.get_func_name(initial)} -> {idc.get_func_name(final)}")
+            log(f"Error {idc.get_func_name(ida_idaapi.ea_t(initial)) = }")
+            raise e
+
+        log(f"Building call paths :: {func_name_initial} -> {func_name_final}")
         xref_cache = {}
         while path_buffer and len(all_paths) < max_limit and len(path_buffer) < max_limit:
             current_path = path_buffer.popleft()
@@ -2576,11 +2644,10 @@ class XRefer:
             target = current_path[-1]
             if target not in xref_cache:
                 refs = set()
-                for cross_ref in idautils.XrefsTo(target):
-                    ref_func = idaapi.get_func(cross_ref.frm)
-                    if ref_func:
-                        ref_start = ref_func.start_ea
-                        refs.add(ref_start)
+                for cross_ref in self._backend.get_xrefs_to(target):
+                    fn = self._backend.get_function_at(cross_ref.source)
+                    if fn:
+                        refs.add(fn.start)
                 xref_cache[target] = refs
             else:
                 refs = xref_cache[target]
@@ -2630,7 +2697,11 @@ class XRefer:
             for func_ea, paths in self.paths[ep].items():
                 for path in paths:
                     if node_ea in path:
-                        ep_name = idc.get_func_name(self.current_analysis_ep)
+                        ep_name = ""
+                        try:
+                            ep_name = self._backend.get_function_at(Address(self.current_analysis_ep)).name
+                        except Exception as err:
+                            log(f"Exception: {err}")
                         log(f"Function @ 0x{self.current_analysis_ep:x} ({ep_name}) has already been analyzed in a prior analysis as a node.")
                         return True
         return False
@@ -2652,7 +2723,8 @@ class XRefer:
             bool: True if function is a simple API thunk, False otherwise
         """
         # First check if it's marked as a thunk
-        if not idc.get_func_flags(func_ea) & idc.FUNC_THUNK:
+        fn = self._backend.get_function_at(func_ea)
+        if not fn.is_thunk:
             return False
 
         # Check if we have xref data for this function
@@ -2692,181 +2764,178 @@ class XRefer:
             log("No cluster data available for function renaming")
             return
 
-        try:
-            # Helper to parse cluster IDs from various formats
-            def parse_cluster_id(cluster_id_str: str) -> Optional[int]:
-                # Handle various formats: "cluster_XXXX", "cluster.id.XXXX", or pure integer strings.
-                if cluster_id_str.startswith("cluster_"):
-                    try:
-                        return int(cluster_id_str.split("_")[1])
-                    except (ValueError, IndexError):
-                        return None
-                elif cluster_id_str.startswith("cluster.id."):
-                    parts = cluster_id_str.split(".")
-                    if len(parts) >= 3:
-                        try:
-                            return int(parts[-1])
-                        except ValueError:
-                            return None
+        # Helper to parse cluster IDs from various formats
+        def parse_cluster_id(cluster_id_str: str) -> Optional[int]:
+            # Handle various formats: "cluster_XXXX", "cluster.id.XXXX", or pure integer strings.
+            if cluster_id_str.startswith("cluster_"):
+                try:
+                    return int(cluster_id_str.split("_")[1])
+                except (ValueError, IndexError):
                     return None
-                else:
+            elif cluster_id_str.startswith("cluster.id."):
+                parts = cluster_id_str.split(".")
+                if len(parts) >= 3:
                     try:
-                        return int(cluster_id_str)
+                        return int(parts[-1])
                     except ValueError:
                         return None
+                return None
+            else:
+                try:
+                    return int(cluster_id_str)
+                except ValueError:
+                    return None
 
-            # Step 1: Gather all necessary data
-            func_clusters = defaultdict(set)  # func_ea -> set of cluster IDs
+        # Step 1: Gather all necessary data
+        func_clusters = defaultdict(set)  # func_ea -> set of cluster IDs
 
-            def map_function_clusters(cluster):
-                for node in cluster.nodes:
-                    func_clusters[node].add(cluster.id)
-                for subcluster in cluster.subclusters:
-                    map_function_clusters(subcluster)
+        def map_function_clusters(cluster):
+            for node in cluster.nodes:
+                func_clusters[node].add(cluster.id)
+            for subcluster in cluster.subclusters:
+                map_function_clusters(subcluster)
 
-            for cluster in self.clusters:
-                map_function_clusters(cluster)
+        for cluster in self.clusters:
+            map_function_clusters(cluster)
 
-            all_functions = set(idautils.Functions())
+        all_functions = set(fn.start for fn in self._backend.functions())
 
-            # Recursively gather all cluster nodes, root nodes, and cluster_refs from all levels
-            def gather_all_cluster_nodes(clusters):
-                all_nodes = set()
+        # Recursively gather all cluster nodes, root nodes, and cluster_refs from all levels
+        def gather_all_cluster_nodes(clusters):
+            all_nodes = set()
 
-                def recurse(c):
-                    all_nodes.update(c.nodes)
-                    all_nodes.add(c.root_node)
-                    all_nodes.update(c.cluster_refs.keys())
-                    for sc in c.subclusters:
-                        recurse(sc)
+            def recurse(c):
+                all_nodes.update(c.nodes)
+                all_nodes.add(c.root_node)
+                all_nodes.update(c.cluster_refs.keys())
+                for sc in c.subclusters:
+                    recurse(sc)
 
-                for top_cluster in clusters:
-                    recurse(top_cluster)
-                return all_nodes
+            for top_cluster in clusters:
+                recurse(top_cluster)
+            return all_nodes
 
-            # Combine all cluster nodes (including nested subclusters) for quick membership checks
-            all_cluster_nodes = gather_all_cluster_nodes(self.clusters)
+        # Combine all cluster nodes (including nested subclusters) for quick membership checks
+        all_cluster_nodes = gather_all_cluster_nodes(self.clusters)
 
-            # Identify true intermediate functions
-            # A node is intermediate if it appears in intermediate_paths but is not:
-            # - In cluster nodes or cluster refs
-            # - In artifact_functions
-            potential_intermediates = set()
-            for cluster in self.clusters:
-                for _, paths in cluster.intermediate_paths.items():
-                    for path in paths:
-                        for node in path:
-                            if node not in cluster.nodes and node not in cluster.cluster_refs and node not in self.artifact_functions:
-                                potential_intermediates.add(node)
+        # Identify true intermediate functions
+        # A node is intermediate if it appears in intermediate_paths but is not:
+        # - In cluster nodes or cluster refs
+        # - In artifact_functions
+        potential_intermediates = set()
+        for cluster in self.clusters:
+            for _, paths in cluster.intermediate_paths.items():
+                for path in paths:
+                    for node in path:
+                        if node not in cluster.nodes and node not in cluster.cluster_refs and node not in self.artifact_functions:
+                            potential_intermediates.add(node)
 
-            intermediate_funcs = {f for f in potential_intermediates if f not in all_cluster_nodes and f not in self.artifact_functions}
+        intermediate_funcs = {f for f in potential_intermediates if f not in all_cluster_nodes and f not in self.artifact_functions}
 
-            # Step 2: Classify each function
-            func_classification = {}
+        # Step 2: Classify each function
+        func_classification = {}
 
-            # Identify multi-cluster functions
-            multi_cluster_funcs = {func_ea for func_ea, clusters in func_clusters.items() if len(clusters) > 1}
+        # Identify multi-cluster functions
+        multi_cluster_funcs = {func_ea for func_ea, clusters in func_clusters.items() if len(clusters) > 1}
 
-            # Identify single-cluster functions
-            single_cluster_funcs = {func_ea for func_ea, clusters in func_clusters.items() if len(clusters) == 1}
+        # Identify single-cluster functions
+        single_cluster_funcs = {func_ea for func_ea, clusters in func_clusters.items() if len(clusters) == 1}
 
-            # Functions not in any cluster
-            no_cluster_funcs = all_functions - single_cluster_funcs - multi_cluster_funcs
+        # Functions not in any cluster
+        no_cluster_funcs = all_functions - single_cluster_funcs - multi_cluster_funcs
 
-            # Classify according to priority
-            # - multi_cluster_funcs: 'xutil_'
-            # - single_cluster_funcs: 'cluster_specific'
-            # - no_cluster_funcs + intermediate: 'xint_'
-            # - no_cluster_funcs + not intermediate: 'xunc_'
-            for f_ea in multi_cluster_funcs:
-                func_classification[f_ea] = "xutil_"
-            for f_ea in single_cluster_funcs:
-                func_classification[f_ea] = "cluster_specific"
-            for f_ea in no_cluster_funcs:
-                if f_ea in intermediate_funcs:
-                    func_classification[f_ea] = "xint_"
+        # Classify according to priority
+        # - multi_cluster_funcs: 'xutil_'
+        # - single_cluster_funcs: 'cluster_specific'
+        # - no_cluster_funcs + intermediate: 'xint_'
+        # - no_cluster_funcs + not intermediate: 'xunc_'
+        for f_ea in multi_cluster_funcs:
+            func_classification[f_ea] = "xutil_"
+        for f_ea in single_cluster_funcs:
+            func_classification[f_ea] = "cluster_specific"
+        for f_ea in no_cluster_funcs:
+            if f_ea in intermediate_funcs:
+                func_classification[f_ea] = "xint_"
+            else:
+                func_classification[f_ea] = "xunc_"
+
+        # Step 3: Determine cluster-specific prefixes
+        cluster_prefix_map = {}
+        for cluster_id_str, analysis in self.cluster_analysis.get("clusters", {}).items():
+            prefix = analysis.get("function_prefix")
+            if prefix:
+                cid = parse_cluster_id(cluster_id_str)
+                if cid is None:
+                    log(f"Invalid cluster id format: {cluster_id_str}")
                 else:
-                    func_classification[f_ea] = "xunc_"
+                    cluster_prefix_map[cid] = prefix
 
-            # Step 3: Determine cluster-specific prefixes
-            cluster_prefix_map = {}
-            for cluster_id_str, analysis in self.cluster_analysis.get("clusters", {}).items():
-                prefix = analysis.get("function_prefix")
+        # Build reverse mapping: function -> cluster_id (for single cluster funcs)
+        func_single_cluster_id = {}
+        for f_ea in single_cluster_funcs:
+            # Exactly one cluster_id in func_clusters[f_ea]
+            cid = next(iter(func_clusters[f_ea]))
+            func_single_cluster_id[f_ea] = cid
+
+        # Step 4: Rename functions
+        def has_known_prefix(old_name):
+            if not old_name:
+                return True  # Not a valid function name, skip
+            return any(old_name.startswith(p) for p in KNOWN_PREFIXES)
+
+        def rename_function(func_ea, new_prefix, allow_cluster_prefix_check=False):
+            # Check if this is a simple API thunk
+            fn = self._backend.get_function_at(Address(func_ea))
+            if self.is_simple_api_thunk(func_ea):
+                return
+
+            old_name = fn.name
+            if not old_name:
+                # Not a valid function name or no name known, skip
+                return
+
+            # If this function already has a known prefix, skip
+            if has_known_prefix(old_name):
+                return
+
+            # If applying a cluster-specific prefix, also check if old_name already starts with that prefix
+            if allow_cluster_prefix_check and new_prefix and old_name.startswith(new_prefix + "_"):
+                # Already has this cluster prefix
+                return
+
+            # If cluster prefix provided, ensure it ends with '_'
+            if new_prefix and not new_prefix.endswith("_"):
+                new_prefix += "_"
+
+            new_name = f"{new_prefix}{old_name}"
+            try:
+                fn.name = new_name
+                log(f"Renamed {old_name} -> {new_name}")
+            except ValueError as e:
+                log(f"Failed to rename {old_name} -> {new_name}: {e}")
+
+        # Handle multi-cluster (xutil_)
+        for f_ea, category in func_classification.items():
+            if category == "xutil_":
+                rename_function(f_ea, "xutil", allow_cluster_prefix_check=False)
+
+        # Handle cluster-specific functions
+        for f_ea, category in func_classification.items():
+            if category == "cluster_specific":
+                cid = func_single_cluster_id[f_ea]
+                prefix = cluster_prefix_map.get(cid, None)
                 if prefix:
-                    cid = parse_cluster_id(cluster_id_str)
-                    if cid is None:
-                        log(f"Invalid cluster id format: {cluster_id_str}")
-                    else:
-                        cluster_prefix_map[cid] = prefix
+                    # For cluster-specific prefixes, check again if prefix already applied
+                    rename_function(f_ea, prefix, allow_cluster_prefix_check=True)
 
-            # Build reverse mapping: function -> cluster_id (for single cluster funcs)
-            func_single_cluster_id = {}
-            for f_ea in single_cluster_funcs:
-                # Exactly one cluster_id in func_clusters[f_ea]
-                cid = next(iter(func_clusters[f_ea]))
-                func_single_cluster_id[f_ea] = cid
+        # Handle intermediate (xint_)
+        for f_ea, category in func_classification.items():
+            if category == "xint_":
+                rename_function(f_ea, "xint", allow_cluster_prefix_check=False)
 
-            # Step 4: Rename functions
-            def has_known_prefix(func_ea):
-                old_name = idc.get_func_name(func_ea)
-                if not old_name:
-                    return True  # Not a valid function name, skip
-                return any(old_name.startswith(p) for p in KNOWN_PREFIXES)
+        # Handle unclustered (xunc_)
+        for f_ea, category in func_classification.items():
+            if category == "xunc_":
+                rename_function(f_ea, "xunc", allow_cluster_prefix_check=False)
 
-            def rename_function(func_ea, new_prefix, allow_cluster_prefix_check=False):
-                # Check if this is a simple API thunk
-                if self.is_simple_api_thunk(func_ea):
-                    return
-
-                old_name = idc.get_func_name(func_ea)
-                if not old_name:
-                    # Not a valid function name or no name known, skip
-                    return
-
-                # If this function already has a known prefix, skip
-                if has_known_prefix(func_ea):
-                    return
-
-                # If applying a cluster-specific prefix, also check if old_name already starts with that prefix
-                if allow_cluster_prefix_check and new_prefix and old_name.startswith(new_prefix + "_"):
-                    # Already has this cluster prefix
-                    return
-
-                # If cluster prefix provided, ensure it ends with '_'
-                if new_prefix and not new_prefix.endswith("_"):
-                    new_prefix += "_"
-
-                new_name = f"{new_prefix}{old_name}"
-                if idaapi.set_name(func_ea, new_name, idaapi.SN_FORCE):
-                    log(f"Renamed {old_name} -> {new_name}")
-                else:
-                    log(f"Failed to rename {old_name} -> {new_name}")
-
-            # Handle multi-cluster (xutil_)
-            for f_ea, category in func_classification.items():
-                if category == "xutil_":
-                    rename_function(f_ea, "xutil", allow_cluster_prefix_check=False)
-
-            # Handle cluster-specific functions
-            for f_ea, category in func_classification.items():
-                if category == "cluster_specific":
-                    cid = func_single_cluster_id[f_ea]
-                    prefix = cluster_prefix_map.get(cid, None)
-                    if prefix:
-                        # For cluster-specific prefixes, check again if prefix already applied
-                        rename_function(f_ea, prefix, allow_cluster_prefix_check=True)
-
-            # Handle intermediate (xint_)
-            for f_ea, category in func_classification.items():
-                if category == "xint_":
-                    rename_function(f_ea, "xint", allow_cluster_prefix_check=False)
-
-            # Handle unclustered (xunc_)
-            for f_ea, category in func_classification.items():
-                if category == "xunc_":
-                    rename_function(f_ea, "xunc", allow_cluster_prefix_check=False)
-
-            log("Function renaming complete")
-
-        except Exception as e:
-            log(f"Error during function renaming: {str(e)}")
+        log("Function renaming complete")

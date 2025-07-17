@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 import asciinet
 import ida_bytes
 import ida_funcs
+import ida_idaapi
 import ida_idp
 import ida_kernwin
 import ida_lines
@@ -30,16 +31,18 @@ import idautils
 import idc
 import networkx as nx
 from PyQt5 import QtCore, QtGui, QtWidgets
-from xrefer.core.action_handlers import ArtifactAnalysisHandler, ClusterEverythingHandler, ClusterInterestingFunctionsHandler, CopyInterestingStringsHandler, PeekViewToggleHandler
+
 from xrefer.core.analyzer import XRefer
-from xrefer.core.help import ContextHelp
-from xrefer.core.helpers import (CollapseEventFilter, CollapseIndicator, FocusEventFilter, KeyEventFilter, create_cluster_relationship_graph, create_colored_table_from_cols,
-                                 create_interesting_artifacts_table, create_xrefs_table_colored, draw_cluster_hierarchy, find_cluster_analysis, get_addr_from_text, help_text, is_windows_or_linux, log,
-                                 longest_line_length, parse_cluster_id, patch_asciinet, prepare_interesting_artifacts_table_rows, register_popup_action, remove_non_displayable, set_focus_to_code,
-                                 set_xref_coverage_color, strip_color_codes, wrap_substring_with_string)
+from xrefer.core.helpers import (find_cluster_analysis, get_addr_from_text, is_windows_or_linux, longest_line_length, parse_cluster_id, remove_non_displayable, strip_color_codes,
+                                 wrap_substring_with_string)
 from xrefer.core.settings import XReferSettingsManager
-from xrefer.core.state_machine import XReferStateMachine
-from xrefer.legacy.shim import format_ribbon
+from xrefer.gui.action_handlers import ArtifactAnalysisHandler, ClusterEverythingHandler, ClusterInterestingFunctionsHandler, CopyInterestingStringsHandler, PeekViewToggleHandler
+from xrefer.gui.help import ContextHelp
+from xrefer.gui.helpers import (CollapseEventFilter, CollapseIndicator, FocusEventFilter, KeyEventFilter, create_cluster_relationship_graph, create_colored_table_from_cols,
+                                create_interesting_artifacts_table, create_xrefs_table_colored, draw_cluster_hierarchy, find_cluster_analysis, help_text, log, patch_asciinet,
+                                prepare_interesting_artifacts_table_rows, register_popup_action, set_focus_to_code, set_xref_coverage_color)
+from xrefer.gui.legacy.shim import format_ribbon
+from xrefer.gui.state_machine import XReferStateMachine
 
 
 class XReferView(idaapi.simplecustviewer_t):
@@ -174,7 +177,7 @@ class XReferView(idaapi.simplecustviewer_t):
                 self.qt_widget = None
 
         except Exception as e:
-            log(f"Error during cleanup: {str(e)}")
+            log(f"[-] Error during cleanup: {str(e)}")
 
     def s_view_activated(self) -> None:
         """
@@ -242,7 +245,7 @@ class XReferView(idaapi.simplecustviewer_t):
                 self.update(ea=self.func_ea)
 
         except Exception as e:
-            log(f"Error during create: {str(e)}")
+            log(f"[-] Error during create: {str(e)}")
             log(traceback.format_exc())
             self.cleanup()
 
@@ -283,7 +286,7 @@ class XReferView(idaapi.simplecustviewer_t):
             if self.qt_widget:
                 self.qt_widget.repaint()
         except Exception as e:
-            log(f"Error showing custom window: {str(e)}")
+            log(f"[-] Error showing custom window: {str(e)}")
             self.cleanup()
 
     def Show(self, *args) -> None:
@@ -439,7 +442,7 @@ class XReferView(idaapi.simplecustviewer_t):
                     QtCore.QTimer.singleShot(100, lambda: (self.collapse_indicator.reposition(), self.collapse_indicator.raise_()))
 
         except Exception as e:
-            log(f"Error creating dock widget: {str(e)}")
+            log(f"[-] Error creating dock widget: {str(e)}")
             self.cleanup()
             return
 
@@ -1412,12 +1415,13 @@ class XReferView(idaapi.simplecustviewer_t):
         """
         Extract item content from a table cell with debug output.
         """
-        cell_match: Optional[re.Match] = self.cell_regex.search(line)
+        if line:
+            cell_match: Optional[re.Match] = self.cell_regex.search(line)
 
-        if cell_match:
-            xref_cell: str = cell_match.group(1)
-            xref_item: str = xref_cell.replace("\x04", "").strip()
-            return xref_cell, xref_item
+            if cell_match:
+                xref_cell: str = cell_match.group(1)
+                xref_item: str = xref_cell.replace("\x04", "").strip()
+                return xref_cell, xref_item
 
         return None, None
 
@@ -2010,12 +2014,12 @@ class XReferView(idaapi.simplecustviewer_t):
             # Add legend
             self.AddLine("")
             self.AddLine(f"    \x01{ida_lines.SCOLOR_DNAME}Legend:\x02{ida_lines.SCOLOR_DNAME}")
-            self.AddLine(f"    \x01\x12■\x02\x12 Current Function")
+            self.AddLine("    \x01\x12■\x02\x12 Current Function")
             self.AddLine(f"    \x01{ida_lines.SCOLOR_DNAME}■\x02{ida_lines.SCOLOR_DNAME} Cluster Node")
             self.AddLine(f"    \x01{ida_lines.SCOLOR_VOIDOP}■\x02{ida_lines.SCOLOR_VOIDOP} Intermediate Node (i)")
 
         except Exception as e:
-            log(f"Error creating intermediate path graph: {str(e)}")
+            log(f"[-] Error creating intermediate path graph: {str(e)}")
             self.AddLine(f"    Error: {str(e)}")
 
     def _classify_node_roles(self, func_ea: int) -> Dict[int, Dict[str, Union[str, Optional[int]]]]:
@@ -2245,14 +2249,14 @@ class XReferView(idaapi.simplecustviewer_t):
                 self.AddLine(f"    \x01{ida_lines.SCOLOR_SEGNAME}- Press ESC to return to previous view\x02{ida_lines.SCOLOR_SEGNAME}")
 
             except Exception as e:
-                log(f"Error converting graph to ASCII: {str(e)}")
+                log(f"[-] Error converting graph to ASCII: {str(e)}")
                 self.AddLine(f"{INDENT}Error visualizing graph: {str(e)}")
 
         except nx.NetworkXError as e:
             log(f"NetworkX error: {str(e)}")
             self.AddLine(f"{INDENT}Error creating graph: {str(e)}")
         except Exception as e:
-            log(f"Error in cluster graph generation: {str(e)}")
+            log(f"[-] Error in cluster graph generation: {str(e)}")
             self.AddLine(f"{INDENT}Unexpected error: {str(e)}")
 
     def _format_cluster_graph_line(self, line: str, highlight_addr: Optional[int] = None, format_type: str = "default") -> str:
@@ -2487,7 +2491,7 @@ class XReferView(idaapi.simplecustviewer_t):
         if intermediate_memberships:
             roles.append("intermediary node")
 
-        header = f"This function serves following roles in clusters:"
+        header = "This function serves following roles in clusters:"
         self.AddLine(f"    \x01{ida_lines.SCOLOR_DATNAME}{header}\x02{ida_lines.SCOLOR_DATNAME}")
         self.AddLine(f"    {'-' * len(header)}")
 
@@ -2615,8 +2619,9 @@ class XReferView(idaapi.simplecustviewer_t):
             self._draw_cluster_nodes(cluster, self.func_ea)
 
         except Exception as e:
-            log(f"Error drawing cluster graph: {str(e)}")
+            log(f"[-] Error drawing cluster graph: {str(e)}")
             self.AddLine(f"{self.INDENT}Error: {str(e)}")
+            raise e
 
     def _print_cluster_header(self, cluster: "FunctionalCluster", cluster_data: Dict) -> None:
         """Print cluster header with wrapped text."""
@@ -2718,7 +2723,7 @@ class XReferView(idaapi.simplecustviewer_t):
         """Print xrefs to cluster root node with comprehensive membership information."""
         # Group xrefs by function
         func_xrefs = defaultdict(list)
-        for xref in idautils.XrefsTo(cluster.root_node):
+        for xref in idautils.XrefsTo(ida_idaapi.ea_t(cluster.root_node)):
             if ida_bytes.is_code(ida_bytes.get_full_flags(xref.frm)):
                 func = ida_funcs.get_func(xref.frm)
                 if func:
@@ -2842,7 +2847,7 @@ class XReferView(idaapi.simplecustviewer_t):
 
         # Add xrefs node before root node
         xref_addrs = set()
-        for xref in idautils.XrefsTo(cluster.root_node):
+        for xref in idautils.XrefsTo(ida_idaapi.ea_t(cluster.root_node)):
             # Only include code references
             if ida_bytes.is_code(ida_bytes.get_full_flags(xref.frm)):
                 xref_addrs.add(xref.frm)
@@ -2892,7 +2897,7 @@ class XReferView(idaapi.simplecustviewer_t):
                     self.Jump(total_line_offset, 0)
 
         except Exception as e:
-            log(f"Error drawing cluster nodes: {str(e)}")
+            log(f"[-] Error drawing cluster nodes: {str(e)}")
 
             self.AddLine(f"{self.INDENT}Error visualizing nodes: {str(e)}")
 
@@ -3470,7 +3475,7 @@ class XReferView(idaapi.simplecustviewer_t):
         self.ClearLines()
         self.print_ribbon()
 
-        if idaapi.get_func(self.func_ea):
+        if ida_funcs.get_func(self.func_ea):
             if self.func_ea in self.xrefer_obj.global_xrefs:
                 self.print_cluster_membership(self.func_ea)
                 self.draw_function_context_tables(self.func_ea)
@@ -3604,8 +3609,8 @@ class XReferView(idaapi.simplecustviewer_t):
         flag: Optional[bool] = None
 
         for xref_to in self.xrefer_obj.caller_xrefs_cache[func_ea].keys():
-            if idc.func_contains(xref_to, xref_to):
-                if idc.get_func_name(xref_to).startswith("sub_"):
+            if idc.func_contains(ida_idaapi.ea_t(xref_to), ida_idaapi.ea_t(xref_to)):
+                if idc.get_func_name(ida_idaapi.ea_t(xref_to)).startswith("sub_"):
                     flag = False
                 else:
                     flag = True
@@ -3928,7 +3933,7 @@ class XReferView(idaapi.simplecustviewer_t):
             simplified_nodes = set()
 
             for xref in xrefs:
-                xref_func: ida_funcs.func_t = idaapi.get_func(xref)
+                xref_func: ida_funcs.func_t = ida_funcs.get_func(xref)
                 if not xref_func:
                     continue
 
@@ -4028,7 +4033,7 @@ class XReferView(idaapi.simplecustviewer_t):
             except:
                 self.state_machine.go_back()
                 self.update(True)
-                log(f"Graph too large to draw")
+                log("Graph too large to draw")
                 return
 
         self.ClearLines()

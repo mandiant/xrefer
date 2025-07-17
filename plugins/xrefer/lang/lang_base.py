@@ -15,13 +15,8 @@
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
 
-import ida_bytes
-import ida_entry
-import ida_nalt
-import ida_ua
-import idaapi
-import idautils
-import idc
+from xrefer.backend import BackEnd, get_current_backend
+from xrefer.core.helpers import log
 
 
 class LanguageBase(ABC):
@@ -32,24 +27,33 @@ class LanguageBase(ABC):
     programming languages. Subclasses implement language-specific analysis methods.
 
     Attributes:
+        backend (BackEnd): Backend abstraction instance for binary analysis
         entry_point (Optional[int]): Program entry point address
         strings (Dict[int, List[str]]): Dictionary mapping addresses to string content
         lib_refs (List[Tuple[int, str, int]]): List of library references
         user_xrefs (List[Tuple[int, int]]): List of user-defined cross-references
-        ep_name (str): Name of entry point function
         ep_annotation (str): Annotation for entry point function
         id (str): Identifier for language analyzer
     """
 
-    def __init__(self):
+    def __init__(self, backend: Optional[BackEnd] = None):
         """Initialize common attributes."""
-        self.entry_point = self.get_entry_point()
-        self.strings = self.get_strings()
+        self.backend: "BackEnd" = backend or get_current_backend()
+        self.entry_point = None
+        self.strings = None
         self.lib_refs = []
         self.user_xrefs = []
-        self.ep_name = idc.get_name(self.entry_point)
         self.ep_annotation = ""
         self.id = "base"
+
+    def initialize(self) -> None:
+        """Initialize language-specific data after language matching."""
+        self.entry_point = self.get_entry_point()
+        self.strings = self.get_strings()
+
+    def __str__(self) -> str:
+        """Return a string representation of the language analyzer."""
+        return f"{self.__class__.__name__} (ID: {self.id}, Entry Point: {self.entry_point})"
 
     @abstractmethod
     def lang_match(self) -> bool:
@@ -65,8 +69,7 @@ class LanguageBase(ABC):
         """Check if this language matches the current binary."""
         pass
 
-    @staticmethod
-    def get_entry_point() -> Optional[int]:
+    def get_entry_point(self) -> Optional[int]:
         """
         Get the user-defined entry point address by checking a prioritized list of common
         entry point function names. We skip CRT startup routines and focus only on the
@@ -117,30 +120,28 @@ class LanguageBase(ABC):
         ]
 
         for point in entry_points:
-            ea = idc.get_name_ea_simple(point)
-            if ea != idc.BADADDR:
-                return ea
+            address = self.backend.get_address_for_name(point)
+            if address is not None:
+                return address.value
 
-        fallback = LanguageBase.fallback_cmain_detection()
-
+        # Fallback: try to find main function through common patterns
+        fallback = self.fallback_cmain_detection(self.backend)
         if fallback:
             return fallback
         else:
-            ep_count = ida_entry.get_entry_qty()
-
-            if ep_count > 0:
-                ep = idc.get_entry_ordinal(ep_count - 1)
-                if ep != -1:
-                    return ep
+            exports = self.backend.get_exports()
+            # If no main function found, return the first export as a last resort
+            first_export = next(exports, None)
+            if first_export:
+                return first_export[1].value
 
         return None
 
-    @staticmethod
-    def get_strings(filters: Optional[List[str]] = None) -> Dict[int, List[str]]:
+    def get_strings(self, filters: Optional[List[str]] = None) -> Dict[int, List[str]]:
         """
-        Extract strings from the IDB with optional filtering.
+        Extract strings from the binary with optional filtering.
 
-        Retrieves all defined strings from IDA's database and optionally filters
+        Retrieves all defined strings from the binary and optionally filters
         them based on provided filter strings.
 
         Args:
@@ -156,48 +157,37 @@ class LanguageBase(ABC):
             filters = []
 
         str_dict = {}
-        strings = idautils.Strings(False)
-        strings.setup(strtypes=[ida_nalt.STRTYPE_C, ida_nalt.STRTYPE_C_16, ida_nalt.STRTYPE_C_32])
-
-        for s in strings:
-            str_type = idc.get_str_type(s.ea)
-            if str_type is not None:
-                contents = ida_bytes.get_strlit_contents(s.ea, -1, str_type)
-                if not any(f in contents for f in filters):
-                    str_dict[s.ea] = [contents.decode("utf-8")]
-
+        for s in self.backend.strings():
+            if not any(f in s.content for f in filters):
+                str_dict[s.address.value] = [s.content]
         return str_dict
 
     @staticmethod
-    def fallback_cmain_detection() -> Optional[int]:
+    def fallback_cmain_detection(backend: "BackEnd") -> Optional[int]:
         """
-        Attempt to detect C main function through __initenv reference.
+        Attempt to detect main function through common C runtime patterns.
 
-        Looks for references to __initenv variable and analyzes the code
-        pattern to find the main function.
+        Looks for references to common C runtime initialization symbols and
+        analyzes the code patterns to find the main function.
 
         Returns:
             Optional[int]: Address of detected main function, or None if not found
         """
-        init_ea = idc.get_name_ea_simple("__initenv")
-        if init_ea == idc.BADADDR:
-            return None
+        # Look for common C runtime initialization symbols
+        init_symbols = ["__initenv", "__libc_start_main", "_start_main"]
 
-        xref = next(idautils.XrefsTo(init_ea), None)
-        if not xref:
-            return None
-
-        ins = ida_ua.insn_t()
-        ins_ea = xref.frm
-
-        for _ in range(20):
-            ins_ea = idc.next_head(ins_ea)
-            idaapi.decode_insn(ins, ins_ea)
-
-            if not ins:
-                break
-
-            if ins.itype in (idaapi.NN_call, idaapi.NN_callfi, idaapi.NN_callni):
-                return idc.get_operand_value(ins_ea, 0)
+        for symbol in init_symbols:
+            if init_addr := backend.get_address_for_name(symbol):
+                # Look for cross-references to this symbol
+                for xref in backend.get_xrefs_to(init_addr):
+                    # Try to find function calls near this reference
+                    containing_func = backend.get_function_at(xref.source)
+                    if containing_func:
+                        # Look for functions called within this function
+                        for call_xref in backend.get_xrefs_from(xref.source):
+                            target_func = backend.get_function_at(call_xref.target)
+                            log(f"WARNING: we are fallbacking to {target_func = }")
+                            if target_func:
+                                return call_xref.target.value
 
         return None

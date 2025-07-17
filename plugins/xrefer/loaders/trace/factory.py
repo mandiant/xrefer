@@ -14,6 +14,7 @@
 
 from typing import Any, Dict, List, Optional, Type
 
+from xrefer.backend import BackEnd, get_current_backend
 from xrefer.core.helpers import log
 from xrefer.loaders.trace.base import BaseTraceParser
 from xrefer.loaders.trace.cape_parser import CapeTraceParser
@@ -34,7 +35,7 @@ class TraceParserFactory:
     _parsers: List[Type[BaseTraceParser]] = [VMRayTraceParser, CapeTraceParser]
 
     @classmethod
-    def get_parser(cls, trace_path: str) -> Optional[BaseTraceParser]:
+    def get_parser(cls, trace_path: str, backend: Optional[BackEnd] = None) -> Optional[BaseTraceParser]:
         """
         Get appropriate parser for trace file.
 
@@ -42,12 +43,16 @@ class TraceParserFactory:
 
         Args:
             trace_path (str): Path to trace file
+            backend (Optional[BackEnd]): Backend instance to use
 
         Returns:
             Optional[BaseTraceParser]: Instance of matching parser or None if no match
         """
+        if backend is None:
+            backend = get_current_backend()
+
         for parser_class in cls._parsers:
-            parser = parser_class()
+            parser = parser_class(backend)
             if parser.supports_format(trace_path):
                 log(f"{parser.parser_id} trace detected")
                 return parser
@@ -65,7 +70,7 @@ class TraceParserFactory:
             cls._parsers.append(parser_class)
 
 
-def parse_api_trace(known_imports: Dict[str, str], trace_path: str) -> Dict[int, Dict[str, List[Dict[str, Any]]]]:
+def parse_api_trace(known_imports: Dict[str, str], trace_path: str, backend: Optional[BackEnd] = None) -> Dict[int, Dict[str, List[Dict[str, Any]]]]:
     """
     Main entry point for API trace parsing.
 
@@ -75,12 +80,13 @@ def parse_api_trace(known_imports: Dict[str, str], trace_path: str) -> Dict[int,
     Args:
         known_imports: Dictionary mapping short names to full API names
         trace_path: Path to trace file
+        backend: Optional backend instance to use
 
     Returns:
         Dict[int, Dict[str, List[Dict[str, Any]]]]: Standardized API call data
             organized by function address and API name
     """
-    parser = TraceParserFactory.get_parser(trace_path)
+    parser = TraceParserFactory.get_parser(trace_path, backend)
     if parser is None:
         log(f"No suitable parser found for {trace_path}")
         return {}

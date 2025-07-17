@@ -17,9 +17,28 @@ from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, Dict, List, Set
 
-from xrefer.llm.templates.artifact_analyzer import ARTIFACT_ANALYZER_PROMPT
-from xrefer.llm.templates.categorizer import CATEGORIZER_PROMPT
-from xrefer.llm.templates.cluster_analyzer import CLUSTER_ANALYZER_PROMPT
+from xrefer.llm.templates import ARTIFACT_ANALYZER_PROMPT, CATEGORIZER_PROMPT, CLUSTER_ANALYZER_PROMPT
+
+
+def _format_json_error(e: json.JSONDecodeError, response: str) -> str:
+    """Format JSONDecodeError with context for better debugging."""
+    lines = response.split("\n")
+    error_line = e.lineno - 1
+    error_col = e.colno - 1
+
+    LINES_TO_SHOW = 5
+    start_line = max(0, error_line - LINES_TO_SHOW)
+    end_line = min(len(lines), error_line + LINES_TO_SHOW + 1)
+    context_lines = []
+
+    for i in range(start_line, end_line):
+        prefix = ">>> " if i == error_line else "    "
+        context_lines.append(f"{prefix}{i + 1:3d}: {lines[i]}")
+    if error_line < len(lines):
+        pointer = " " * (8 + error_col) + "^"
+        context_lines.append(pointer)
+    context = "\n".join(context_lines)
+    return f"Invalid JSON response from model at line {e.lineno}, column {e.colno}: {e.msg}\n\nContext:\n{context}\n\nFull response length: {len(response)} chars"
 
 
 class PromptType(Enum):
@@ -50,8 +69,23 @@ class PromptTemplate(ABC):
         """
         raise NotImplementedError
 
+    def parse_response(self, response: str, **kwargs) -> Dict[str, Any] | Set[int]:
+        """
+        Parse the LLM response into structured data.
+
+        Args:
+            response: Raw response string from LLM
+
+        Returns:
+            Parsed data in structured format
+        """
+        try:
+            return self._parse_response_impl(response, **kwargs)
+        except json.JSONDecodeError as e:
+            raise ValueError(_format_json_error(e, response))
+
     @abstractmethod
-    def parse_response(self, response: str) -> Dict:
+    def _parse_response_impl(self, response: str, **kwargs) -> Dict[str, Any] | Set[int]:
         """
         Parse LLM response into structured format.
         """
@@ -91,7 +125,7 @@ class CategorizerPrompt(PromptTemplate):
         formatted_prompt = formatted_prompt.replace("{{ITEMS}}", json.dumps(items_dict, indent=2))
         return formatted_prompt
 
-    def parse_response(self, response: str, categories: List[str]) -> Dict[str, int]:
+    def _parse_response_impl(self, response: str, categories: List[str]) -> Dict[str, int]:
         """
         Parse LLM categorization response into item-to-category mapping.
 
@@ -105,23 +139,19 @@ class CategorizerPrompt(PromptTemplate):
         Raises:
             ValueError: If response is not valid JSON
         """
-        try:
-            # Parse the JSON response
-            result = json.loads(response)
-            category_assignments = result.get("category_assignments", {})
 
-            # Validate and normalize category assignments
-            categorized_items = {}
-            for item_idx_str, category_idx in category_assignments.items():
-                # Ensure category index is valid
-                if not (0 <= category_idx < len(categories)):
-                    category_idx = categories.index("Others")
-                categorized_items[item_idx_str] = category_idx
+        # Parse the JSON response
+        result = json.loads(response)
+        category_assignments = result.get("category_assignments", {})
 
-            return categorized_items
-
-        except json.JSONDecodeError:
-            raise ValueError("Invalid JSON response from model")
+        # Validate and normalize category assignments
+        categorized_items = {}
+        for item_idx_str, category_idx in category_assignments.items():
+            # Ensure category index is valid
+            if not (0 <= category_idx < len(categories)):
+                category_idx = categories.index("Others")
+            categorized_items[item_idx_str] = category_idx
+        return categorized_items
 
 
 class ArtifactAnalyzerPrompt(PromptTemplate):
@@ -145,7 +175,7 @@ class ArtifactAnalyzerPrompt(PromptTemplate):
         """
         return self.template_text + "\n" + json.dumps(artifacts, indent=2)
 
-    def parse_response(self, response: str) -> Set[int]:
+    def _parse_response_impl(self, response: str) -> Set[int]:
         """
         Parse LLM response into set of interesting artifact indices.
 
@@ -158,11 +188,8 @@ class ArtifactAnalyzerPrompt(PromptTemplate):
         Raises:
             ValueError: If response is not valid JSON or missing required key
         """
-        try:
-            result = json.loads(response)
-            return set(result["interesting_indexes"])
-        except (json.JSONDecodeError, KeyError):
-            raise ValueError("Invalid JSON response from model")
+        result = json.loads(response)
+        return set(result["interesting_indexes"])
 
 
 class ClusterAnalyzerPrompt(PromptTemplate):
@@ -183,7 +210,7 @@ class ClusterAnalyzerPrompt(PromptTemplate):
         """
         return self.template_text.replace("{cluster_data}", cluster_data)
 
-    def parse_response(self, response: str) -> Dict[str, Any]:
+    def _parse_response_impl(self, response: str) -> Dict[str, Any]:
         """
         Parse LLM response into cluster analysis results.
 
@@ -211,33 +238,28 @@ class ClusterAnalyzerPrompt(PromptTemplate):
         Raises:
             ValueError: If response is not valid JSON or missing required structure
         """
-        try:
-            result = json.loads(response)
+        result = json.loads(response)
+        # Validate required keys
+        if not isinstance(result, dict):
+            raise ValueError("Response must be a dictionary")
 
-            # Validate required keys
-            if not isinstance(result, dict):
-                raise ValueError("Response must be a dictionary")
+        required_keys = {"clusters", "binary_description", "binary_category"}
+        if not all(key in result for key in required_keys):
+            raise ValueError(f"Missing required keys. Found: {list(result.keys())}")
 
-            required_keys = {"clusters", "binary_description", "binary_category"}
-            if not all(key in result for key in required_keys):
-                raise ValueError(f"Missing required keys. Found: {list(result.keys())}")
+        # Validate clusters structure
+        clusters = result["clusters"]
+        if not isinstance(clusters, dict):
+            raise ValueError("'clusters' must be a dictionary")
 
-            # Validate clusters structure
-            clusters = result["clusters"]
-            if not isinstance(clusters, dict):
-                raise ValueError("'clusters' must be a dictionary")
+        for cluster_id, analysis in clusters.items():
+            if not isinstance(analysis, dict):
+                raise ValueError(f"Analysis for {cluster_id} must be a dictionary")
 
-            for cluster_id, analysis in clusters.items():
-                if not isinstance(analysis, dict):
-                    raise ValueError(f"Analysis for {cluster_id} must be a dictionary")
+            required_analysis_keys = {"label", "description", "relationships"}
+            # if not all(key in analysis for key in required_analysis_keys):
+            for key in required_analysis_keys:
+                if key not in analysis:
+                    raise ValueError(f"Missing required analysis key '{key}' in {cluster_id}")
 
-                required_analysis_keys = {"label", "description", "relationships"}
-                if not all(key in analysis for key in required_analysis_keys):
-                    raise ValueError(f"Missing required analysis keys in {cluster_id}")
-
-            return result
-
-        except json.JSONDecodeError:
-            raise ValueError("Invalid JSON response from model")
-        except Exception as e:
-            raise ValueError(f"Error parsing response: {str(e)}")
+        return result

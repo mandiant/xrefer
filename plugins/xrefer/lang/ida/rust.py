@@ -13,10 +13,12 @@
 # limitations under the License.
 
 import re
+import typing
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import ida_bytes
+import ida_funcs
 import ida_ida
 import ida_name
 import ida_offset
@@ -26,10 +28,14 @@ import idaapi
 import idautils
 import idc
 from tabulate import tabulate
-from xrefer.core.helpers import filter_null_string, get_segment_by_name, log, normalize_path
+
+from xrefer.core.helpers import filter_null_string, log, normalize_path
+from xrefer.gui.legacy.shim import BIN_SEARCH_FORWARD, SEARCH_DOWN, find_bytes, find_code, is_32bit
 from xrefer.lang.lang_base import LanguageBase
 from xrefer.lang.lang_default import LangDefault
-from xrefer.legacy.shim import BIN_SEARCH_FORWARD, SEARCH_DOWN, find_bytes, find_code, is_32bit
+
+if typing.TYPE_CHECKING:
+    from xrefer.core.analyzer import XRefer
 
 
 @dataclass
@@ -83,11 +89,11 @@ class RustStringParser:
         """
         strings = {}
 
-        data_rel_ro = get_segment_by_name(".data.rel.ro")
+        data_rel_ro = ida_segment.get_segm_by_name(".data.rel.ro")
         if not data_rel_ro:
             return strings
 
-        rdata = get_segment_by_name(".rdata")
+        rdata = ida_segment.get_segm_by_name(".rdata")
         if not rdata:
             return strings
 
@@ -124,7 +130,7 @@ class RustStringParser:
         """
         strings = {}
 
-        rdata = get_segment_by_name(".rdata")
+        rdata = ida_segment.get_segm_by_name(".rdata")
         if not rdata:
             return strings
 
@@ -161,8 +167,8 @@ class RustStringParser:
                                     for strings referenced from code
         """
         strings = {}
-        text = get_segment_by_name(".text")
-        rdata = get_segment_by_name(".rdata")
+        text = ida_segment.get_segm_by_name(".text")
+        rdata = ida_segment.get_segm_by_name(".rdata")
 
         if not text or not rdata:
             return strings
@@ -276,6 +282,10 @@ class LangRust(LanguageBase):
         self.lib_refs = []
         self.crate_columns = [[], []]  # [names], [versions]
         self.user_xrefs = []  # Store thread xrefs here
+
+    def initialize(self) -> None:
+        """Initialize Rust-specific data after language matching."""
+        super().initialize()
         self._process_if_rust()
 
     def lang_match(self) -> bool:
@@ -324,7 +334,8 @@ class LangRust(LanguageBase):
         rust_strings.update(parser.get_text_strings())
 
         # Get default IDA strings
-        default_strings = LangDefault.get_strings()
+        default_lang = LangDefault(backend=self.backend)
+        default_strings = default_lang.get_strings()
 
         # Merge both string sets
         combined_strings = {}
@@ -512,10 +523,10 @@ class LangRust(LanguageBase):
             return result
 
         # Get the function containing the CreateThread call
-        mw_createthread_ea = idaapi.get_func(mw_createthread_xref.frm).start_ea
+        mw_createthread_ea = ida_funcs.get_func(mw_createthread_xref.frm).start_ea
 
         # Rename Rust's thread creation function
-        idc.set_name(mw_createthread_ea, "mw_createthread", idc.SN_NOCHECK)
+        idaapi.set_name(mw_createthread_ea, "mw_createthread", idc.SN_NOCHECK)
 
         # Find all calls to Rust's thread creation function
         threadcall_xrefs = idautils.XrefsTo(mw_createthread_ea)
@@ -547,19 +558,16 @@ class LangRust(LanguageBase):
 
         return result
 
-    def get_ep_name(self) -> Optional[str]:
-        """Get entry point name."""
-        if not self.lang_match():
-            return None
-        return idc.get_name(self.entry_point)
-
     def get_entry_point(self) -> Optional[int]:
         """Get Rust program entry point."""
+        # Only perform Rust-specific analysis if this is actually a Rust binary
+        if not self.lang_match():
+            return super().get_entry_point()
+
         # Try explicit rust_main first
         rust_main = idc.get_name_ea_simple("rust_main")
         if rust_main != idc.BADADDR:
             return rust_main
-
         # Try main/_main and analyze for rust_main pattern
         for main_name in ("main", "_main"):
             main_ea = idc.get_name_ea_simple(main_name)
@@ -569,7 +577,7 @@ class LangRust(LanguageBase):
                     return rust_main
 
         # Try finding main via __initenv analysis. just a hack for now, fix later.
-        main_ea = LangDefault.fallback_cmain_detection()
+        main_ea = LanguageBase.fallback_cmain_detection(self.backend)
         if main_ea:
             rust_main = self._find_rust_main(main_ea)
             if rust_main:
@@ -600,7 +608,7 @@ class LangRust(LanguageBase):
                     # Look for call within next 8 instructions
                     call_found = self._find_call_after_ref(addr, 8, is_64)  # Use new variable name
                     if call_found:
-                        idc.set_name(ref.to, "rust_main", idc.SN_NOCHECK)
+                        idaapi.set_name(ref.to, "rust_main", idc.SN_NOCHECK)
                         return ref.to
 
         return None
@@ -631,7 +639,7 @@ class LangRust(LanguageBase):
 
         return False
 
-    def rename_functions(self, xrefer_obj):
+    def rename_functions(self, xrefer_obj: "XRefer") -> None:
         """
         Rename functions based on their references.
 
@@ -679,7 +687,7 @@ class LangRust(LanguageBase):
                 orig_method_name = idc.get_func_name(func_ea)
                 method_name = f"{selected_ref}_{method_name_index}"
                 log(f"Renaming {orig_method_name} to {method_name}")
-                idc.set_name(func_ea, method_name, ida_name.SN_NOWARN | ida_name.SN_AUTO)
+                idaapi.set_name(func_ea, method_name, ida_name.SN_NOWARN | ida_name.SN_AUTO)
 
         idaapi.hide_wait_box()
 

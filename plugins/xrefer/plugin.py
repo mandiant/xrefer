@@ -15,9 +15,10 @@
 from typing import Optional
 
 import idaapi
-from xrefer.core.action_handlers import *
-from xrefer.core.helpers import *
-from xrefer.core.view import XReferView
+
+from xrefer.gui.action_handlers import *
+from xrefer.gui.helpers import *
+from xrefer.gui.view import XReferView
 
 initialized: bool = False
 plugin_instance = None
@@ -72,7 +73,7 @@ class XReferPlugin(idaapi.plugin_t):
             register_menu_action("Edit/XRefer/Rename Functions/", "XRefer:rename_cluster", "Apply cluster analysis prefixes", ClusterRenameHandler())
             register_menu_action("Edit/XRefer/Configure", "XRefer:Rust:configure", "Configure", XReferSettingsHandler())
             register_menu_action("Edit/XRefer/About", "XRefer:Rust:about", "About", AboutDialogHandler())
-        idaapi.msg(f"[XRefer] Loaded\n")
+        idaapi.msg("[XRefer] Loaded\n")
         return idaapi.PLUGIN_KEEP
 
     def start(self, ep: Optional[int] = None) -> None:

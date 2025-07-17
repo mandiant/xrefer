@@ -12,4 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import action_handlers, analyzer, clusters, help, helpers, settings, state_machine, view
+# from ..gui import action_handlers, help, helpers, settings as gui_settings, state_machine, view
+from . import analyzer, clusters, settings
+
+__all__ = [
+    "analyzer",
+    "clusters",
+    "settings",
+]

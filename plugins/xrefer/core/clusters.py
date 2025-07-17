@@ -15,9 +15,10 @@
 from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 
-import idc
 import networkx as nx
 from networkx import NetworkXError
+
+from xrefer.backend import Address, BackEnd
 from xrefer.core.helpers import find_cluster_analysis, log
 
 
@@ -33,7 +34,7 @@ class FunctionalCluster:
     # Class variable to track next available ID
     _next_id = 1
 
-    def __init__(self, root_node: int, parent_cluster_id: Optional[int] = None):
+    def __init__(self, root_node: int, parent_cluster_id: Optional[int] = None, backend: BackEnd = None):
         # Get next ID and increment counter
         self.id = FunctionalCluster._next_id
         FunctionalCluster._next_id = (FunctionalCluster._next_id % 9999) + 1
@@ -48,6 +49,7 @@ class FunctionalCluster:
         self.parent_cluster_id = parent_cluster_id  # ID of parent cluster if any
         self.cluster_refs = {}  # Maps node -> cluster_id for replaced nodes
         self.intermediate_paths = {}  # Maps (source, target) -> set of intermediate paths
+        self.backend = backend  # Backend instance for platform-agnostic operations
 
     @classmethod
     def reset_id_counter(cls):
@@ -154,7 +156,7 @@ class FunctionalCluster:
             Format function address and name with center alignment.
             """
             addr_str = f"0x{addr:x}"
-            name = idc.get_func_name(addr)
+            name = self.backend.get_name_at(Address(addr))
 
             if len(name) > max_name_length:
                 name = name[: max_name_length - 2] + ".."
@@ -485,6 +487,7 @@ class ClusterManager:
         branching_threshold: int = 2,
         frequency_threshold: int = 5,
         min_cluster_size: int = 2,
+        backend=None,
     ) -> List[FunctionalCluster]:
         """
         Create clusters based on interesting nodes first, using only shortest intermediate paths.
@@ -535,7 +538,7 @@ class ClusterManager:
 
         def extract_cluster(graph: nx.DiGraph, root: int, parent_id: Optional[int] = None) -> FunctionalCluster:
             """Extract cluster rooted at given node, recursively creating subclusters."""
-            cluster = FunctionalCluster(root, parent_id)
+            cluster = FunctionalCluster(root, parent_id, backend)
 
             try:
                 children = list(graph.successors(root))

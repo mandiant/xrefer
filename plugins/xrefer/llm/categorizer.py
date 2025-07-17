@@ -74,7 +74,8 @@ class Categorizer:
             - Dictionary mapping items to category indices
             - List of category names
         """
-        log(f"Categorization results are cached to disk. First time is the slowest and gets faster as cache builds up")
+        log(f"Categorizing items using LLM... (type: {type})")
+        log("Categorization results are cached to disk. First time is the slowest and gets faster as cache builds up.")
         processor = cls._get_processor()
 
         if not processor.validate_api_key():

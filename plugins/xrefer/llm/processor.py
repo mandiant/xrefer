@@ -144,7 +144,7 @@ class LLMProcessor:
                 test_size = int(test_size * (max_tokens / estimated_tokens) * 0.9)
 
             except Exception as e:
-                log(f"Error estimating tokens for batch size {test_size}: {e}")
+                log(f"[-] Error estimating tokens for batch size {test_size}: {e}")
                 test_size = test_size // 2
 
         return 1
@@ -236,7 +236,7 @@ class LLMProcessor:
                         results["interesting_indexes"].extend(missed_results["interesting_indexes"])
 
             except Exception as e:
-                log(f"Error processing missed items: {str(e)}")
+                log(f"[-] Error processing missed items: {str(e)}")
                 if prompt_type == PromptType.CATEGORIZER:
                     # Assign any errored items to Others category
                     categories = kwargs.get("categories", [])
@@ -287,7 +287,9 @@ class LLMProcessor:
                 # Cluster analysis always processes all data at once
                 return self.process_chunk([items], prompt_type, **kwargs)
             except Exception as e:
-                log(f"Error in cluster {prompt_type.name.lower()}: {str(e)}")
+                import traceback
+
+                traceback.print_exc()
                 return {}
 
         if ignore_token_limit:
@@ -296,7 +298,7 @@ class LLMProcessor:
                 result = self.process_chunk(items, prompt_type, **kwargs)
                 return result
             except Exception as e:
-                log(f"Error processing batch with token limit override: {e}")
+                log(f"[-] Error processing batch with token limit override: {e}")
                 return {}
 
         max_tokens = self.model.get_max_input_tokens()
@@ -332,7 +334,10 @@ class LLMProcessor:
                         else:
                             results.update(chunk_result)
                     except Exception as e:
-                        log(f"Error processing chunk: {e}")
+                        import traceback
+
+                        traceback.print_exc()
+                        log(f"[-] Error processing chunk: {e}")
 
         else:
             # Google model - sequential processing
@@ -354,7 +359,10 @@ class LLMProcessor:
                     else:
                         results.update(chunk_result)
                 except Exception as e:
-                    log(f"Error processing chunk {chunk_num}: {e}")
+                    import traceback
+
+                    traceback.print_exc()
+                    log(f"[-] Error processing chunk {chunk_num}: {e}")
 
         # Check for missed items and re-process if needed
         results = self.check_for_missed_items(items, results, prompt_type, **kwargs)

@@ -15,11 +15,13 @@
 import os
 from typing import Any
 
+import ida_funcs
 import idaapi
 import idc
 from PyQt5 import QtCore, QtGui, QtWidgets
-from xrefer.core.helpers import dump_indirect_calls, handle_entrypoint_selection, log
-from xrefer.core.settings import XReferSettingsDialog
+
+from xrefer.gui.helpers import dump_indirect_calls, handle_entrypoint_selection, log
+from xrefer.gui.settings import XReferSettingsDialog
 
 
 class PeekViewToggleHandler(idaapi.action_handler_t):
@@ -85,7 +87,7 @@ class ArtifactAnalysisHandler(idaapi.action_handler_t):
         from xrefer.plugin import plugin_instance
 
         try:
-            idaapi.show_wait_box(f"HIDECANCEL\n")
+            idaapi.show_wait_box("HIDECANCEL\n")
             log("Running artifact analysis...")
             xrefer_obj = plugin_instance.xrefer_view.xrefer_obj
             xrefer_obj.find_interesting_artifacts()
@@ -102,7 +104,7 @@ class ArtifactAnalysisHandler(idaapi.action_handler_t):
 
         except Exception as e:
             idaapi.hide_wait_box()
-            log(f"Error during artifact analysis: {str(e)}")
+            log(f"[-] Error during artifact analysis: {str(e)}")
             return False
 
     def update(self, ctx: Any) -> int:
@@ -164,7 +166,7 @@ class ClusterInterestingFunctionsHandler(idaapi.action_handler_t):
 
         except Exception as e:
             idaapi.hide_wait_box()
-            log(f"Error during cluster analysis: {str(e)}")
+            log(f"[-] Error during cluster analysis: {str(e)}")
             return False
 
     def update(self, ctx: Any) -> int:
@@ -215,7 +217,7 @@ class ClusterEverythingHandler(idaapi.action_handler_t):
 
         except Exception as e:
             idaapi.hide_wait_box()
-            log(f"Error during full cluster analysis: {str(e)}")
+            log(f"[-] Error during full cluster analysis: {str(e)}")
             return False
 
     def update(self, ctx: Any) -> int:
@@ -262,7 +264,7 @@ class AboutDialogHandler(idaapi.action_handler_t):
                 log("Failed to load logo pixmap")
                 logo_label.setText("XR")
         except Exception as e:
-            log(f"Error loading logo: {str(e)}")
+            log(f"[-] Error loading logo: {str(e)}")
             logo_label.setText("XR")
 
         # Center the logo
@@ -474,7 +476,7 @@ class CopyInterestingStringsHandler(idaapi.action_handler_t):
             return True
 
         except Exception as e:
-            log(f"Error copying strings to clipboard: {str(e)}")
+            log(f"[-] Error copying strings to clipboard: {str(e)}")
             return False
 
     def update(self, ctx: Any) -> int:
@@ -557,7 +559,7 @@ class AddEntrypointHandler(idaapi.action_handler_t):
 
         current_ea: int = idc.get_screen_ea()
         if current_ea != idc.BADADDR:
-            current_func = idaapi.get_func(current_ea)
+            current_func = ida_funcs.get_func(current_ea)
             if current_func:
                 custom_ep: int = current_func.start_ea
                 return handle_entrypoint_selection(plugin_instance, custom_ep)
@@ -632,7 +634,10 @@ class ClusterRenameHandler(idaapi.action_handler_t):
             plugin_instance.xrefer_view.xrefer_obj.rename_cluster_functions()
             return True
         except Exception as e:
-            log(f"Error during cluster-based renaming: {str(e)}")
+            log(f"[-] Error during cluster-based renaming: {str(e)}")
+            import traceback
+
+            traceback.print_exc()
             return False
 
     def update(self, ctx: Any) -> int:
@@ -697,7 +702,7 @@ class DumpIndirectCallsHandler(idaapi.action_handler_t):
         """
         Handle indirect calls dump action.
 
-        Creates a file named <idb_path>_indirect_calls.txt containing
+        Creates a file named <sample>_indirect_calls.txt containing
         all identified indirect call sites.
 
         Args:
@@ -706,7 +711,7 @@ class DumpIndirectCallsHandler(idaapi.action_handler_t):
         Returns:
             bool: True after dump is complete
         """
-        path: str = f"{idc.get_idb_path()}_indirect_calls.txt"
+        path: str = f"{idaapi.get_input_file_path()}_indirect_calls.txt"
         dump_indirect_calls(path)
         return True
 

@@ -12,15 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import binascii
 import collections
 from abc import ABC, abstractmethod
-from typing import Any, DefaultDict, Dict, List
+from typing import Any, DefaultDict, Dict, List, Optional
 
-import ida_nalt
-import ida_ua
-import idaapi
-import idc
+from xrefer.backend import Address, BackEnd, get_current_backend
 
 
 class BaseTraceParser(ABC):
@@ -37,16 +33,12 @@ class BaseTraceParser(ABC):
         current_index (int): Current global index for call ordering
     """
 
-    def __init__(self):
-        self.image_base = idaapi.get_imagebase()
-        self.sample_sha256 = self._get_input_file_sha256()
+    def __init__(self, backend: Optional[BackEnd] = None):
+        self.backend = backend or get_current_backend()
+        self.image_base = self.backend.image_base
+        self.sample_sha256 = self.backend.binary_hash
         self.parser_id = None
         self.current_index = 0
-
-    def _get_input_file_sha256(self) -> str:
-        """Get SHA256 hash of the input file."""
-        sha256_bytes = ida_nalt.retrieve_input_file_sha256()
-        return binascii.hexlify(sha256_bytes).decode("utf-8")
 
     def get_standard_api_name(self, api_name: str, known_imports: Dict[str, str]) -> str:
         """
@@ -81,18 +73,26 @@ class BaseTraceParser(ABC):
         Returns:
             int: Address of call instruction, or return_addr if not found
         """
-        cmd = idaapi.insn_t()
-        if ida_ua.decode_prev_insn(cmd, return_addr):
-            if cmd.ea != idc.BADADDR:
-                # Get the function of the return address
-                ret_func = idaapi.get_func(return_addr)
-                # Get the function of the call address
-                call_func = idaapi.get_func(cmd.ea)
-                # Check if both addresses belong to the same function
-                if ret_func is not None and call_func is not None:
-                    if ret_func == call_func:
-                        return cmd.ea
-        return return_addr
+        return_address = Address(return_addr)
+
+        # Get the function containing the return address
+        ret_func = self.backend.get_function_at(return_address)
+        if not ret_func:
+            return return_addr
+
+        # Look for instructions in the function before the return address
+        # This is a simplified approach - we collect all instructions and find the one just before
+        potential_call = None
+        for instr_addr in self.backend.instructions(ret_func.start, return_address):
+            if instr_addr < return_address:
+                # Check if this instruction is in the same function
+                call_func = self.backend.get_function_at(instr_addr)
+                if call_func and call_func.start == ret_func.start:
+                    potential_call = instr_addr
+
+        # Return the last instruction before return_addr in the same function
+        # This is a reasonable approximation for the call instruction
+        return int(potential_call) if potential_call else return_addr
 
     def get_parent_function(self, addr: int) -> int:
         """
@@ -104,8 +104,9 @@ class BaseTraceParser(ABC):
         Returns:
             int: Start address of containing function, or addr if not in function
         """
-        func = idaapi.get_func(addr)
-        return func.start_ea if func else addr
+        address = Address(addr)
+        func = self.backend.get_function_at(address)
+        return int(func.start) if func else addr
 
     def get_event_data_key(self, event_data: Dict[str, Any], api_name: str) -> tuple:
         """

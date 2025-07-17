@@ -13,12 +13,14 @@
 # limitations under the License.
 
 import json
+import os
 from typing import Any, Dict, List, Set, Union
 
 import capa.features.freeze as frz
 import capa.render.result_document as rd
 import capa.render.utils as rutils
-import idaapi
+
+from xrefer.backend import get_current_backend
 from xrefer.core.helpers import log
 
 
@@ -37,6 +39,10 @@ def load_capa_json(capa_json_path: str) -> Dict[int, List[Dict[str, Any]]]:
         Dict[int, List[Dict[str, Any]]]: Dictionary mapping addresses to lists of
             rule match information dictionaries
     """
+
+    if not os.path.exists(capa_json_path) or not os.path.isfile(capa_json_path):
+        log(f"CAPA JSON file not found: {capa_json_path}")
+        return {}
     try:
         doc = get_doc_json_file(capa_json_path)
     except Exception as e:
@@ -45,7 +51,9 @@ def load_capa_json(capa_json_path: str) -> Dict[int, List[Dict[str, Any]]]:
 
     # Get image bases and calculate relocation delta if needed
     capa_base = doc.meta.analysis.base_address.value
-    ida_base = idaapi.get_imagebase()
+
+    # ida_base = idaapi.get_imagebase()
+    ida_base = get_current_backend().image_base
     relocation_delta = ida_base - capa_base if capa_base != ida_base else 0
 
     if relocation_delta:
@@ -107,6 +115,8 @@ def to_locations(addresses: Set[frz.Address]) -> Set[int]:
         elif addr.type == frz.AddressType.RELATIVE:
             v = addr.value
         elif addr.type == frz.AddressType.FILE:
+            import idaapi
+
             v = idaapi.get_fileregion_ea(addr.value)
         elif addr.type in (frz.AddressType.DN_TOKEN, frz.AddressType.DN_TOKEN_OFFSET, frz.AddressType.NO_ADDRESS):
             continue
