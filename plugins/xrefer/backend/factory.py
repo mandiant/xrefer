@@ -13,18 +13,18 @@ class BackendFactory(ABC):
     @abstractmethod
     def is_available(self) -> bool:
         """Check if this backend is available in the current environment."""
-        pass
+        ...
 
     @abstractmethod
     def create_backend(self, **kwargs) -> BackEnd:
         """Create and configure a backend instance."""
-        pass
+        ...
 
     @property
     @abstractmethod
     def name(self) -> str:
         """Human-readable name of this backend."""
-        pass
+        ...
 
 
 class IDABackendFactory(BackendFactory):
@@ -36,12 +36,7 @@ class IDABackendFactory(BackendFactory):
 
     def is_available(self) -> bool:
         """Check if IDA Pro is available."""
-        try:
-            import idaapi
-
-            return idaapi.get_default_radix() != 0
-        except ImportError:
-            return False
+        return importlib.util.find_spec("idapro") is not None
 
     def create_backend(self, **kwargs) -> BackEnd:
         """Create IDA backend instance."""
@@ -71,6 +66,24 @@ class BinaryNinjaBackendFactory(BackendFactory):
         return BNBackend(bv)
 
 
+class GhidraBackendFactory(BackendFactory):
+    """Factory for Ghidra backend."""
+
+    @property
+    def name(self) -> str:
+        return "Ghidra"
+
+    def is_available(self) -> bool:
+        """Check if Ghidra is available."""
+        return importlib.util.find_spec("pyghidra") is not None
+
+    def create_backend(self, **kwargs) -> BackEnd:
+        """Create Ghidra backend instance."""
+        from .ghidra.backend import GhidraBackend
+
+        return GhidraBackend()
+
+
 class BackendManager:
     """Manages available backends and provides unified access."""
 
@@ -78,6 +91,7 @@ class BackendManager:
         self._factories: Dict[str, BackendFactory] = {
             "ida": IDABackendFactory(),
             "binaryninja": BinaryNinjaBackendFactory(),
+            "ghidra": GhidraBackendFactory(),
         }
         self._active_backend: Optional[BackEnd] = None
 
@@ -114,8 +128,8 @@ class BackendManager:
         if not available:
             raise BackendError("No analysis backends are available")
 
-        # Prefer IDA if available, then Binary Ninja
-        for preferred in ["ida", "binaryninja"]:
+        # Prefer IDA if available, then Binary Ninja, then Ghidra
+        for preferred in ["ida", "binaryninja", "ghidra"]:
             if preferred in available:
                 return self._factories[preferred].create_backend(**kwargs)
 

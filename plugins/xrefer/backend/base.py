@@ -12,19 +12,19 @@ from typing import Optional, Tuple
 class BackendError(Exception):
     """Base exception for backend operations."""
 
-    pass
+    ...
 
 
 class InvalidAddressError(BackendError):
     """Raised when an invalid address is accessed."""
 
-    pass
+    ...
 
 
 class UnsupportedOperationError(BackendError):
     """Raised when an operation is not supported by the backend."""
 
-    pass
+    ...
 
 
 class FunctionType(Enum):
@@ -59,6 +59,16 @@ class StringEncType(Enum):
     UTF8 = "utf-8"
     UTF16 = "utf-16"
     UTF32 = "utf-32"
+
+
+class SectionType(Enum):
+    """Segment types for memory classification and analysis."""
+
+    CODE = auto()  # Executable code segments
+    DATA = auto()  # Initialized data segments
+    BSS = auto()  # Uninitialized data segments
+    EXTERN = auto()  # External/import segments
+    UNKNOWN = auto()  # Unclassified segments
 
 
 class Address(int):
@@ -143,42 +153,36 @@ class Function(ABC):
     @abstractmethod
     def start(self) -> Address:
         """Start address of function."""
-        pass
 
     @property
     @abstractmethod
     def name(self) -> str:
         """Function name (may be auto-generated)."""
-        pass
 
     @name.setter
     @abstractmethod
-    def name(self, value: str) -> str:
+    def name(self, value: str) -> None:
         """Set the function name."""
-        pass
 
     @property
     @abstractmethod
     def type(self) -> FunctionType:
         """Function classification (normal, import, export, etc.)."""
-        pass
 
     @property
     @abstractmethod
     def is_thunk(self) -> bool:
         """Check if function is a thunk (jump stub)."""
-        pass
 
     @property
     @abstractmethod
     def basic_blocks(self) -> Iterator[BasicBlock]:
         """Iterate over basic blocks in the function."""
-        pass
+        ...
 
     @abstractmethod
     def contains(self, address: Address) -> bool:
         """Check if address is within function boundaries."""
-        pass
 
 
 class String(ABC):
@@ -209,25 +213,21 @@ class String(ABC):
     @abstractmethod
     def address(self) -> Address:
         """Address where string is located."""
-        pass
 
     @property
     @abstractmethod
     def content(self) -> str:
         """Decoded string content."""
-        pass
 
     @property
     @abstractmethod
     def length(self) -> int:
         """String length in bytes."""
-        pass
 
     @property
     @abstractmethod
     def encoding(self) -> StringEncType:
         """String encoding type."""
-        pass
 
 
 class Xref(ABC):
@@ -243,22 +243,19 @@ class Xref(ABC):
     @abstractmethod
     def source(self) -> Address:
         """Source address of the reference."""
-        pass
 
     @property
     @abstractmethod
     def target(self) -> Address:
         """Target address of the reference."""
-        pass
 
     @property
     @abstractmethod
     def type(self) -> XrefType:
         """Type of reference (call, jump, data access, etc.)."""
-        pass
 
 
-class Segment(ABC):
+class Section(ABC):
     """
     Abstract memory segment representation.
     """
@@ -279,19 +276,45 @@ class Segment(ABC):
     @abstractmethod
     def name(self) -> str:
         """Segment name (e.g., '.text', '.data')."""
-        pass
 
     @property
     @abstractmethod
     def start(self) -> Address:
-        """Start address of the segment."""
-        pass
+        """Start address of the segment (inclusive)."""
 
     @property
     @abstractmethod
     def end(self) -> Address:
-        """End address of the segment (exclusive)."""
-        pass
+        """
+        End address of the segment (exclusive).
+
+        The end address is the first address NOT included in the segment.
+        This follows Python's range convention where [start, end) defines
+        the segment boundaries.
+        """
+        ...
+
+    @property
+    def size(self) -> int:
+        """
+        Size of the segment in bytes.
+        """
+        return self.end.value - self.start.value
+
+    @property
+    @abstractmethod
+    def is_readable(self) -> bool:
+        """Check if segment is readable."""
+
+    @property
+    @abstractmethod
+    def type(self) -> SectionType:
+        """Get segment type."""
+
+    @property
+    @abstractmethod
+    def perm(self) -> str:
+        """Get segment permissions as string (e.g., 'rwx', 'r--', etc.)."""
 
 
 #
@@ -319,16 +342,18 @@ class BackEnd(ABC):
 
     def __repr__(self) -> str:
         """String representation for debugging."""
-        try:
-            path = self.path
-            image_base = self.image_base
-            return f"{self.__class__.__name__}(path={path!r}, image_base={image_base})"
-        except Exception:
-            return f"{self.__class__.__name__}(uninitialized)"
+        path = self.path
+        image_base = self.image_base
+        return f"{self.name}(path={path!r}, image_base={image_base})"
 
     #
-    # Core Properties
+    # Properties
     #
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Human-readable name of the backend (e.g., 'IDA Pro', 'Binary Ninja')."""
+        ...
 
     @property
     def path(self) -> str:
@@ -341,7 +366,6 @@ class BackEnd(ABC):
     @abstractmethod
     def image_base(self) -> Address:
         """Get image base address where binary is loaded."""
-        pass
 
     @property
     def binary_hash(self) -> str:
@@ -376,7 +400,7 @@ class BackEnd(ABC):
             True if address is within a valid segment
         """
         try:
-            return any(seg.contains(address) for seg in self.get_segments())
+            return any(seg.contains(address) for seg in self.get_sections())
         except Exception:
             return False
 
@@ -390,7 +414,6 @@ class BackEnd(ABC):
         Yields:
             Function objects for each identified function
         """
-        pass
 
     @abstractmethod
     def get_function_at(self, address: Address) -> Optional[Function]:
@@ -403,7 +426,7 @@ class BackEnd(ABC):
         Returns:
             Function containing the address, or None if not found
         """
-        pass
+        ...
 
     def get_function_containing(self, address: Address) -> Optional[Function]:
         """Alias for get_function_at for backwards compatibility."""
@@ -420,6 +443,7 @@ class BackEnd(ABC):
         Yields:
             String objects for each identified string
         """
+        ...
         pass
 
     # Symbol Resolution
@@ -435,7 +459,7 @@ class BackEnd(ABC):
         Returns:
             Symbol name, or empty string if none exists
         """
-        pass
+        ...
 
     @abstractmethod
     def get_address_for_name(self, name: str) -> Optional[Address]:
@@ -448,7 +472,7 @@ class BackEnd(ABC):
         Returns:
             Address of the symbol, or None if not found
         """
-        pass
+        ...
 
     # Cross-Reference Analysis
 
@@ -463,7 +487,7 @@ class BackEnd(ABC):
         Yields:
             Cross-references pointing to the address
         """
-        pass
+        ...
 
     @abstractmethod
     def get_xrefs_from(self, address: Address) -> Iterator[Xref]:
@@ -476,7 +500,7 @@ class BackEnd(ABC):
         Yields:
             Cross-references originating from the address
         """
-        pass
+        ...
 
     # Memory Access
 
@@ -492,7 +516,7 @@ class BackEnd(ABC):
         Returns:
             Byte data, or None if unable to read
         """
-        pass
+        ...
 
     @abstractmethod
     def instructions(self, start: Address, end: Address) -> Iterator[Address]:
@@ -506,20 +530,34 @@ class BackEnd(ABC):
         Yields:
             Address of each instruction in the range
         """
-        pass
+        ...
 
-    @abstractmethod
-    def get_segments(self) -> Iterator[Segment]:
+    def get_sections(self) -> Iterator[Section]:
         """
-        Iterate over all memory segments.
+        Iterate over all memory segments sorted by start address.
 
         Yields:
-            Segment objects for each memory region
+            Segment objects for each memory region in address order
         """
-        pass
+        # Collect all sections and sort by start address for consistency
+        sections = list(self._get_sections_impl())
+        sections.sort(key=lambda s: s.start.value)
+
+        for section in sections:
+            yield section
 
     @abstractmethod
-    def get_segment_by_name(self, name: str) -> Optional[Segment]:
+    def _get_sections_impl(self) -> Iterator[Section]:
+        """
+        Backend-specific implementation for getting memory segments.
+
+        Yields:
+            Segment objects for each memory region (unsorted)
+        """
+        ...
+
+    @abstractmethod
+    def get_section_by_name(self, name: str) -> Optional[Section]:
         """
         Get segment by name.
 
@@ -529,7 +567,7 @@ class BackEnd(ABC):
         Returns:
             Segment with the specified name, or None if not found
         """
-        pass
+        ...
 
     def get_imports(self) -> Iterator[Tuple[Address, str, str]]:
         """
@@ -567,7 +605,7 @@ class BackEnd(ABC):
         Returns:
             Iterator of (address, function_name, module_name) tuples
         """
-        pass
+        ...
 
     @staticmethod
     def parse_import_name(name: str) -> Tuple[str, str]:
@@ -703,19 +741,19 @@ class BackEnd(ABC):
     @abstractmethod
     def _add_user_xref_impl(self, source: Address, target: Address) -> None:
         """Backend-specific implementation for adding user cross-references."""
-        pass
+        ...
 
     @abstractmethod
     def _set_comment_impl(self, address: Address, comment: str) -> None:
         """Backend-specific implementation for setting comments."""
-        pass
+        ...
 
     @abstractmethod
     def _set_function_comment_impl(self, address: Address, comment: str) -> None:
         """Backend-specific implementation for setting function comments."""
-        pass
+        ...
 
     @abstractmethod
     def _path_impl(self) -> str:
         """Backend-specific implementation for getting binary path."""
-        pass
+        ...

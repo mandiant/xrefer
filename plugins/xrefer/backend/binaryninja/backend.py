@@ -7,7 +7,7 @@ from typing import Iterator, Optional, Tuple
 
 import binaryninja as bn
 
-from ..base import Address, BackEnd, BasicBlock, Function, FunctionType, Segment, String, StringEncType, Xref, XrefType
+from ..base import Address, BackEnd, BasicBlock, Function, FunctionType, Section, SectionType, String, StringEncType, Xref, XrefType
 
 
 class BinaryNinjaFunction(Function):
@@ -26,12 +26,11 @@ class BinaryNinjaFunction(Function):
         return self._func.name
 
     @name.setter
-    def name(self, value: str) -> str:
+    def name(self, value: str) -> None:
         """Set the function name."""
         if not value:
             raise ValueError("Function name cannot be empty")
         self._func.name = value
-        return self._func.name
 
     @property
     def type(self) -> FunctionType:
@@ -112,23 +111,96 @@ class BinaryNinjaXref(Xref):
         return XrefType.UNKNOWN
 
 
-class BinaryNinjaSegment(Segment):
-    """Wrapper for Binary Ninja sections."""
+class BinaryNinjaSection(Section):
+    """Wrapper for Binary Ninja sections (used as segments for consistency)."""
 
-    def __init__(self, sec: bn.binaryview.Section):
-        self._sec = sec
+    def __init__(self, name: str, section: bn.binaryview.Section, bv: bn.BinaryView):
+        self._name = name
+        self._section = section
+        self._bv = bv
 
     @property
     def name(self) -> str:
-        return self._sec.name
+        return self._name
 
     @property
     def start(self) -> Address:
-        return Address(self._sec.start)
+        return Address(self._section.start)
 
     @property
     def end(self) -> Address:
-        return Address(self._sec.end)
+        return Address(self._section.end)
+
+    @property
+    def type(self) -> SectionType:
+        """Get segment type based on Binary Ninja section semantics and properties."""
+        # Primary classification based on Binary Ninja's native semantics
+        if self._section.semantics == bn.SectionSemantics.ReadOnlyCodeSectionSemantics:
+            return SectionType.CODE
+        elif self._section.semantics == bn.SectionSemantics.ReadWriteDataSectionSemantics:
+            # Use section type to distinguish BSS from regular data
+            # BSS sections have NOBITS type (no actual data in file)
+            if self._section.type == "NOBITS":
+                return SectionType.BSS
+            return SectionType.DATA
+        elif self._section.semantics == bn.SectionSemantics.ReadOnlyDataSectionSemantics:
+            return SectionType.DATA
+        elif self._section.semantics == bn.SectionSemantics.ExternalSectionSemantics:
+            return SectionType.EXTERN
+        else:
+            # For DefaultSectionSemantics (0), use additional Binary Ninja properties
+            # Check if section is loaded into memory - non-loaded sections are typically debug/metadata
+            containing_segment = self._get_containing_section()
+            if not containing_segment:
+                # Section not in any loadable segment - likely debug/metadata
+                return SectionType.UNKNOWN
+
+            # For loaded sections with default semantics, classify by containing segment permissions
+            if containing_segment.executable:
+                return SectionType.CODE
+            elif containing_segment.writable:
+                return SectionType.DATA
+            else:
+                return SectionType.DATA  # Read-only data
+
+    def _get_containing_section(self) -> Optional[bn.binaryview.Segment]:
+        """Find the ELF segment that overlaps with this section."""
+        # Find segment that overlaps with this section (not necessarily fully contains)
+        for seg in self._bv.segments:
+            # Check if section overlaps with segment
+            if self._section.start < seg.end and self._section.end > seg.start:
+                return seg
+        return None
+
+    @property
+    def is_readable(self) -> bool:
+        """Check if segment is readable."""
+        containing_seg = self._get_containing_section()
+        return containing_seg.readable if containing_seg else False
+
+    @property
+    def is_writable(self) -> bool:
+        """Check if segment is writable."""
+        containing_seg = self._get_containing_section()
+        return containing_seg.writable if containing_seg else False
+
+    @property
+    def is_executable(self) -> bool:
+        """Check if segment is executable."""
+        containing_seg = self._get_containing_section()
+        return containing_seg.executable if containing_seg else False
+
+    @property
+    def perm(self) -> str:
+        """Get segment permissions as string."""
+        containing_seg = self._get_containing_section()
+        if not containing_seg:
+            return "---"
+        perms = ""
+        perms += "r" if containing_seg.readable else "-"
+        perms += "w" if containing_seg.writable else "-"
+        perms += "x" if containing_seg.executable else "-"
+        return perms
 
 
 class BNBackend(BackEnd):
@@ -143,6 +215,11 @@ class BNBackend(BackEnd):
         """
         super().__init__()
         self._bv: "bn.BinaryView" = bv
+
+    @property
+    def name(self) -> str:
+        """Backend name for language module lookup."""
+        return "binaryninja"
 
     @property
     def image_base(self) -> Address:
@@ -194,13 +271,15 @@ class BNBackend(BackEnd):
         data = self._bv.read(int(address), size)
         return data if data else None
 
-    def get_segments(self) -> Iterator[BinaryNinjaSegment]:
-        for sec in self._bv.sections.values():
-            yield BinaryNinjaSegment(sec)
+    def _get_sections_impl(self) -> Iterator[BinaryNinjaSection]:
+        for name, section in self._bv.sections.items():
+            yield BinaryNinjaSection(name, section, self._bv)
 
-    def get_segment_by_name(self, name: str) -> Optional[BinaryNinjaSegment]:
-        sec = self._bv.sections.get(name)
-        return BinaryNinjaSegment(sec) if sec else None
+    def get_section_by_name(self, name: str) -> Optional[BinaryNinjaSection]:
+        section = self._bv.sections.get(name)
+        if section:
+            return BinaryNinjaSection(name, section, self._bv)
+        return None
 
     def _get_raw_imports(self) -> Iterator[Tuple[Address, str, str]]:
         """Get raw import data from Binary Ninja."""
@@ -265,3 +344,24 @@ class BNBackend(BackEnd):
         func = self._bv.get_function_at(int(address))
         if func:
             func.comment = comment
+
+    # def _create_string_object(self, address: Address, content: str, encoding: StringEncType) -> String:
+    #     """Create a BinaryNinjaString object for the enhanced string extractor."""
+
+    #     # Create a mock StringReference object that mimics Binary Ninja's output
+    #     class MockStringReference:
+    #         def __init__(self, start: int, value: str, length: int, encoding: StringEncType):
+    #             self.start = start
+    #             self.value = value
+    #             self.length = length
+    #             # Map our encoding back to Binary Ninja's string types
+    #             encoding_map = {
+    #                 StringEncType.ASCII: bn.StringType.AsciiString,
+    #                 StringEncType.UTF8: bn.StringType.Utf8String,
+    #                 StringEncType.UTF16: bn.StringType.Utf16String,
+    #                 StringEncType.UTF32: bn.StringType.Utf32String,
+    #             }
+    #             self.type = encoding_map.get(encoding, bn.StringType.Utf8String)
+
+    #     string_ref = MockStringReference(int(address), content, len(content), encoding)
+    #     return BinaryNinjaString(string_ref)

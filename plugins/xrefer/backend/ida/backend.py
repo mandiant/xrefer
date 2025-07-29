@@ -12,7 +12,7 @@ import idaapi
 import idautils
 import idc
 
-from ..base import Address, BackEnd, BackendError, BasicBlock, Function, FunctionType, Segment, String, StringEncType, Xref, XrefType
+from ..base import Address, BackEnd, BackendError, BasicBlock, Function, FunctionType, Section, SectionType, String, StringEncType, Xref, XrefType
 
 
 class IDAFunction(Function):
@@ -35,14 +35,12 @@ class IDAFunction(Function):
         return self._name
 
     @name.setter
-    def name(self, value: str) -> str:
+    def name(self, value: str) -> None:
         """Set function name."""
-        if value:
-            idc.set_name(self._func.start_ea, value, idaapi.SN_FORCE)
-            self._name = value
-            return self._name
-        else:
+        if not value:
             raise ValueError("Function name cannot be empty")
+        idc.set_name(self._func.start_ea, value, idaapi.SN_FORCE)
+        self._name = value
 
     # @property
     # def total_bytes(self) -> int: # this is dead code
@@ -166,13 +164,13 @@ class IDAXref(Xref):
         return XrefType.UNKNOWN
 
 
-class IDASegment(Segment):
-    """IDA segment wrapper."""
+class IDASection(Section):
+    """IDA section wrapper."""
 
     def __init__(self, seg: "ida_segment.segment_t") -> None:
         self._seg = seg
         self._name: Optional[str] = None
-        self._segment_type: Optional[str] = None
+        self._segment_type: Optional[SectionType] = None
 
     @property
     def name(self) -> str:
@@ -189,6 +187,45 @@ class IDASegment(Segment):
     def end(self) -> Address:
         return Address(self._seg.end_ea)
 
+    @property
+    def type(self) -> SectionType:
+        """Get segment type."""
+        if self._segment_type is None:
+            self._segment_type = self._classify_segment_type()
+        return self._segment_type
+
+    @property
+    def is_readable(self) -> bool:
+        """Check if segment is readable."""
+        return bool(self._seg.perm & ida_segment.SEGPERM_READ)
+
+    @property
+    def perm(self) -> str:
+        """Get segment permissions as string."""
+        perms = ""
+        perms += "r" if self._seg.perm & ida_segment.SEGPERM_READ else "-"
+        perms += "w" if self._seg.perm & ida_segment.SEGPERM_WRITE else "-"
+        perms += "x" if self._seg.perm & ida_segment.SEGPERM_EXEC else "-"
+        return perms
+
+    def _classify_segment_type(self) -> SectionType:
+        """Classify segment type based on IDA segment properties."""
+        # Check segment type first
+        if self._seg.type == ida_segment.SEG_XTRN:
+            return SectionType.EXTERN
+        elif self._seg.type == ida_segment.SEG_BSS:
+            return SectionType.BSS
+
+        # Check permissions for executable segments
+        if self._seg.perm & ida_segment.SEGPERM_EXEC:
+            return SectionType.CODE
+        elif self._seg.perm & ida_segment.SEGPERM_WRITE:
+            return SectionType.DATA
+        elif self._seg.perm & ida_segment.SEGPERM_READ:
+            return SectionType.DATA
+        else:
+            return SectionType.UNKNOWN
+
 
 class IDABackend(BackEnd):
     """IDA Pro backend implementation."""
@@ -198,6 +235,11 @@ class IDABackend(BackEnd):
         super().__init__()
         if not idaapi.get_default_radix():
             raise BackendError("IDA database not loaded")
+
+    @property
+    def name(self) -> str:
+        """Backend name for language module lookup."""
+        return "ida"
 
     @property
     def image_base(self) -> Address:
@@ -289,17 +331,17 @@ class IDABackend(BackEnd):
     # Segment Analysis
     #
 
-    def get_segments(self) -> Iterator[IDASegment]:
-        """Iterate over all segments."""
+    def _get_sections_impl(self) -> Iterator[IDASection]:
+        """Backend-specific implementation for getting segments."""
         for seg_ea in idautils.Segments():
             seg: Optional["ida_segment.segment_t"] = ida_segment.getseg(seg_ea)
             if seg:
-                yield IDASegment(seg)
+                yield IDASection(seg)
 
-    def get_segment_by_name(self, name: str) -> Optional[IDASegment]:
+    def get_section_by_name(self, name: str) -> Optional[IDASection]:
         """Get segment by name."""
         seg: Optional["ida_segment.segment_t"] = ida_segment.get_segm_by_name(name)
-        return IDASegment(seg) if seg else None
+        return IDASection(seg) if seg else None
 
     #
     # Import/Export Analysis
