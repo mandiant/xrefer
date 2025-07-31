@@ -48,9 +48,59 @@ def _dump_indirect_calls_bn(bv):
                 if instr.operation == LowLevelILOperation.LLIL_CALL:
                     dest = instr.dest
                     if dest.operation not in [LowLevelILOperation.LLIL_CONST, LowLevelILOperation.LLIL_CONST_PTR]:
+                        # Check if call has a known target (symbol)
                         addr = instr.address
-                        # disasm = bv.get_disassembly(addr)
-                        indirect_calls.append(f"0x{addr:x}")
+                        refs = list(bv.get_code_refs_from(addr))
+                        has_known_target = any(bv.get_symbol_at(ref) for ref in refs)
+                        if not has_known_target:
+                            indirect_calls.append(f"0x{addr:x}")
+    return indirect_calls
+
+
+def _dump_indirect_calls_ghidra(program):
+    """
+    Finds and returns the addresses of all indirect call instructions in a Ghidra program.
+
+    This function iterates through all defined functions, inspects the P-Code for each
+    instruction, and identifies indirect calls via the `CALLIND` P-Code operation.
+    This approach is robust and architecture-agnostic, as it relies on Ghidra's
+    semantic representation rather than instruction mnemonics or operand types.
+
+    Args:
+        program: The active Ghidra program object (typically the global `currentProgram`).
+
+    Returns:
+        A list of strings, with each string representing the hexadecimal address
+        of an indirect call instruction (e.g., ["0x401050", "0x4010a2"]).
+    """
+    from ghidra.program.model.pcode import PcodeOp
+
+    indirect_calls = []
+    function_manager = program.getFunctionManager()
+    listing = program.getListing()
+    symbol_table = program.getSymbolTable()  # Cache symbol table for performance
+    
+    for func in function_manager.getFunctions(True):
+        instructions = listing.getInstructions(func.getBody(), True)
+        for instr in instructions:
+            for pcode_op in instr.getPcode():
+                if pcode_op.getOpcode() == PcodeOp.CALLIND:
+                    address = instr.getAddress().getOffset()
+                    # Check if this call references any known symbol (exclude GOT/PLT calls)
+                    refs = instr.getReferencesFrom()
+                    has_symbol_ref = False
+                    for ref in refs:
+                        symbols = symbol_table.getSymbols(ref.getToAddress())
+                        symbol_list = list(symbols)
+                        if symbol_list:
+                            # If there are any symbols at the target address, it's a direct call
+                            has_symbol_ref = True
+                            break
+
+                    if not has_symbol_ref:
+                        indirect_calls.append(f"0x{address:x}")
+                    # Don't break here - continue processing remaining pcode operations
+
     return indirect_calls
 
 
