@@ -88,8 +88,7 @@ class GhidraFunction(Function):
 
         while blocks.hasNext():
             block = blocks.next()
-            yield BasicBlock(Address(block.getMinAddress().getOffset()),
-                           Address(block.getMaxAddress().getOffset() + 1))
+            yield BasicBlock(Address(block.getMinAddress().getOffset()), Address(block.getMaxAddress().getOffset() + 1))
 
     def _is_export(self) -> bool:
         """Return True if the function is exported from the binary."""
@@ -252,8 +251,8 @@ class GhidraBackend(BackEnd):
         """Custom pickle state - exclude unpicklable program object."""
         state = self.__dict__.copy()
         # Remove the unpicklable program reference
-        state['_program'] = None
-        state['_addr_factory'] = None
+        state["_program"] = None
+        state["_addr_factory"] = None
         return state
 
     def __setstate__(self, state):
@@ -498,26 +497,62 @@ class GhidraBackend(BackEnd):
         return None
 
     def _get_raw_imports(self) -> Iterator[tuple[Address, str, str]]:
-        """Get raw import data from backend."""
-        program = self._get_actual_program()
-        import ghidra.program.model.symbol
+        """Get raw import data from backend.
 
-        symbol_table: ghidra.program.model.symbol.SymbolTable = program.getSymbolTable()
-        em: ghidra.program.model.symbol.ExternalManager = program.getExternalManager()
+        For ELF binaries, external references often appear as THUNK references
+        (e.g., PLT stubs). To better match IDA/Binary Ninja behavior, we accept
+        both data-like references (DATA/READ/DATA_IND) and THUNK references,
+        preferring data-like when available.
+        """
+        program = self._get_actual_program()
+        import ghidra.program.model.symbol as symbol_module
+
+        symbol_table: symbol_module.SymbolTable = program.getSymbolTable()
+        em: symbol_module.ExternalManager = program.getExternalManager()
+
+        seen_addrs: set[int] = set()
 
         for symbol in symbol_table.getExternalSymbols():
-            symbol: ghidra.program.model.symbol.Symbol
-            # Get the external location using the external manager
-            external_loc: ghidra.program.model.symbol.ExternalLocation = em.getExternalLocation(symbol)
-            function_name = external_loc.getLabel() or ""
-            library_name = external_loc.getLibraryName() or ""
-            # Find references to this external symbol
+            # Resolve external location for name/library if available
+            external_loc: symbol_module.ExternalLocation = em.getExternalLocation(symbol)
+
+            function_name = ""
+            library_name = ""
+            if external_loc is not None:
+                function_name = external_loc.getLabel() or ""
+                library_name = external_loc.getLibraryName() or ""
+
+            if not function_name:
+                function_name = symbol.getName() or ""
+
+            # Collect references and classify
             refs = symbol.getReferences()
-            if refs:
-                for ref in refs:
-                    if ref.referenceType.toString() == "DATA":
-                        addr = Address(ref.getFromAddress().getOffset())
-                        yield (addr, function_name, library_name)
+            if not refs:
+                continue
+
+            RefType = symbol_module.RefType
+            data_like: list = []
+            thunk_like: list = []
+            for ref in refs:
+                rtype = ref.getReferenceType()
+                # Prefer data-like references that point to IAT/GOT entries
+                if rtype in (RefType.DATA, RefType.READ, RefType.DATA_IND):
+                    data_like.append(ref)
+                elif rtype == RefType.THUNK or str(rtype) == "THUNK":
+                    thunk_like.append(ref)
+
+            chosen = data_like[0] if data_like else (thunk_like[0] if thunk_like else None)
+            if not chosen:
+                continue
+
+            from_addr = chosen.getFromAddress()
+            addr_int = from_addr.getOffset()
+
+            if addr_int in seen_addrs:
+                continue
+            seen_addrs.add(addr_int)
+
+            yield (Address(addr_int), function_name, library_name or "unknown")
 
     def get_exports(self) -> Iterator[tuple[str, Address]]:
         """Get all exported symbols from the binary."""
