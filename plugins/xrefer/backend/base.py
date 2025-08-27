@@ -444,9 +444,6 @@ class BackEnd(ABC):
             String objects for each identified string
         """
         ...
-        pass
-
-    # Symbol Resolution
 
     @abstractmethod
     def get_name_at(self, address: Address) -> str:
