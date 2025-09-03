@@ -849,9 +849,9 @@ class XRefer:
             if not func:
                 continue
 
-            if func.is_thunk:
-                continue
             fn_start = func.start
+            if func.is_thunk and not self.is_simple_api_thunk(fn_start):
+                continue
 
             # Use orphan check that considers indirect xrefs
             is_orphan = self.is_orphan_function(fn_start)

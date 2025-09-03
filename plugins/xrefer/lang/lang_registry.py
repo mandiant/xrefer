@@ -18,7 +18,7 @@ import inspect
 import os
 from typing import Any, List, Type
 
-from xrefer.backend import list_available_backends
+from xrefer.backend import get_current_backend
 from xrefer.core.helpers import log
 from xrefer.lang.lang_base import LanguageBase
 from xrefer.lang.lang_default import LangDefault
@@ -46,21 +46,21 @@ def get_language_modules() -> List[Type[LanguageBase]]:
         except Exception as e:
             log(f"[-] Error loading language module {module_name}: {e}")
 
-    # Now check for new backend-organized structure using available backends
-    available_backends = list_available_backends()
-    for backend_name in available_backends.keys():
+    try:
+        active_backend = get_current_backend()
+        backend_name = active_backend.name if hasattr(active_backend, "name") else None
+    except Exception:
+        backend_name = None
+
+    if backend_name:
         backend_path = os.path.join(lang_dir, backend_name)
         if os.path.isdir(backend_path):
-            # Scan for language modules in backend directory
             for lang_file in os.listdir(backend_path):
                 if lang_file.endswith(".py") and not lang_file.startswith("__"):
                     module_name = lang_file[:-3]
                     log(f"Loading language module {backend_name}.{module_name}...")
                     try:
-                        # Import module from backend subdirectory
                         module = importlib.import_module(f".{backend_name}.{module_name}", package="xrefer.lang")
-
-                        # Find language class (subclass of LanguageBase)
                         for name, obj in inspect.getmembers(module, inspect.isclass):
                             if name == "LangDefault":
                                 continue
