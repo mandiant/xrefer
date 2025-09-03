@@ -216,6 +216,21 @@ class BNBackend(BackEnd):
         super().__init__()
         self._bv: "bn.BinaryView" = bv
 
+    def __getstate__(self):
+        """Make backend pickle-safe by removing BinaryView/ctypes state.
+
+        Binary Ninja's objects are ctypes-backed and cannot be pickled. We
+        drop references here so the analyzer state can be serialized.
+        """
+        state = self.__dict__.copy()
+        # Remove BinaryView (and any other transient analysis handles) from state
+        state["_bv"] = None
+        return state
+
+    def __setstate__(self, state):
+        """Restore state without BinaryView. Caller must re-set if needed."""
+        self.__dict__.update(state)
+
     @property
     def name(self) -> str:
         """Backend name for language module lookup."""
