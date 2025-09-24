@@ -171,7 +171,6 @@ class RustStringParser:
         while curr_ea < data_rel_ro.end.value:
             ea_candidate = self._read_ptr(curr_ea)
             len_candidate = self._read_ptr(curr_ea + self.next_offset)
-            # print(f"get_data_rel_ro_strings: {ea_candidate=:#x} {len_candidate=:#x}")
 
             if self._is_valid_string(len_candidate, ea_candidate, rdata):
                 try:
@@ -186,7 +185,6 @@ class RustStringParser:
                 except UnicodeDecodeError:
                     pass
             curr_ea += 1
-        print("get_data_rel_ro_strings", strings)
         return strings
 
     def get_rdata_strings(self) -> Dict[int, RustStringInfo]:
@@ -213,7 +211,6 @@ class RustStringParser:
             if ea_candidate is None or len_candidate is None:
                 curr_ea += 1
                 continue
-            # log(f"get_rdata_strings: {ea_candidate=:#x} {len_candidate=:#x}")
 
             if self._is_valid_string(len_candidate, ea_candidate, rdata):
                 try:
@@ -228,7 +225,6 @@ class RustStringParser:
                 except UnicodeDecodeError:
                     pass
             curr_ea += 1
-        # print("get_rdata_strings", strings)
         return strings
 
     def get_text_strings(self) -> Dict[int, RustStringInfo]:
@@ -253,38 +249,16 @@ class RustStringParser:
         for fn in self.backend.functions():
             if not text.contains(fn.start):
                 continue
-            # Get function bounds
-            # start = fn.start.value
-            # end = idc.find_func_end(start)
-
-            # Collect all instruction addresses first
-            # addrs = []
-            # inst = start
-            # while inst < end:
-            #     addrs.append(inst)
-            #     inst = find_code(inst, SEARCH_DOWN)
 
             # Process instructions for string references
-            # for i in range(len(addrs) - 2):  # Need at least 2 more instructions
-            __DEBUG_rand0m = False
             for bb in fn.basic_blocks:
                 for ins in self.backend.instructions(bb.start, bb.end):  # TODO: This is ugly. Fix design in backend/.
                     curr_addr = ins.value
-                    __DEBUG_rand0m = False
-                    if curr_addr == 5372397512:
-                        __DEBUG_rand0m = True
-                    # disas = idc.generate_disasm_line(curr_addr, 0 )
+
                     inst = self.backend.disassemble(curr_addr)
-                    disas = inst.text
-                    # mnem = idc.print_insn_mnem(curr_addr)
-                    # assert mnem == inst.mnemonic
-                    mnem = inst.mnemonic
-                    # print(f"{curr_addr = :#x}, {mnem = }, {disas = }")
-                    # assert disas.split(' ')[0] == mnem
                     # Only care about lea/mov instructions
                     if inst.mnemonic not in ("lea", "mov"):
                         continue
-                    # print(f"{inst.operands = }")
                     if not inst.operands or len(inst.operands) < 2:
                         continue
 
@@ -326,11 +300,8 @@ class RustStringParser:
                             break
                         j = j.value
                         inst2 = self.backend.disassemble(j)
-                        # if idc.print_insn_mnem(j) == "mov":
                         if inst2.mnemonic == "mov":
-                            # if idc.get_operand_type(j, 1) == idc.o_imm:
                             if inst2.operands and inst2.operands[1].value and inst2.operands[1].type == OperandType.IMMEDIATE:
-                                # len_candidate = idc.get_operand_value(j, 1)
                                 len_candidate = inst2.operands[1].value
                                 len_found = True
                                 break
@@ -339,14 +310,12 @@ class RustStringParser:
                         continue
 
                     try:
-                        # s = ida_bytes.get_bytes(ea_candidate, len_candidate).decode("utf-8")
                         s = self.backend.read_bytes(ea_candidate_addr, len_candidate).decode("utf-8")
                         s, len_s = filter_null_string(s, len_candidate)
                         if len_s == len_candidate:
                             strings[ea_candidate] = RustStringInfo(s, len_candidate, [ea_xref])
                     except:
                         continue
-        # print('get_text_strings', strings)
         return strings
 
     def _is_valid_string(self, length: int, addr: int, rdata: "Section") -> bool:
@@ -445,11 +414,8 @@ class LangRust(LanguageBase):
 
         log("Rust compiled binary detected")
         self.user_xrefs = self.get_user_xrefs() or []
-        # print(f"{self.user_xrefs = }")
-        # print(f"{self.get_user_xrefs2() = }")
         self._process_strings()
         self._ensure_rust_entry_alias()
-        log("rand0m: process string done")
         self.ep_annotation = self._get_ep_annotation()
 
     def _process_strings(self) -> None:
@@ -463,16 +429,12 @@ class LangRust(LanguageBase):
         parser = RustStringParser(self.backend)
         rust_strings = {}
         rust_strings.update(parser.get_data_rel_ro_strings())
-        log("rand0m: get_data_rel_ro_strings done")
         rust_strings.update(parser.get_rdata_strings())
-        log("rand0m: get_rdata_strings done")
         rust_strings.update(parser.get_text_strings())
-        log("rand0m: get_text_strings done")
 
         # Get default IDA strings
         default_lang = LangDefault(backend=self.backend)
         default_strings = default_lang.get_strings()
-        log("rand0m: get_default_strings done")
 
         # Merge both string sets
         combined_strings = {}
@@ -629,7 +591,6 @@ class LangRust(LanguageBase):
         for i in range(max_col_len):
             row = [col[i] if i < len(col) else "" for col in columns]
             rows.append(row)
-            print(f"rand0m: Row {i}: {row}")
 
         annotation = f"{tabulate(rows, headers=headings, tablefmt='github')}\n\n"
         annotation = f"@ xrefer - crate listing\n\n{annotation}"
@@ -705,11 +666,9 @@ class LangRust(LanguageBase):
             return result
 
         # Get the function containing the CreateThread call
-        # mw_createthread_ea = ida_funcs.get_func(mw_createthread_xref.frm).start_ea
         wrapper_func = self.backend.get_function_at(first_ref.source)
         if not wrapper_func:
             return result
-        # print(f"{wrapper_func.start = :#x}")
         # Rename Rust's thread creation function
         wrapper_func.name = "mw_createthread"
         # Find all calls to Rust's thread creation function
@@ -720,21 +679,17 @@ class LangRust(LanguageBase):
                 _ref = ref.value
 
                 # Search 10 instructions back for thread function pointer
-                # for _ in range(10):
                 caller_fn = self.backend.get_function_containing(_ref)
                 caller_bb = [bb for bb in caller_fn.basic_blocks if bb.contains(_ref)]
                 assert len(caller_bb) == 1, "There are cases where #bb>=2, but ignore for now. open issue when this is the case"
                 ins = list(self.backend.instructions(caller_bb[0].start, _ref))
                 for prev_ea in reversed(ins[-10:]):
                     _ref = prev_ea
-                    print(f"[DEBUG] { _ref = }")
                     thread_func = None
-                    # _ref = idc.prev_head(_ref)
 
                     disasm = self.backend.disassemble(_ref)
                     base_pointer = self._extract_thread_object_base(disasm)
                     if base_pointer is not None:
-                        print(f"[DEBUG] {disasm = }")
                         # Thread object structure:
                         # [0] vtable ptr
                         # [1] state
@@ -756,9 +711,7 @@ class LangRust(LanguageBase):
                             continue
 
                         result.append((ref.value, thread_func))
-                        print(f"[DEBUG] {ref.value = }, {thread_func = :#x}")
                         break
-        print("lang xref done")
         return result
 
     def _extract_thread_object_base(self, inst) -> Optional[int]:
@@ -777,71 +730,6 @@ class LangRust(LanguageBase):
             if address_in_sections(self.backend, addr):
                 return addr
         return None
-
-    def get_user_xrefs2(self) -> Optional[List[Tuple[int, int]]]:
-        """
-        Parse Rust thread objects and refs using only backend APIs.
-
-        Returns:
-            List[(call_site_addr, thread_func_addr)]  (thread_func_addr may be 0 if unresolved)
-        """
-        if not self.lang_match():
-            return None
-
-        result: List[Tuple[int, int]] = []
-        ptr_size = self._ptr_size()
-
-        # Locate CreateThread import (portable)
-        createthread_addr: Optional[Address] = None
-        for addr, full, module in self.backend.get_imports():
-            # Normalize to "kernel32.createthread"
-            if full.lower().endswith(".createthread") and module.lower() in ("kernel32", "unknown"):
-                createthread_addr = addr
-                break
-
-        if not createthread_addr:
-            return result
-
-        # Find the wrapper function that calls CreateThread first
-        first_ref = next(iter(self.backend.get_xrefs_to(createthread_addr)), None)
-        if not first_ref:
-            return result
-
-        wrapper_func = self.backend.get_function_at(first_ref.source)
-        if not wrapper_func:
-            return result
-
-        # Find all calls to the wrapper function
-        for x in self.backend.get_xrefs_to(wrapper_func.start):
-            if x.type != XrefType.CALL:
-                continue
-            call_site = x.source
-            # print(f"{call_site = }")
-
-            # # Heuristic (backend-agnostic) to recover thread function:
-            # # look back up to N instructions; collect DATA_READ/OFFSET xrefs to a data object.
-            # # Treat that object as the Rust thread object; fetch [ + 3*ptr ] as function pointer.
-            # thread_func_addr = 0
-            # text_sec = self._get_text_section()
-            # data_secs = [s for s in self.backend.get_sections() if s.type in (SectionType.DATA,)]
-            # window = self._backwards_window(call_site, max_instructions=10, start_func=wrapper_func)
-
-            # for ins_ea in window:
-            #     for xf in self.backend.get_xrefs_from(ins_ea):
-            #         if xf.type in (XrefType.DATA_READ, XrefType.DATA_OFFSET, XrefType.UNKNOWN):
-            #             base = xf.target.value
-            #             # [0] vtable, [1] state, [2] name, [3] thread function pointer
-            #             candidate_ptr_ea = base + 3 * ptr_size
-            #             func_ptr = self._read_ptr(Address(candidate_ptr_ea), ptr_size)
-            #             if func_ptr and text_sec and text_sec.contains(Address(func_ptr)):
-            #                 thread_func_addr = func_ptr
-            #                 break
-            #     if thread_func_addr:
-            #         break
-
-            # result.append((call_site.value, thread_func_addr))
-
-        return result
 
     def get_entry_point(self) -> Optional[int]:
         """Get Rust program entry point."""
@@ -910,21 +798,16 @@ class LangRust(LanguageBase):
                 inst_mnemonic = getattr(inst, "mnemonic", "")
                 inst_is_call = inst and inst_mnemonic.lower() == "call"
 
-                if inst_is_call:
-                    log(f"rand0mx: inspecting call @0x{ins.value:x} :: {getattr(inst, 'operands', ())}")
-
                 for xr in self.backend.get_xrefs_from(ins):
                     if fn.contains(xr.target):
                         continue
 
                     is_call = xr.type == XrefType.CALL or inst_is_call
                     if not is_call:
-                        log(f"rand0mx: skipped xref type={getattr(xr.type, 'name', xr.type)} source=0x{ins.value:x} target=0x{xr.target.value:x}")
                         continue
 
                     wrapper_fn = self.backend.get_function_at(xr.target)
                     if not wrapper_fn:
-                        log(f"rand0mx: missing function for call target 0x{xr.target.value:x}")
                         continue
                     if wrapper_fn.start == fn.start:
                         continue
@@ -935,7 +818,6 @@ class LangRust(LanguageBase):
 
                     candidate_fn = self.backend.get_function_at(Address(candidate_addr))
                     if not candidate_fn:
-                        log(f"rand0mx: no function defined at candidate 0x{candidate_addr:x}")
                         self._define_function_if_absent(candidate_addr)
                         candidate_fn = self.backend.get_function_at(Address(candidate_addr))
                         if not candidate_fn:
@@ -947,7 +829,6 @@ class LangRust(LanguageBase):
                         continue
 
                     current_name = (candidate_fn.name or "").lower()
-                    log(f"rand0mx: candidate rust_main source=0x{ins.value:x} target=0x{candidate_addr:x} name={candidate_fn.name} type={getattr(candidate_fn.type, 'name', candidate_fn.type)}")
                     if current_name and not current_name.startswith(("fun_", "sub_", "replace_me_", "lab_")):
                         return candidate_fn.start.value
 
@@ -956,26 +837,6 @@ class LangRust(LanguageBase):
                     except Exception:
                         pass
                     return candidate_fn.start.value
-
-        # for addr in range(start, end):
-        #     refs = idautils.XrefsFrom(addr)
-
-        #     for ref in refs:
-        #         if start <= ref.to <= end:
-        #             continue
-
-        #         if ref.type != idc.fl_CN:  # Not a direct call
-        #             target_func = idaapi.get_func(ref.to)
-        #             if not target_func or target_func.start_ea != ref.to:
-        #                 continue
-
-        #             # Look for call within next 8 instructions
-        #             call_found = self._find_call_after_ref(addr, 8, is_64)  # Use new variable name
-        #             if call_found:
-        #                 idaapi.set_name(ref.to, "rust_main", idc.SN_NOCHECK)
-        ##                 print(f"{ref.to = :#x} {ref.frm = :#x} {call_found = }")
-
-        #                 return ref.to
         return None
 
     def _extract_rust_closure_address(self, instruction_window: Deque[Address], fallback_target: Optional[int]) -> Optional[int]:
@@ -1021,32 +882,6 @@ class LangRust(LanguageBase):
         if existing is None:
             flat_api.createFunction(gh_addr, f"FUN_{addr:x}")
 
-    # def _find_call_after_ref(self, start_addr: int, max_instructions: int, is_64bit: bool) -> bool:
-    #     """Find call instruction after reference."""
-    #     ins = ida_ua.insn_t()
-    #     ins_ea = start_addr
-
-    #     for _ in range(max_instructions):
-    #         ins_ea = idc.next_head(ins_ea)
-    #         idaapi.decode_insn(ins, ins_ea)
-
-    #         if not ins:
-    #             break
-
-    #         if ins.itype in (idaapi.NN_call, idaapi.NN_callfi, idaapi.NN_callni):
-    #             target = idc.get_operand_value(ins_ea, 0)
-    #             target_flags = idc.get_func_flags(target)
-
-    #             if target_flags < 0:  # Handle pointer to function
-    #                 target = (ida_bytes.get_qword if is_64bit else ida_bytes.get_dword)(target)
-    #                 target_flags = idc.get_func_flags(target)
-
-    #             # Skip imports, library functions and thunks
-    #             if not (target_flags & (idc.FUNC_LIB | idc.FUNC_STATIC | idc.FUNC_THUNK)):
-    #                 return True
-
-    #     return False
-
     def rename_functions(self, xrefer_obj: "XRefer") -> None:
         """
         Rename functions based on their references.
@@ -1066,9 +901,7 @@ class LangRust(LanguageBase):
                 continue
 
             # # only rename default function labels
-            if not any(
-                fn.name.startswith(x) for x in ("sub_", "FUN_")
-            ):  # TODO: limit the logic depending on the backend. In practice, no one manually names a function like FUN_addr, so just ignore for now.
+            if not any(fn.name.startswith(x) for x in ("sub_", "FUN_")):  # TODO: limit the logic depending on the backend. In practice, no one manually names a function like FUN_addr, so just ignore for now.
                 # TODO: expose property in backend/ to detect if auto-named
                 log(f"Renaming skipped: {fn.name}")
             if fn.type in (FunctionType.IMPORT, FunctionType.LIBRARY, FunctionType.THUNK, FunctionType.EXPORT, FunctionType.EXTERN):

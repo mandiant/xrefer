@@ -140,12 +140,7 @@ class LanguageBase(ABC):
         fallback = self.fallback_cmain_detection(self.backend)
         if fallback:
             return fallback
-        else:
-            exports = self.backend.get_exports()
-            # If no main function found, return the first export as a last resort
-            first_export = next(exports, None)
-            if first_export:
-                return first_export[1].value
+        exports = self.backend.get_exports()
         first_export = next(exports, None)
         if first_export:
             return first_export[1].value
