@@ -77,11 +77,10 @@ class GhidraBackendFactory(BackendFactory):
         """Check if Ghidra is available."""
         return importlib.util.find_spec("pyghidra") is not None
 
-    def create_backend(self, **kwargs) -> BackEnd:
+    def create_backend(self, program=None, **kwargs) -> BackEnd:
         """Create Ghidra backend instance."""
         from .ghidra.backend import GhidraBackend
-
-        return GhidraBackend()
+        return GhidraBackend(program=program)
 
 
 class BackendManager:

@@ -12,7 +12,7 @@ import idaapi
 import idautils
 import idc
 
-from ..base import Address, BackEnd, BackendError, BasicBlock, Function, FunctionType, Section, SectionType, String, StringEncType, Xref, XrefType
+from ..base import Address,BackEnd,BackendError,BasicBlock,Function,FunctionType,Section,SectionType,String,StringEncType,Xref,XrefType,Instruction,Operand,OperandType
 
 
 class IDAFunction(Function):
@@ -392,3 +392,53 @@ class IDABackend(BackEnd):
     def _set_function_comment_impl(self, address: Address, comment: str) -> None:
         """Set function comment in IDA."""
         idc.set_func_cmt(int(address), comment, 0)
+
+    def _get_disassembly_impl(self, address: Address) -> Instruction:
+        """Backend-specific implementation for getting disassembly at a specific address."""
+        ea = int(address)
+
+        # Full disassembly text and mnemonic
+        text = idc.generate_disasm_line(ea, 0) or ""
+        mnem = (idc.print_insn_mnem(ea) or "").lower()
+
+        # Collect operands with best-effort typing
+        operands: list[Operand] = []
+        for i in range(8):  # x86/x64 has max 4; use 8 as a safe cap
+            op_type_id = idc.get_operand_type(ea, i)
+            if op_type_id == idc.o_void:
+                break
+
+            op_text = idc.print_operand(ea, i) or ""
+            op_kind = OperandType.OTHER
+            op_value = None
+
+            try:
+                if op_type_id == idc.o_imm:
+                    op_kind = OperandType.IMMEDIATE
+                    val = idc.get_operand_value(ea, i)
+                    op_value = Address(int(val))
+                elif op_type_id == idc.o_reg:
+                    op_kind = OperandType.REGISTER
+                elif op_type_id in (idc.o_mem,):
+                    op_kind = OperandType.MEMORY
+                    val = idc.get_operand_value(ea, i)
+                    op_value = Address(int(val))
+                elif op_type_id in (idc.o_phrase, idc.o_displ):
+                    # Memory with computed address; keep value None (use xrefs to resolve)
+                    op_kind = OperandType.MEMORY
+                else:
+                    op_kind = OperandType.OTHER
+            except Exception:
+                op_kind = OperandType.OTHER
+                op_value = None
+
+            operands.append(Operand(type=op_kind, text=op_text, value=op_value))
+            # print(f"{Address(ea)}: {mnem}|\tOperand[{i}]: {operands[-1]}")
+
+        ins = Instruction(
+            address=Address(ea),
+            mnemonic=mnem,
+            operands=tuple(operands),
+            text=text
+        )
+        return ins

@@ -15,7 +15,7 @@
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
 
-from xrefer.backend import BackEnd, get_current_backend
+from xrefer.backend import Address, BackEnd, SectionType, get_current_backend
 from xrefer.core.helpers import log
 
 
@@ -124,18 +124,119 @@ class LanguageBase(ABC):
             if address is not None:
                 return address.value
 
+        # Prefer the program entry symbol if present (e.g., 'entry' in PE binaries)
+        entry_sym = self.backend.get_address_for_name("entry")
+        if entry_sym is not None:
+            ghidra_fallback = self._resolve_ghidra_user_entry(entry_sym)
+            if ghidra_fallback is not None:
+                return ghidra_fallback
+            return entry_sym.value
+
+        ghidra_fallback = self._resolve_ghidra_user_entry(None)
+        if ghidra_fallback is not None:
+            return ghidra_fallback
+
         # Fallback: try to find main function through common patterns
         fallback = self.fallback_cmain_detection(self.backend)
         if fallback:
             return fallback
-        else:
-            exports = self.backend.get_exports()
-            # If no main function found, return the first export as a last resort
-            first_export = next(exports, None)
-            if first_export:
-                return first_export[1].value
+        exports = self.backend.get_exports()
+        first_export = next(exports, None)
+        if first_export:
+            return first_export[1].value
 
         return None
+
+    def preferred_entry_name(self) -> str:
+        """Preferred symbol name for the resolved user entry point."""
+
+        return "main"
+
+    def _resolve_ghidra_user_entry(self, entry_symbol: Optional[Address]) -> Optional[int]:
+        """Attempt to resolve the user entry point via Ghidra-specific heuristics."""
+
+        if self.backend.name != "ghidra":
+            return None
+
+        entry_address_obj: Optional[Address]
+        if entry_symbol is not None:
+            entry_address_obj = entry_symbol if isinstance(entry_symbol, Address) else Address(int(entry_symbol))
+        else:
+            resolved = self.backend.get_address_for_name("entry")
+            entry_address_obj = resolved if resolved is not None else None
+
+        if entry_address_obj is None:
+            return None
+
+        text_section = self.backend.get_section_by_name(".text")
+        if text_section is None:
+            return None
+
+        exec_sections = [section for section in self.backend.get_sections() if getattr(section, "type", None) == SectionType.CODE]
+
+        def _in_exec_section(addr: Address) -> bool:
+            if text_section.contains(addr):
+                if getattr(text_section, "type", None) == SectionType.CODE:
+                    return True
+            for section in exec_sections:
+                if section.contains(addr):
+                    return True
+            return False
+
+        start = max(text_section.start.value, entry_address_obj.value - 0x400)
+        end = min(text_section.end.value, entry_address_obj.value + 0x2000)
+
+        candidates: list[tuple[int, int]] = []
+        try:
+            for inst_addr in self.backend.instructions(Address(start), Address(end)):
+                inst = self.backend.disassemble(inst_addr)
+                if inst.mnemonic != "call" or not inst.operands:
+                    continue
+                target_val = inst.operands[0].value if inst.operands[0].value is not None else None
+                if target_val is None:
+                    continue
+                if not _in_exec_section(target_val):
+                    continue
+                if target_val == entry_address_obj:
+                    continue
+                candidates.append((int(target_val), int(inst_addr)))
+        except Exception:
+            return None
+
+        if not candidates:
+            return None
+
+        # Prefer calls that land before the CRT stub; fall back to the lowest candidate.
+        before_stub = [pair for pair in candidates if pair[0] < entry_address_obj.value]
+        target_value, _ = min(before_stub or candidates, key=lambda item: item[0])
+
+        self._maybe_rename_entry_function(Address(target_value))
+        log(f"Ghidra fallback resolved entry point at 0x{target_value:x}")
+        return target_value
+
+    def _maybe_rename_entry_function(self, address: Address) -> None:
+        """Rename the resolved entry function if it uses a placeholder name."""
+
+        preferred = self.preferred_entry_name()
+        if not preferred:
+            return
+
+        try:
+            entry_function = self.backend.get_function_at(address)
+        except Exception:
+            return
+
+        if not entry_function:
+            return
+
+        current_name = entry_function.name
+        normalized = current_name.lower()
+        placeholder_prefixes = ("fun_", "sub_", "entry")
+        if current_name and not normalized.startswith(placeholder_prefixes):
+            return
+        if current_name == preferred:
+            return
+        entry_function.name = preferred
 
     def get_strings(self, filters: Optional[List[str]] = None) -> Dict[int, List[str]]:
         """

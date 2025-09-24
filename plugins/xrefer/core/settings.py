@@ -17,7 +17,6 @@ import os
 from time import time
 from typing import Any, Dict, List
 
-from xrefer import backend
 from xrefer.core.helpers import log
 
 PathType = str
@@ -49,7 +48,14 @@ class XReferSettingsManager:
 
         # IDB-specific settings - paths that can be customized per IDB
         self.idb_specific_paths = {"analysis", "capa", "trace", "xrefs"}
-        self.current_idb = backend.sample_path()
+        self._current_idb = None  # Lazy
+
+    @property
+    def current_idb(self) -> str:
+        if self._current_idb is None:
+            from ..backend import sample_path
+            self._current_idb = sample_path()
+        return self._current_idb
 
     def get_default_settings(self) -> Dict[str, Any]:
         """Get default settings dictionary with added display options."""
