@@ -1,7 +1,7 @@
 import logging
 from collections.abc import Iterator
 
-from ..base import Address, BackEnd, BackendError, BasicBlock, Function, FunctionType, InvalidAddressError, Section, SectionType, String, StringEncType, Xref, XrefType
+from ..base import Address, BackEnd, BackendError, BasicBlock, Function, FunctionType, Instruction, InvalidAddressError, Operand, OperandType, Section, SectionType, String, StringEncType, Xref, XrefType
 
 
 class GhidraFunction(Function):
@@ -41,7 +41,8 @@ class GhidraFunction(Function):
         if not value:
             raise ValueError("Function name cannot be empty")
         try:
-            self._func.setName(value, None)
+            from ghidra.program.model.symbol import SourceType
+            self._func.setName(value, SourceType.USER_DEFINED)
             self._name = value
         except Exception as e:
             raise BackendError(f"Failed to set function name: {e}") from e
@@ -283,6 +284,13 @@ class GhidraBackend(BackEnd):
 
         return self._program
 
+    def _is_executable_address(self, ghidra_addr) -> bool:
+        """Return True if address is in an executable memory block."""
+        program = self._get_actual_program()
+        mem = program.getMemory()
+        block = mem.getBlock(ghidra_addr)
+        return bool(block and block.isExecute())
+
     @property
     def name(self) -> str:
         """Backend name for language module lookup."""
@@ -302,8 +310,15 @@ class GhidraBackend(BackEnd):
         program = self._get_actual_program()
         function_manager = program.getFunctionManager()
         for func in function_manager.getFunctions(True):
-            if func is not None:
-                yield GhidraFunction(func, self)
+            if func is None:
+                continue
+            # Match IDA semantics more closely: include all non-external
+            # functions discovered by Ghidra (including thunks and small
+            # helper stubs). External functions map to imports and are not
+            # yielded as code functions in IDA either.
+            if func.isExternal():
+                continue
+            yield GhidraFunction(func, self)
 
     def get_function_at(self, address: Address) -> Function | None:
         """Get function containing the specified address."""
@@ -314,6 +329,9 @@ class GhidraBackend(BackEnd):
         function_manager = program.getFunctionManager()
         ghidra_func = function_manager.getFunctionContaining(ghidra_addr)
         if ghidra_func:
+            # Normalize: ignore EXTERNAL functions only
+            if ghidra_func.isExternal():
+                return None
             return GhidraFunction(ghidra_func, self)
         return None
 
@@ -325,50 +343,84 @@ class GhidraBackend(BackEnd):
         data_iter = listing.getDefinedData(True)
         while data_iter.hasNext():
             data = data_iter.next()
-            data_type = data.getDataType()
+            if not data.hasStringValue():
+                continue
+            value = data.getValue()
+            if not (value and isinstance(value, str) and len(value) >= min_length):
+                continue
+            addr = Address(data.getAddress().getOffset())
+            dt_name = data.getDataType().getName().lower()
+            enc = StringEncType.UTF16 if ("unicode" in dt_name or "wide" in dt_name) else StringEncType.ASCII
+            yield GhidraString(addr, value, len(value), enc)
 
-            # Check if it's a string type (call hasStringValue on data, not data_type)
-            if data.hasStringValue():
-                value = data.getValue()
-                if value and isinstance(value, str) and len(value) >= min_length:
-                    addr = Address(data.getAddress().getOffset())
-                    # Determine encoding
-                    if "unicode" in data_type.getName().lower() or "wide" in data_type.getName().lower():
-                        encoding = StringEncType.UTF16
-                    else:
-                        encoding = StringEncType.ASCII
-
-                    yield GhidraString(addr, value, len(value), encoding)
-
-        # Search for additional undefined strings
+        # 2) Scan readable, initialized, non-executable blocks for raw ASCII/UTF-16LE strings
         memory = program.getMemory()
         for block in memory.getBlocks():
-            if block.isInitialized() and not block.isVolatile():
-                yield from self._search_strings_in_block(block, min_length, program)
+            if not block.isInitialized() or block.isVolatile() or block.isExecute() or not block.isRead():
+                continue
+            yield from self._scan_block_for_strings(block, min_length)
 
-    def _search_strings_in_block(self, block, min_length: int, program) -> Iterator[String]:
-        """Search for strings in a memory block."""
+    def _scan_block_for_strings(self, block, min_length: int) -> Iterator[String]:
+        """Detect ASCII and UTF-16LE strings directly from block bytes."""
+        start_off = int(block.getStart().getOffset())
+        end_off = int(block.getEnd().getOffset())
+        size = end_off - start_off + 1
 
-        start = block.getStart()
-        end = block.getEnd()
+        try:
+            from ghidra.program.flatapi import FlatProgramAPI
+            flat = FlatProgramAPI(self._get_actual_program())
+            raw = flat.getBytes(block.getStart(), size)
+            buf = bytes(raw)
+        except Exception:
+            # Fallback to small-chunk reads via read_bytes
+            chunk = self.read_bytes(Address(start_off), size)
+            if not chunk:
+                return
+            buf = chunk
 
-        current = start
-        while current.compareTo(end) < 0:
-            try:
-                listing = program.getListing()
-                data = listing.getDataAt(current)
-                if data and data.hasStringValue():
-                    str_data = data.getValue()
-                else:
-                    str_data = None
-                if str_data and len(str_data) >= min_length:
-                    yield GhidraString(Address(current.getOffset()), str(str_data), len(str_data), StringEncType.ASCII)
-                    current = current.add(len(str_data))
-                else:
-                    current = current.add(1)
-            except Exception:
-                # Skip on any error and continue scanning
-                current = current.add(1)
+        def is_printable(b: int) -> bool:
+            return 32 <= b <= 126
+
+        visited = set()
+
+        # ASCII scan
+        i = 0
+        while i < len(buf):
+            if is_printable(buf[i]):
+                j = i
+                while j < len(buf) and is_printable(buf[j]):
+                    j += 1
+                if j - i >= min_length:
+                    ea = start_off + i
+                    if ea not in visited:
+                        s = buf[i:j].decode('ascii', errors='ignore')
+                        yield GhidraString(Address(ea), s, len(s), StringEncType.ASCII)
+                        visited.add(ea)
+                i = j + 1
+            else:
+                i += 1
+
+        # UTF-16LE scan (simple pattern: printable ASCII with null bytes)
+        i = 0
+        while i+1 < len(buf):
+            # require little-endian wide char: printable, then 0x00
+            if is_printable(buf[i]) and buf[i+1] == 0:
+                j = i
+                run = 0
+                chars = []
+                while j+1 < len(buf) and is_printable(buf[j]) and buf[j+1] == 0:
+                    chars.append(chr(buf[j]))
+                    run += 1
+                    j += 2
+                if run >= min_length:
+                    ea = start_off + i
+                    if ea not in visited:
+                        s = ''.join(chars)
+                        yield GhidraString(Address(ea), s, len(s), StringEncType.UTF16)
+                        visited.add(ea)
+                i = j + 2
+            else:
+                i += 2
 
     def get_name_at(self, address: Address) -> str:
         """Get symbol name at the specified address."""
@@ -456,12 +508,42 @@ class GhidraBackend(BackEnd):
         addr_value = address.value if isinstance(address, Address) else int(address)
         ghidra_addr = self._addr_factory.getAddress(f"{addr_value:x}")
 
-        # Use FlatProgramAPI for simplified byte reading
-        from ghidra.program.flatapi import FlatProgramAPI
+        # # Use FlatProgramAPI for simplified byte reading
+        # from ghidra.program.flatapi import FlatProgramAPI
 
-        flat_api = FlatProgramAPI(program)
-        buffer = flat_api.getBytes(ghidra_addr, size)
-        return bytes(buffer)
+        # flat_api = FlatProgramAPI(program)
+        # buffer = flat_api.getBytes(ghidra_addr, size)
+        # return bytes(buffer)
+        """ v2 """
+        # Guard against invalid or non-readable regions and partial reads.
+        try:
+            memory = program.getMemory()
+            block = memory.getBlock(ghidra_addr)
+            if block is None or not block.isRead():
+                return None
+
+            # Compute how many bytes remain in this block from the start address.
+            remaining = int(block.getEnd().getOffset() - ghidra_addr.getOffset() + 1)
+            if remaining <= 0:
+                return None
+
+            # For consistent semantics with IDA/Binary Ninja backends, only
+            # return data if the full requested size is available.
+            if remaining < size:
+                return None
+
+            from ghidra.program.flatapi import FlatProgramAPI
+            flat_api = FlatProgramAPI(program)
+            buffer = flat_api.getBytes(ghidra_addr, size)
+            return bytes(buffer) if buffer is not None else None
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to read bytes from {address}: {e}")
+            # Match other backends: on any memory access issue, return None
+            # instead of raising, so higher-level scanners can skip gracefully.
+            return None
+
 
     def instructions(self, start: Address, end: Address) -> Iterator[Address]:
         """Iterate over instruction addresses in the specified range."""
@@ -512,6 +594,13 @@ class GhidraBackend(BackEnd):
 
         seen_addrs: set[int] = set()
 
+        # Detect executable format for module normalization
+        try:
+            fmt = (program.getExecutableFormat() or "").upper()
+            is_elf = "ELF" in fmt
+        except Exception:
+            is_elf = False
+
         for symbol in symbol_table.getExternalSymbols():
             # Resolve external location for name/library if available
             external_loc: symbol_module.ExternalLocation = em.getExternalLocation(symbol)
@@ -521,6 +610,10 @@ class GhidraBackend(BackEnd):
             if external_loc is not None:
                 function_name = external_loc.getLabel() or ""
                 library_name = external_loc.getLibraryName() or ""
+                # Normalize EXTERNAL library placeholder to empty so we can apply ELF default
+                lib_str = library_name.strip()
+                if lib_str.upper().startswith("<EXTERNAL>") or lib_str.lower() == "unknown":
+                    library_name = ""
 
             if not function_name:
                 function_name = symbol.getName() or ""
@@ -541,6 +634,7 @@ class GhidraBackend(BackEnd):
                 elif rtype == RefType.THUNK or str(rtype) == "THUNK":
                     thunk_like.append(ref)
 
+            # Prefer data-like references (IAT/GOT) for stability; fallback to thunk/code
             chosen = data_like[0] if data_like else (thunk_like[0] if thunk_like else None)
             if not chosen:
                 continue
@@ -552,7 +646,9 @@ class GhidraBackend(BackEnd):
                 continue
             seen_addrs.add(addr_int)
 
-            yield (Address(addr_int), function_name, library_name or "unknown")
+            # Normalize module for ELF when missing
+            module_out = library_name or ("GLIBC" if is_elf else "unknown")
+            yield (Address(addr_int), function_name, module_out)
 
     def get_exports(self) -> Iterator[tuple[str, Address]]:
         """Get all exported symbols from the binary."""
@@ -624,3 +720,89 @@ class GhidraBackend(BackEnd):
         if sha256:
             return sha256
         raise BackendError("Failed to compute binary hash")
+
+    def _get_disassembly_impl(self, address: Address) -> Instruction:
+        """Disassemble a single instruction at `address` using Ghidra APIs."""
+        program = self._get_actual_program()
+        listing = program.getListing()
+
+        ea = int(address)
+        gh_addr = self._addr_factory.getAddress(f"{ea:x}")
+
+        inst = listing.getInstructionAt(gh_addr)
+        if inst is None:
+            raise BackendError(f"No instruction at address 0x{ea:x}")
+
+        text = inst.toString()
+        mnem = inst.getMnemonicString().lower()
+
+        # Import Java classes for operand inspection
+        from ghidra.program.model.scalar import Scalar as GScalar
+        from ghidra.program.model.address import Address as GAddress
+        from ghidra.program.model.lang import Register as GRegister
+
+        operands: list[Operand] = []
+        num_ops = inst.getNumOperands()
+        # Pre-fetch references for value recovery (e.g., RIP-relative immediates)
+        inst_refs = list(inst.getReferencesFrom())
+        for i in range(num_ops):
+            op_text = inst.getDefaultOperandRepresentation(i)
+            objs = inst.getOpObjects(i)
+
+            is_mem = ("[" in op_text and "]" in op_text)
+            has_reg = any(isinstance(o, GRegister) for o in objs)
+            has_addr = any(isinstance(o, GAddress) for o in objs)
+            has_scalar = any(isinstance(o, GScalar) for o in objs)
+
+            if is_mem:
+                op_kind = OperandType.MEMORY
+            elif has_reg and not (has_addr or has_scalar):
+                op_kind = OperandType.REGISTER
+            elif has_addr or has_scalar:
+                op_kind = OperandType.IMMEDIATE
+            else:
+                op_kind = OperandType.OTHER
+
+            val = None
+            if op_kind == OperandType.MEMORY:
+                # Only treat embedded absolute addresses as values for memory operands
+                if has_addr:
+                    for o in objs:
+                        if isinstance(o, GAddress):
+                            val = Address(int(o.getOffset()))
+                            break
+            elif op_kind == OperandType.IMMEDIATE:
+                if has_addr:
+                    for o in objs:
+                        if isinstance(o, GAddress):
+                            val = Address(int(o.getOffset()))
+                            break
+                elif has_scalar:
+                    for o in objs:
+                        if isinstance(o, GScalar):
+                            # Keep only non-negative immediates as Address values
+                            uv = int(o.getValue())
+                            if uv is not None and uv >= 0:
+                                val = Address(uv)
+                            break
+
+            # Use instruction references to recover operand target addresses
+            # when operand objects do not expose a GAddress (e.g., LEA with
+            # RIP-relative immediate shown as Scalar).
+            if val is None and inst_refs:
+                for ref in inst_refs:
+                    if ref.getOperandIndex() == i:
+                        to_addr = ref.getToAddress()
+                        if to_addr is not None and not to_addr.isStackAddress():
+                            val = Address(int(to_addr.getOffset()))
+                            break
+
+            operands.append(Operand(type=op_kind, text=op_text, value=val))
+
+        ins = Instruction(
+            address=Address(ea),
+            mnemonic=mnem,
+            operands=tuple(operands),
+            text=text
+        )
+        return ins

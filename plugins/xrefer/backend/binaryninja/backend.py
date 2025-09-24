@@ -6,8 +6,9 @@ import hashlib
 from typing import Iterator, Optional, Tuple
 
 import binaryninja as bn
+from binaryninja.enums import LowLevelILOperation
 
-from ..base import Address, BackEnd, BasicBlock, Function, FunctionType, Section, SectionType, String, StringEncType, Xref, XrefType
+from ..base import Address, BackEnd, BasicBlock, Function, FunctionType, Operand, OperandType, Section, SectionType, String, StringEncType, Xref, XrefType, Instruction
 
 
 class BinaryNinjaFunction(Function):
@@ -94,9 +95,10 @@ class BinaryNinjaString(String):
 class BinaryNinjaXref(Xref):
     """Simple xref representation."""
 
-    def __init__(self, source: int, target: int):
+    def __init__(self, source: int, target: int, kind: XrefType = XrefType.UNKNOWN):
         self._src = source
         self._dst = target
+        self._kind = kind
 
     @property
     def source(self) -> Address:
@@ -108,7 +110,7 @@ class BinaryNinjaXref(Xref):
 
     @property
     def type(self) -> XrefType:  # pragma: no cover - heuristic mapping not critical
-        return XrefType.UNKNOWN
+        return self._kind
 
 
 class BinaryNinjaSection(Section):
@@ -248,7 +250,7 @@ class BNBackend(BackEnd):
         funcs = self._bv.get_functions_containing(int(address))
         return BinaryNinjaFunction(funcs[0]) if funcs else None
 
-    def strings(self, min_length: int = 3) -> Iterator[BinaryNinjaString]:
+    def strings(self, min_length: int = 5) -> Iterator[BinaryNinjaString]:
         """
         Get all strings in the Binary Ninja file.
 
@@ -258,21 +260,85 @@ class BNBackend(BackEnd):
         Yields:
             BinaryNinjaString: Strings found in the binary
         """
+        # Only return strings from non-executable memory to align with Ghidra/IDA behavior
         for s in self._bv.get_strings(length=min_length):
-            if len(s.value) >= min_length:
-                yield BinaryNinjaString(s)
+            if len(s.value) < min_length:
+                continue
+            seg = self._bv.get_segment_at(s.start)
+            if seg and seg.executable:
+                continue
+            yield BinaryNinjaString(s)
 
     def get_xrefs_to(self, address: Address) -> Iterator[BinaryNinjaXref]:
-        for ref in self._bv.get_code_refs(int(address)):
-            yield BinaryNinjaXref(ref.address, int(address))
-        for ref in self._bv.get_data_refs(int(address)):
-            yield BinaryNinjaXref(ref, int(address))
+        addr = int(address)
+        code_refs = list(self._bv.get_code_refs(addr))
+        data_refs = list(self._bv.get_data_refs(addr))
+
+        sym = self._bv.get_symbol_at(addr)
+        # sym_type = sym.type
+        # sym_name = sym.full_name if sym else ""
+
+        # If nothing found, try common import normalization variants (IAT/GOT cell)
+        if not code_refs and not data_refs and sym is not None:
+            # BN often records refs to the IAT/GOT cell (data ref from import symbol)
+            iat_cells = list(self._bv.get_data_refs(addr))
+            for cell in iat_cells:  # limit debug noise
+                cr2 = list(self._bv.get_code_refs(cell))
+                dr2 = list(self._bv.get_data_refs(cell))
+                if cr2 or dr2:
+                    code_refs = cr2
+                    data_refs = dr2
+                    break
+
+        for ref in code_refs:
+            yield BinaryNinjaXref(ref.address, addr, self._classify_code_xref(ref.address))
+        for ref in data_refs:
+            yield BinaryNinjaXref(ref, addr, XrefType.DATA_READ)
 
     def get_xrefs_from(self, address: Address) -> Iterator[BinaryNinjaXref]:
-        for dst in self._bv.get_code_refs_from(int(address)):
-            yield BinaryNinjaXref(int(address), dst)
-        for dst in self._bv.get_data_refs_from(int(address)):
-            yield BinaryNinjaXref(int(address), dst)
+        addr = int(address)
+        code_dsts = list(self._bv.get_code_refs_from(addr))
+        data_dsts = list(self._bv.get_data_refs_from(addr))
+        for dst in code_dsts:
+            yield BinaryNinjaXref(addr, dst, self._classify_code_xref(addr))
+        for dst in data_dsts:
+            yield BinaryNinjaXref(addr, dst, XrefType.DATA_WRITE)
+
+    def _classify_code_xref(self, source_addr: int) -> XrefType:
+        """Best-effort classification of a code reference originating at `source_addr`."""
+        func = self._bv.get_function_at(source_addr)
+        if func is None:
+            return XrefType.UNKNOWN
+
+        try:
+            llil = func.get_low_level_il_at(source_addr)
+        except Exception:
+            llil = None
+
+        if llil is None:
+            return XrefType.UNKNOWN
+
+        op = llil.operation
+
+        if op in (
+            LowLevelILOperation.LLIL_CALL,
+            LowLevelILOperation.LLIL_TAILCALL,
+            LowLevelILOperation.LLIL_CALL_STACK_ADJUST,
+            LowLevelILOperation.LLIL_CALL_PARAM,
+            LowLevelILOperation.LLIL_SYSCALL,
+        ):
+            return XrefType.CALL
+
+        if op in (
+            LowLevelILOperation.LLIL_JUMP,
+            LowLevelILOperation.LLIL_JUMP_TO,
+            LowLevelILOperation.LLIL_GOTO,
+            LowLevelILOperation.LLIL_RET,
+            LowLevelILOperation.LLIL_IF,
+        ):
+            return XrefType.JUMP
+
+        return XrefType.UNKNOWN
 
     def get_name_at(self, address: Address) -> str:
         sym = self._bv.get_symbol_at(int(address))
@@ -300,24 +366,30 @@ class BNBackend(BackEnd):
         """Get raw import data from Binary Ninja."""
         processed_addresses = set()
 
+        # Heuristic to detect ELF: presence of a .plt section
+        is_elf = any(name in self._bv.sections for name in (".plt", ".plt.got", ".rela.plt"))
+
         for ext_loc in self._bv.get_external_locations():
             source_symbol = ext_loc.source_symbol
             symbol_address = source_symbol.address
             data_refs = list(self._bv.get_data_refs(symbol_address))
             if len(data_refs) != 1:
-                print(f"Warning: Symbol at {hex(symbol_address)} has {len(data_refs)} data references, expected 1")
-                if len(data_refs) == 0:
-                    continue
-            # Use the data reference address (IAT/GOT entry)
-            address = data_refs[0] if data_refs else symbol_address
-            if address in processed_addresses:
+                print(f"rand0m: {{'bn.import': 'warn', 'sym': '{symbol_address:#x}', 'name': '{source_symbol.raw_name}', 'data_refs': {len(data_refs)}}}")
+            # Prefer the callable stub if Binary Ninja lifted one; otherwise fall back to IAT/GOT cell.
+            target_addr = symbol_address
+            if not self._bv.get_function_at(symbol_address) and data_refs:
+                target_addr = data_refs[0]
+            iat_addr = data_refs[0] if data_refs else None
+            if target_addr in processed_addresses:
                 continue
-            processed_addresses.add(address)
+            processed_addresses.add(target_addr)
             target_name = ext_loc.target_symbol if ext_loc.has_target_symbol else source_symbol.raw_name
-            module_name = ext_loc.library.name.split("/")[-1] if ext_loc.library else "unknown"
+            module_name = ext_loc.library.name.split("/")[-1] if ext_loc.library else ("GLIBC" if is_elf else "unknown")
+
+            print(f"rand0m: {{'bn.import': 'map', 'source_sym': '{source_symbol.raw_name}', 'target_name': '{target_name}', 'module': '{module_name}', 'sym_addr': '{symbol_address:#x}', 'iat_addr': '{iat_addr:#x}'}}")
 
             # Yield raw import data: (address, function_name, module_name)
-            yield (Address(address), target_name, module_name)
+            yield (Address(target_addr), target_name, module_name)
 
     def get_exports(self) -> Iterator[Tuple[str, Address]]:
         """Get all exports from the Binary Ninja binary."""
@@ -380,3 +452,123 @@ class BNBackend(BackEnd):
 
     #     string_ref = MockStringReference(int(address), content, len(content), encoding)
     #     return BinaryNinjaString(string_ref)
+    def _get_disassembly_impl(self, address: Address) -> Instruction:
+        """Backend-specific implementation for getting disassembly at a specific address."""
+        ea = int(address)
+
+        # Full disassembly text for this instruction (Binary Ninja formatted)
+        text = self._bv.get_disassembly(ea)
+
+        # Get tokens for ONLY this instruction at `ea` using the architecture
+        # Returns (List[InstructionTextToken], length)
+        inst_len = self._bv.get_instruction_length(ea)
+        # Read a safe number of bytes for decoding this instruction
+        data = self._bv.read(ea, inst_len if inst_len and inst_len > 0 else 16) or b""
+        tokens, _ = self._bv.arch.get_instruction_text(data, ea)
+
+        # Extract mnemonic from tokens
+        mnemonic = ""
+        for tok in tokens:
+            if tok.type == bn.InstructionTextTokenType.InstructionToken:
+                mnemonic = tok.text.strip().lower()
+                break
+
+        # Split operand tokens by OperandSeparatorToken to mimic IDA operand indexing
+        operands_list: list[Operand] = []
+        collecting = False
+        current: list = []
+        for tok in tokens:
+            if tok.type == bn.InstructionTextTokenType.InstructionToken:
+                # Start collecting after mnemonic
+                collecting = True
+                continue
+            if not collecting:
+                continue
+            if tok.type == bn.InstructionTextTokenType.OperandSeparatorToken:
+                if current:
+                    # finalize current operand
+                    ttypes = {t.type for t in current}
+                    g_text = "".join(t.text for t in current).strip()
+                    kind: OperandType
+                    if (
+                        bn.InstructionTextTokenType.BeginMemoryOperandToken in ttypes
+                        or (
+                            bn.InstructionTextTokenType.CodeRelativeAddressToken in ttypes
+                            and any(t.type == bn.InstructionTextTokenType.BraceToken and t.text == '[' for t in current)
+                        )
+                    ):
+                        kind = OperandType.MEMORY
+                    elif (
+                        bn.InstructionTextTokenType.IntegerToken in ttypes
+                        or bn.InstructionTextTokenType.PossibleAddressToken in ttypes
+                        or bn.InstructionTextTokenType.CodeRelativeAddressToken in ttypes
+                    ):
+                        kind = OperandType.IMMEDIATE
+                    elif bn.InstructionTextTokenType.RegisterToken in ttypes:
+                        kind = OperandType.REGISTER
+                    else:
+                        kind = OperandType.OTHER
+
+                    val = None
+                    for t in current:
+                        if t.type in (
+                            bn.InstructionTextTokenType.IntegerToken,
+                            bn.InstructionTextTokenType.PossibleAddressToken,
+                            bn.InstructionTextTokenType.CodeRelativeAddressToken,
+                        ):
+                            try:
+                                val = Address(int(t.value))
+                            except Exception:
+                                val = None
+                            break
+                    operands_list.append(Operand(type=kind, text=g_text, value=val))
+                    current = []
+                continue
+            current.append(tok)
+
+        # Flush the last operand if any
+        if current:
+            ttypes = {t.type for t in current}
+            g_text = "".join(t.text for t in current).strip()
+            if (
+                bn.InstructionTextTokenType.BeginMemoryOperandToken in ttypes
+                or (
+                    bn.InstructionTextTokenType.CodeRelativeAddressToken in ttypes
+                    and any(t.type == bn.InstructionTextTokenType.BraceToken and t.text == '[' for t in current)
+                )
+            ):
+                kind = OperandType.MEMORY
+            elif (
+                bn.InstructionTextTokenType.IntegerToken in ttypes
+                or bn.InstructionTextTokenType.PossibleAddressToken in ttypes
+                or bn.InstructionTextTokenType.CodeRelativeAddressToken in ttypes
+            ):
+                kind = OperandType.IMMEDIATE
+            elif bn.InstructionTextTokenType.RegisterToken in ttypes:
+                kind = OperandType.REGISTER
+            else:
+                kind = OperandType.OTHER
+
+            val = None
+            for t in current:
+                if t.type in (
+                    bn.InstructionTextTokenType.IntegerToken,
+                    bn.InstructionTextTokenType.PossibleAddressToken,
+                    bn.InstructionTextTokenType.CodeRelativeAddressToken,
+                ):
+                    try:
+                        val = Address(int(t.value))
+                    except Exception:
+                        val = None
+                    break
+            operands_list.append(Operand(type=kind, text=g_text, value=val))
+        if not mnemonic:
+            mnemonic = (text.split()[0].lower() if text else "")
+
+        ins = Instruction(
+            address=Address(ea),
+            mnemonic=mnemonic,
+            operands=tuple(operands_list),
+            text=text
+        )
+        return ins

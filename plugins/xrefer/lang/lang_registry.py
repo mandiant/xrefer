@@ -18,56 +18,42 @@ import inspect
 import os
 from typing import Any, List, Type
 
-from xrefer.backend import get_current_backend
 from xrefer.core.helpers import log
 from xrefer.lang.lang_base import LanguageBase
 from xrefer.lang.lang_default import LangDefault
 
 
 def get_language_modules() -> List[Type[LanguageBase]]:
-    """Get all available language module classes."""
-    lang_classes = []
+    """Discover all backend-neutral language module classes.
+
+    Recursively scans the xrefer.lang package for files named 'lang_*.py'
+    (excluding base/registry/default) and loads classes deriving from LanguageBase.
+    """
+    lang_classes: List[Type[LanguageBase]] = []
     lang_dir = os.path.dirname(__file__)
 
-    # First, check for legacy lang_*.py files
-    lang_files = [f[:-3] for f in os.listdir(lang_dir) if f.startswith("lang_") and f.endswith(".py") and f not in ("lang_base.py", "lang_default.py", "lang_registry.py")]
+    exclude_files = {"lang_base.py", "lang_default.py", "lang_registry.py", "__init__.py"}
 
-    for module_name in lang_files:
-        try:
-            # Import module
-            module = importlib.import_module(f".{module_name}", package="xrefer.lang")
+    for root, _dirs, files in os.walk(lang_dir):
+        for filename in files:
+            if not (filename.startswith("lang_") and filename.endswith(".py")):
+                continue
+            if filename in exclude_files:
+                continue
 
-            # Find language class (subclass of LanguageBase)
-            for name, obj in inspect.getmembers(module, inspect.isclass):
-                if name == "LangDefault":
-                    continue
-                if issubclass(obj, LanguageBase) and obj != LanguageBase:
-                    lang_classes.append(obj)
-        except Exception as e:
-            log(f"[-] Error loading language module {module_name}: {e}")
+            rel_path = os.path.relpath(os.path.join(root, filename), lang_dir)
+            module_name = rel_path[:-3].replace(os.sep, ".")  # strip .py and convert to package path
 
-    try:
-        active_backend = get_current_backend()
-        backend_name = active_backend.name if hasattr(active_backend, "name") else None
-    except Exception:
-        backend_name = None
+            try:
+                module = importlib.import_module(f".{module_name}", package="xrefer.lang")
+                for name, obj in inspect.getmembers(module, inspect.isclass):
+                    if name == "LangDefault":
+                        continue
+                    if issubclass(obj, LanguageBase) and obj is not LanguageBase:
+                        lang_classes.append(obj)
+            except Exception as e:
+                log(f"[-] Error loading language module {module_name}: {e}")
 
-    if backend_name:
-        backend_path = os.path.join(lang_dir, backend_name)
-        if os.path.isdir(backend_path):
-            for lang_file in os.listdir(backend_path):
-                if lang_file.endswith(".py") and not lang_file.startswith("__"):
-                    module_name = lang_file[:-3]
-                    log(f"Loading language module {backend_name}.{module_name}...")
-                    try:
-                        module = importlib.import_module(f".{backend_name}.{module_name}", package="xrefer.lang")
-                        for name, obj in inspect.getmembers(module, inspect.isclass):
-                            if name == "LangDefault":
-                                continue
-                            if issubclass(obj, LanguageBase) and obj != LanguageBase:
-                                lang_classes.append(obj)
-                    except Exception as e:
-                        log(f"[-] Error loading language module {backend_name}.{module_name}: {e}")
     lang_str = ", ".join([cls.__name__ for cls in lang_classes])
     log(f"Found language modules: {lang_str}")
     return lang_classes

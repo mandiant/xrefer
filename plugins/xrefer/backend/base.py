@@ -105,6 +105,45 @@ class Address(int):
         return self != self.invalid()
 
 
+class OperandType(Enum):
+    """Canonical operand categories across backends."""
+    IMMEDIATE = auto()
+    REGISTER  = auto()
+    MEMORY    = auto()
+    RELATIVE  = auto()   # branch/call rel targets
+    OTHER     = auto()
+
+@dataclass(frozen=True)
+class MemoryOperand:
+    """Structured memory operand (best-effort, tolerant across tools)."""
+    base: Optional[str] = None
+    index: Optional[str] = None
+    scale: Optional[int] = None
+    disp: Optional[int] = None
+    seg: Optional[str] = None
+    addr_size: Optional[int] = None  # in bits if known
+
+@dataclass(frozen=True)
+class Operand:
+    """Unified operand."""
+    type: OperandType
+    text: str
+    value: Optional[Address]=None
+    # reg: Optional[str] = None
+    # imm: Optional[int] = None
+    # mem: Optional[MemoryOperand] = None
+
+@dataclass
+class Instruction:
+    address: Address
+    # prefixes: Tuple[str, ...]      # e.g., ("lock",) or (). TODO: forget for now
+    mnemonic: str                  # canonical, lowercased, NO prefixes
+    operands: Tuple[Operand, ...]
+    text: str                      # full display text as shown in tool
+
+
+
+
 @dataclass
 class BasicBlock:
     """
@@ -731,6 +770,12 @@ class BackEnd(ABC):
         except Exception:
             return False
 
+    def disassemble(self, address: Address) -> "Instruction":
+        """
+        Disassemble a single instruction at `address`.
+        """
+        return self._get_disassembly_impl(address)
+
     #
     # Backend-Specific Implementation Methods
     #
@@ -753,4 +798,9 @@ class BackEnd(ABC):
     @abstractmethod
     def _path_impl(self) -> str:
         """Backend-specific implementation for getting binary path."""
+        ...
+
+    @abstractmethod
+    def _get_disassembly_impl(self, address: Address) -> Instruction:
+        """Backend-specific implementation for getting disassembly at a specific address."""
         ...
