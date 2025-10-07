@@ -2,7 +2,7 @@
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# You may may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 #
@@ -14,6 +14,8 @@
 
 from concurrent.futures import ThreadPoolExecutor, as_completed 
 from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
+import sys
+from PyQt5.QtWidgets import QApplication, QDialog, QVBoxLayout, QTextEdit, QDialogButtonBox
 
 from xrefer.core.helpers import log
 from xrefer.llm.base import ModelConfig, ModelType 
@@ -21,6 +23,35 @@ from xrefer.llm.models import GoogleModel, OpenAIModel
 from xrefer.llm.prompts import (CategorizerPrompt, ArtifactAnalyzerPrompt, 
                                 ClusterAnalyzerPrompt, PromptType)
 
+
+class TextEditorDialog(QDialog):
+    """A dialog for editing text with a rich text editor."""
+    def __init__(self, text, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Text")
+        self.layout = QVBoxLayout(self)
+
+        self.text_edit = QTextEdit(self)
+        self.text_edit.setPlainText(text)
+        self.layout.addWidget(self.text_edit)
+
+        self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        self.layout.addWidget(self.button_box)
+
+    def get_text(self):
+        return self.text_edit.toPlainText()
+
+    @staticmethod
+    def edit_text(text):
+        app = QApplication.instance()
+        if app is None:
+            app = QApplication(sys.argv)
+        dialog = TextEditorDialog(text)
+        if dialog.exec_() == QDialog.Accepted:
+            return dialog.get_text(), True
+        return text, False
 
 class LLMProcessor:
     """
@@ -177,19 +208,37 @@ class LLMProcessor:
                 categories=kwargs.get("categories", []),
                 type=kwargs.get("type", "api")
             )
+            prompt, ok = TextEditorDialog.edit_text(prompt)
+            if not ok:
+                return {}
             response = self.model.query(prompt)
+            response, ok = TextEditorDialog.edit_text(response)
+            if not ok:
+                return {}
             return prompt_template.parse_response(response, categories=kwargs.get("categories", []))
             
         elif prompt_type == PromptType.ARTIFACT_ANALYZER:
             artifacts_dict = self.create_artifacts_dict(chunk)
             prompt = prompt_template.format(artifacts=artifacts_dict)
+            prompt, ok = TextEditorDialog.edit_text(prompt)
+            if not ok:
+                return {}
             response = self.model.query(prompt)
+            response, ok = TextEditorDialog.edit_text(response)
+            if not ok:
+                return {}
             return prompt_template.parse_response(response)
             
         elif prompt_type == PromptType.CLUSTER_ANALYZER:
             # For cluster analysis, chunk contains raw formatted cluster data
             prompt = prompt_template.format(cluster_data=chunk[0]) # Take first item since it's our formatted string
+            prompt, ok = TextEditorDialog.edit_text(prompt)
+            if not ok:
+                return {}
             response = self.model.query(prompt)
+            response, ok = TextEditorDialog.edit_text(response)
+            if not ok:
+                return {}
             return prompt_template.parse_response(response)     
         
         else:
@@ -388,4 +437,4 @@ class LLMProcessor:
         results = self.check_for_missed_items(items, results, prompt_type, **kwargs)
         
         return results
-            
+        

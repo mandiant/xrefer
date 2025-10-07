@@ -8,7 +8,7 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied#
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
@@ -24,10 +24,13 @@ import pickle
 import json
 import gzip
 import shutil
+import webbrowser
+import ida_nalt
+import ida_kernwin
 from time import time
 from PyQt5.QtWidgets import QDialog
 from pathlib import Path
-from collections import OrderedDict, deque
+from collections import OrderedDict
 from operator import itemgetter
 from typing import *
 
@@ -41,6 +44,7 @@ from xrefer.llm.base import ModelConfig, ModelType
 from xrefer.llm.categorizer import Categorizer, CATEGORIES
 from xrefer.llm.artifact_analyzer import ArtifactAnalyzer
 from xrefer.llm.cluster_analyzer import ClusterAnalyzer
+from xrefer.report.html_report import get_report_template # New import
 
 
 class XRefer:
@@ -1204,6 +1208,19 @@ class XRefer:
                     return
                     
                 log(f"Generated analysis for {len(self.cluster_analysis.get('clusters', {}))} clusters")
+
+                def populate_library_flag(cluster_list):
+                    for cluster in cluster_list:
+                        analysis = find_cluster_analysis(self.cluster_analysis, cluster.id)
+                        if analysis:
+                            # The LLM returns 0 or 1. Convert to boolean.
+                            is_lib_val = analysis.get('library_or_runtime', 0)
+                            cluster.is_library = bool(int(is_lib_val))
+                        # Recurse into subclusters
+                        if cluster.subclusters:
+                            populate_library_flag(cluster.subclusters)
+
+                populate_library_flag(self.clusters)
                 
             except Exception as e:
                 log(f"Error analyzing clusters: {str(e)}")
@@ -2198,11 +2215,19 @@ class XRefer:
 
         function_api_calls = []
         for api_name, api_calls in self.api_trace_data[func_ea].items():
-            api_name = ida_lines.COLSTR(api_name.split('.')[1], ida_lines.SCOLOR_IMPNAME)
-
+            api_name_colorized = ida_lines.COLSTR(api_name.split('.')[1], ida_lines.SCOLOR_IMPNAME)
+            api_name_clean = api_name.split('.')[1]
+            
             for call in api_calls:
-                call_addr = ida_lines.COLSTR(f'0x{call["call_addr"]:x}', ida_lines.SCOLOR_LIBNAME)
-                function_api_calls.append((call['index'],  f'{call_addr}: {api_name}{call["call_str"]} x {call["count"]}'))
+                call_addr_colorized = ida_lines.COLSTR(f'0x{call["call_addr"]:x}', ida_lines.SCOLOR_LIBNAME)
+                call_addr_clean = f'0x{call["call_addr"]:x}'
+                
+                # We need both colorized for the view and clean for the report
+                function_api_calls.append((
+                    call['index'],
+                    f'{call_addr_colorized}: {api_name_colorized}{call["call_str"]} x {call["count"]}',
+                    f'{call_addr_clean}: {api_name_clean}{ida_lines.tag_remove(call["call_str"])} x {call["count"]}'
+                ))
 
         return function_api_calls
 
@@ -2241,7 +2266,8 @@ class XRefer:
                         path_api_calls.append((call['index'], f'{call_addr}: {api_name}{call["call_str"]} x {call["count"]}'))
 
         function_api_calls = self._gather_sorted_function_api_calls(func_ea)
-        path_api_calls.extend(function_api_calls)
+        # We only need the colorized version for the view
+        path_api_calls.extend([(call[0], call[1]) for call in function_api_calls])
         path_api_calls.sort(key=itemgetter(0))
         return [call[1] for call in path_api_calls]
 
@@ -2659,39 +2685,37 @@ class XRefer:
             List[List[int]]: A list of call paths between the initial and final functions.
         """
         all_paths = []
-        path_buffer = deque([[final]])
+        path_buffer = [[final]]
 
         log(f'Building call paths :: {idc.get_func_name(initial)} -> {idc.get_func_name(final)}')
-        xref_cache = {}
         while path_buffer and len(all_paths) < max_limit and len(path_buffer) < max_limit:
-            current_path = path_buffer.popleft()
             refs = set()
-            target = current_path[-1]
-            if target not in xref_cache:
-                refs = set()
+            target = path_buffer[0][-1]
+
+            if len(path_buffer[0]) < max_limit:
                 for cross_ref in idautils.XrefsTo(target):
                     ref_func = idaapi.get_func(cross_ref.frm)
                     if ref_func:
                         ref_start = ref_func.start_ea
                         refs.add(ref_start)
-                xref_cache[target] = refs
-            else:
-                refs = xref_cache[target]
 
             if refs:
+                current_path = path_buffer.pop(0)
                 for ref in refs:
                     if ref in current_path:
                         continue
+
                     if ref == initial:
                         all_paths = self.insert_path(all_paths, (current_path + [ref])[::-1])
                     else:
                         path_buffer.append(current_path + [ref])
 
-            elif len(current_path) > 0 and initial not in current_path:
-                continue  # Skip this path as it doesn't lead to initial
+            elif initial not in path_buffer[0]:
+                path_buffer.pop(0)
 
-            elif len(current_path) > 0 and initial in current_path:
-                all_paths = self.insert_path(all_paths, current_path[::-1])
+            elif initial in path_buffer[0]:
+                all_paths = self.insert_path(all_paths, path_buffer.pop(0)[::-1])
+
         return all_paths
 
     def generate_all_simple_call_paths_for_ep(self) -> None:
@@ -2966,3 +2990,198 @@ class XRefer:
             
         except Exception as e:
             log(f"Error during function renaming: {str(e)}")
+            
+    def get_artifacts_for_cluster(self, cluster: "FunctionalCluster") -> Dict[str, List[str]]:
+        """Aggregates all unique artifacts for a given cluster."""
+        artifacts = {
+            "APIS": set(),
+            "Binary strings": set(),
+            "Capa Matches": set(),
+            "Library References": set()
+        }
+        
+        # Gather artifacts from all functions within the cluster
+        for func_ea in cluster.nodes:
+            for api in self.get_apis_for_function(func_ea):
+                artifacts["APIS"].add(api)
+            for string in self.get_strings_for_function(func_ea):
+                artifacts["Binary strings"].add(string)
+            for capa in self.get_capa_for_function(func_ea):
+                artifacts["Capa Matches"].add(capa)
+            for lib in self.get_libs_for_function(func_ea):
+                artifacts["Library References"].add(lib)
+
+        # Convert sets to sorted lists for stable output
+        return {key: sorted(list(value)) for key, value in artifacts.items()}
+
+    def get_api_trace_for_cluster_for_html_report(self, cluster: "FunctionalCluster") -> str:
+        """Aggregates and sorts all API trace calls for a cluster, formatted for the HTML report without addresses."""
+        all_calls = []
+        for func_ea in cluster.nodes:
+            calls_with_index = self._gather_sorted_function_api_calls(func_ea)
+            all_calls.extend(calls_with_index)
+    
+        all_calls.sort(key=itemgetter(0))
+        
+        # For each call, take the clean string (call[2]), split it at the first colon, and take the second part.
+        report_lines = []
+        for call in all_calls:
+            parts = call[2].split(': ', 1)
+            if len(parts) > 1:
+                report_lines.append(parts[1])
+            else:
+                report_lines.append(call[2]) # Fallback
+                
+        return "\n".join(report_lines)
+
+    def get_api_trace_for_cluster(self, cluster: "FunctionalCluster") -> str:
+        """Aggregates and sorts all API trace calls for a cluster."""
+        all_calls = []
+        for func_ea in cluster.nodes:
+            # _gather_sorted_function_api_calls returns (index, colorized_str, clean_str)
+            calls_with_index = self._gather_sorted_function_api_calls(func_ea)
+            all_calls.extend(calls_with_index)
+
+        # Sort all collected calls by their original index
+        all_calls.sort(key=itemgetter(0))
+        
+        # Return as a single newline-separated string, using the clean version
+        return "\n".join([call[2] for call in all_calls])
+
+    def generate_report_data(self) -> Dict[str, Any]:
+        """Builds the complete data dictionary for the HTML report."""
+        if not self.clusters or not self.cluster_analysis:
+            raise Exception("Cluster analysis data is not available.")
+
+        node_data_array = []
+        
+        # Helper to recursively process clusters
+        def process_cluster(cluster, parent_key=None):
+            cluster_id = cluster.id
+            analysis = find_cluster_analysis(self.cluster_analysis, cluster_id)
+            if not analysis: return
+
+            artifacts_dict = self.get_artifacts_for_cluster(cluster)
+            artifacts_str = ""
+            for category, items in artifacts_dict.items():
+                if items:
+                    artifacts_str += f"{category}\n" + "\n".join([f"- {item}" for item in items]) + "\n@@@\n"
+
+            node_data = {
+                "key": cluster_id,
+                "label": f"cluster.id.{cluster.id_str}\\n{analysis.get('label', '')}",
+                "description": analysis.get('description', 'No description available.'),
+                "artifacts": artifacts_str.strip(),
+                "apiTrace": self.get_api_trace_for_cluster_for_html_report(cluster),
+                "isLibrary": cluster.is_library
+            }
+            if parent_key is not None:
+                node_data["parent"] = parent_key
+
+            node_data_array.append(node_data)
+
+            for subcluster in cluster.subclusters:
+                process_cluster(subcluster, parent_key=cluster_id)
+
+        # Handle the "Anatomy" root node logic
+        top_level_clusters = [c for c in self.clusters if c.parent_cluster_id is None]
+        
+        # Check if there is a single common ancestor for all top-level clusters
+        # This is a simplified check. A more robust check would build a graph and find roots.
+        if len(top_level_clusters) > 1:
+            # Create a dummy "Anatomy" root node
+            node_data_array.append({
+                "key": 0, # Dummy key for the root
+                "label": "Anatomy\nBinary Functional Clusters",
+                "description": "Top-level view of disjointed functional clusters detected in the binary.",
+                "artifacts": "",
+                "apiTrace": ""
+            })
+            for cluster in top_level_clusters:
+                process_cluster(cluster, parent_key=0)
+        elif len(top_level_clusters) == 1:
+            # Single root cluster, no need for the dummy node
+            process_cluster(top_level_clusters[0])
+
+        file_sha256 = ida_nalt.retrieve_input_file_sha256().hex()
+        file_md5 = ida_nalt.retrieve_input_file_md5().hex()
+        file_size_bytes = ida_nalt.retrieve_input_file_size()
+        file_type_name = idaapi.get_file_type_name()
+
+        # Assemble the final data structure
+        report_data = {
+            "file_details": {
+                "sha256": file_sha256,
+                "md5": file_md5,
+                "file_size": f"{file_size_bytes / (1024*1024):.2f} MB",
+                "file_type": file_type_name
+            },
+            "anatomical_summary": {
+                "summary": self.cluster_analysis.get('binary_description', 'No summary available.'),
+                "report": self.cluster_analysis.get('binary_report', 'No report available.')
+            },
+            "node_data_array": node_data_array
+        }
+        return report_data
+
+    def generate_html_report(self):
+        """Generates and saves the final HTML report."""
+        try:
+            report_data = self.generate_report_data()
+        except Exception as e:
+            log(f"Could not generate report data: {e}")
+            return
+
+        template_html = get_report_template()
+
+        # Inject the main node data array as JSON
+        json_data = json.dumps(report_data["node_data_array"], indent=2)
+        final_html = template_html.replace(
+            'var originalNodeData = []; /*DATA_PLACEHOLDER*/', 
+            f'var originalNodeData = {json_data};'
+        )
+        
+        # Inject file details and summary
+        final_html = final_html.replace(
+            '<!--SHA256_PLACEHOLDER-->', 
+            report_data["file_details"]["sha256"]
+        )
+        final_html = final_html.replace(
+            '<!--MD5_PLACEHOLDER-->', 
+            report_data["file_details"]["md5"]
+        )
+        final_html = final_html.replace(
+            '<!--SIZE_PLACEHOLDER-->', 
+            report_data["file_details"]["file_size"]
+        )
+        final_html = final_html.replace(
+            '<!--TYPE_PLACEHOLDER-->', 
+            report_data["file_details"]["file_type"]
+        )
+        final_html = final_html.replace(
+            '<!--SUMMARY_PLACEHOLDER-->', 
+            report_data["anatomical_summary"]["summary"]
+        )
+        final_html = final_html.replace(
+            '<!--REPORT_PLACEHOLDER-->',
+            report_data["anatomical_summary"]["report"]
+        )
+        
+        # Ask user where to save the file
+        default_name = os.path.basename(self.idb_path) + "_report.html"
+        save_path = ida_kernwin.ask_file(True, default_name, "Save HTML Report")
+
+        if not save_path:
+            log("Report generation cancelled.")
+            return
+
+        # Write the final HTML
+        try:
+            with open(save_path, 'w', encoding='utf-8') as f:
+                f.write(final_html)
+            log(f"Report saved to: {save_path}")
+            
+            # Open the report in the default web browser
+            webbrowser.open('file://' + os.path.realpath(save_path))
+        except Exception as e:
+            log(f"Failed to write or open report: {e}")

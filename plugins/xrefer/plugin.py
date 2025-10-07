@@ -80,6 +80,8 @@ class XReferPlugin(idaapi.plugin_t):
                                  'Rename based on Rust compiler strings', RustRenameHandler())
             register_menu_action('Edit/XRefer/Rename Functions/', 'XRefer:rename_cluster',
                                 'Apply cluster analysis prefixes', ClusterRenameHandler())
+            register_menu_action('Edit/XRefer/Generate Report', 'XRefer:generate_report',
+                                 'Generate Anatomy Report (HTML)', GenerateReportHandler())
             register_menu_action('Edit/XRefer/Configure', 'XRefer:Rust:configure',
                                  'Configure', XReferSettingsHandler())
             register_menu_action('Edit/XRefer/About', 'XRefer:Rust:about',

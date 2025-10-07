@@ -207,7 +207,8 @@ class XReferView(idaapi.simplecustviewer_t):
                 log("Failed to get Qt widget")
                 return
                 
-            self.qt_widget.setFocusPolicy(QtCore.Qt.StrongFocus)
+            #self.qt_widget.setFocusPolicy(QtCore.Qt.StrongFocus)
+            self.qt_widget.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
             
             # Make the default widget invisible
             self.qt_widget.setVisible(False)
@@ -322,10 +323,7 @@ class XReferView(idaapi.simplecustviewer_t):
                 tooltip = 'Copy all relevant strings to the clipboard'
                 label = 'Copy all relevant strings to clipboard'
                 register_popup_action(form, popup, menu_path, menu_id, label, CopyInterestingStringsHandler(), tooltip)
-                menu_id = 'XRefer:copy_processed_strings'
-                tooltip = 'Copy all processed strings to clipboard'
-                label = 'Copy all processed strings to clipboard'
-                register_popup_action(form, popup, menu_path, menu_id, label, CopyProcessedStringsHandler(), tooltip)
+
 
         class RebaseHook(ida_idp.IDB_Hooks):
             def __init__(self, xrefer_view: 'XReferView'):

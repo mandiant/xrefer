@@ -28,6 +28,7 @@ Please analyze each cluster (starting with the deepest subclusters and working u
     a. The description should not just be reflective of the cluster's own functionality, but also of the functionality of ALL of it's subclusters or referenced clusters. 
 3. Relationships: How it interacts with referenced clusters (if applicable). Defer mentioning specific cluster IDs (cluster.id.xxxx) to this instead of Description. Do NOT mention function addresses or names.
 4. Function Prefix: A one word prefix that can be added to the functions of this cluster, and that captures the functionality of this cluster as best possible.
+5. Part of a Known Library/Runtime: A bool (0/1). If the cluster (based on the artifacts i.e. strings, apis etc) is likely to be part of some known library/runtime then mark this as 1, otherwise mark it as 0.
 
 After analyzing all clusters, please provide:
 4. Provide an overall description of the binary based on your analysis on the above point
@@ -88,18 +89,20 @@ Format your response as a JSON object that includes the cluster analyses (with c
             "label": "Network Communication Module",
             "description": "Implements custom protocol for C2 communication",
             "relationships": "Provides encrypted channel used by cluster.id.0067",
-            "function_prefix:" "netmod"
+            "function_prefix:" "netmod",
+            "library_or_runtime:" 0
         },
         "cluster_67": {
             "label": "Command Execution Module",
             "description": "Executes commands received from the network",
             "relationships": "Uses communication channel from cluster.id.0012",
-            "function_prefix:" "cmd"
+            "function_prefix": "cmd",
+            "library_or_runtime": 0
         }
     },
     "binary_category": "Backdoor",
     "binary_description": "This binary is a backdoor that allows remote command execution via a custom encrypted protocol.",
-    "binary_report": "The malware is a Backdoor that can connect to it's C2 (command and control) server over a custom protocol. The malware has the capability to...
+    "binary_report": "The malware is a Backdoor that can connect to it's C2 (command and control) server over a custom protocol. The malware has the capability to..."
 }
 
 Focus on:

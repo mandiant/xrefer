@@ -2,6 +2,7 @@
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
+# you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
@@ -20,6 +21,7 @@ from typing import Dict, List, Optional, Set, Any
 from xrefer.llm.templates.artifact_analyzer import ARTIFACT_ANALYZER_PROMPT 
 from xrefer.llm.templates.categorizer import CATEGORIZER_PROMPT
 from xrefer.llm.templates.cluster_analyzer import CLUSTER_ANALYZER_PROMPT
+from xrefer.core.helpers import log
 
 
 class PromptType(Enum):
@@ -191,7 +193,9 @@ class ClusterAnalyzerPrompt(PromptTemplate):
                 "cluster_12345": {
                     "label": str,
                     "description": str,
-                    "relationships": str
+                    "relationships": str,
+                    "function_prefix": str,
+                    "library_or_runtime": int
                 },
                 ...
             },
@@ -229,9 +233,9 @@ class ClusterAnalyzerPrompt(PromptTemplate):
                 if not isinstance(analysis, dict):
                     raise ValueError(f"Analysis for {cluster_id} must be a dictionary")
                     
-                required_analysis_keys = {'label', 'description', 'relationships'}
+                required_analysis_keys = {'label', 'description', 'relationships', 'function_prefix', 'library_or_runtime'}
                 if not all(key in analysis for key in required_analysis_keys):
-                    raise ValueError(f"Missing required analysis keys in {cluster_id}")
+                    log(f"Warning: Missing some analysis keys in {cluster_id}. Found: {list(analysis.keys())}")
             
             return result
             
@@ -239,4 +243,4 @@ class ClusterAnalyzerPrompt(PromptTemplate):
             raise ValueError("Invalid JSON response from model")
         except Exception as e:
             raise ValueError(f"Error parsing response: {str(e)}")
-        
+            

@@ -16,6 +16,7 @@ import networkx as nx
 from networkx import NetworkXError
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
+from collections import defaultdict
 from xrefer.core.helpers import *
 
 
@@ -45,6 +46,7 @@ class FunctionalCluster:
         self.parent_cluster_id = parent_cluster_id  # ID of parent cluster if any
         self.cluster_refs = {}  # Maps node -> cluster_id for replaced nodes
         self.intermediate_paths = {}  # Maps (source, target) -> set of intermediate paths
+        self.is_library: bool = False # This is correct
         
     @classmethod
     def reset_id_counter(cls):
@@ -87,6 +89,7 @@ class FunctionalCluster:
                     
                 # Center align all components
                 max_width = max(len(cluster_id_and_root), len(label), len(root_addr))
+                # --- FIX: Reverted from \\n to \n ---
                 return (f"{cluster_id_and_root:^{max_width}}\n"
                     f"{label:^{max_width}}")
             
@@ -161,6 +164,7 @@ class FunctionalCluster:
             centered_addr = center_text(addr_str, width)
             centered_name = center_text(name, width)
             
+            # --- FIX: Reverted from \\n to \n ---
             return f"{centered_addr}\n{centered_name}"
 
         def format_node_label(node: int) -> str:
@@ -181,6 +185,7 @@ class FunctionalCluster:
                     width = max(len(first_line), len(label))
                     centered_id = center_text(first_line, width)
                     centered_label = center_text(label, width)
+                    # --- FIX: Reverted from \\n to \n ---
                     return f"{centered_id}\n{centered_label}"
                 
                 return first_line
@@ -197,6 +202,7 @@ class FunctionalCluster:
                 lines = label.split('\n')
                 width = max(len(line) for line in lines)
                 marker = center_text("(i)", width)
+                # --- FIX: Reverted from \\n to \n ---
                 label = f"{label}\n{marker}"
                 
             return label
@@ -385,7 +391,7 @@ class ClusterManager:
             return
             
         log(f"Found {len(nodes_to_remove)} nodes appearing in >{frequency_threshold} clusters:")
-        log(f"Frequent nodes: {', '.join(f'0x{node:x}' for node in sorted(nodes_to_remove))}\n")
+        log(f"Frequent nodes: {', '.join(f'0x{node:x}' for node in sorted(nodes_to_remove))}\\n")
         
         def clean_cluster(cluster: "FunctionalCluster", depth: int = 0) -> None:
             """
@@ -469,7 +475,7 @@ class ClusterManager:
                 log(f"{indent}Removed {original_subcluster_count - len(cluster.subclusters)} "
                     f"empty subclusters from {cluster_type} {cluster.id}")
         
-        log("\nStarting cluster cleanup:")
+        log("\\nStarting cluster cleanup:")
         log("=" * 50)
         
         # Clean all clusters
@@ -481,7 +487,7 @@ class ClusterManager:
         clusters[:] = [cluster for cluster in clusters 
                     if not hasattr(cluster, 'marked_for_removal')]
         
-        log("\nCleanup Summary:")
+        log("\\nCleanup Summary:")
         log("=" * 50)
         log(f"Original clusters: {original_cluster_count}")
         log(f"Final clusters: {len(clusters)}")
@@ -640,3 +646,4 @@ class ClusterManager:
         log("Establishing cluster relationships...")
         ClusterManager.establish_cluster_relationships(clusters)
         return clusters
+        

@@ -66,7 +66,7 @@ class XReferSettingsManager:
             "git_lookups": False,
             "suppress_notifications": False,
             "llm_origin": "google",
-            "llm_model": "gemini-1.5-pro",
+            "llm_model": "gemini-2.5-pro",
             "api_key": "",
             "enable_exclusions": True,
             "display_options": {
@@ -635,7 +635,7 @@ class XReferSettingsDialog(QDialog):
         self.original_exclusions = copy.deepcopy(self.exclusions)
         
         self.llm_models = {
-            "google": ["gemini-1.5-pro"]                                        # currently gemini-1.5-pro provides the most accuracy with cluster analysis
+            "google": ["gemini-2.5-pro"]                                        # currently gemini-2.5-pro provides the most accuracy with cluster analysis
             # "openai": ["gpt-4o-mini", "gpt-4o"]                               # openai models have much smaller (128K) context windows, that
                                                                                 # are not ideal for cluster analysis of large binaries. disabling
                                                                                 # these models for the time being
