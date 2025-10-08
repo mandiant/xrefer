@@ -2142,7 +2142,7 @@ class XReferView(idaapi.simplecustviewer_t):
             cluster = self.xrefer_obj.clusters[0]
             if not self.state_machine.cluster_manager.get_current_cluster():
                 self.state_machine.cluster_manager.push_cluster(cluster.id)
-            self.draw_individual_cluster_graph(cluster.id, self.func_ea)
+            self.draw_individual_cluster_graph(cluster.id)
             return
 
         def count_cluster_stats(cluster):

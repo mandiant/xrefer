@@ -28,6 +28,7 @@ import ida_nalt
 import ida_ua
 import idaapi
 import idc
+import ida_idaapi
 import networkx as nx
 from PyQt5 import QtCore, QtWidgets
 from tabulate import tabulate
@@ -651,7 +652,7 @@ def create_function_rows_for_interesting_artifacts(func_ea: int, artifacts: List
     # Color first artifact based on its type
     artifact_color = xrefer_obj.color_tags[xrefer_obj.table_names[first_artifact[0]]]
     colored_artifact = f"\x01{artifact_color}{first_artifact[1]}\x02{artifact_color}"
-    colored_func_name = f"\x01{ida_lines.SCOLOR_DEMNAME}{idc.get_func_name(func_ea)}\x02{ida_lines.SCOLOR_DEMNAME}"
+    colored_func_name = f"\x01{ida_lines.SCOLOR_DEMNAME}{idc.get_func_name(ida_idaapi.ea_t(func_ea))}\x02{ida_lines.SCOLOR_DEMNAME}"
 
     first_row = [f"{colored_addr}{colored_arrow}", f" {colored_artifact}", colored_func_name]
     rows.append(first_row)
