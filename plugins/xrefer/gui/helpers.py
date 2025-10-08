@@ -485,7 +485,7 @@ def handle_entrypoint_selection(plugin_instance: Any, custom_ep: int) -> bool:
         bool: True if entry point was valid and analysis started, False otherwise
     """
     if custom_ep != idc.BADADDR:
-        ep_name: str = idc.get_func_name(custom_ep)
+        ep_name: str = idc.get_func_name(ida_idaapi.ea_t(custom_ep))
         if plugin_instance.xrefer_view and plugin_instance.xrefer_view.xrefer_obj.lang:
             log(f"Custom entrypoint selected for secondary analysis: 0x{custom_ep:x} ({ep_name})")
             plugin_instance.xrefer_view.xrefer_obj.current_analysis_ep = custom_ep
