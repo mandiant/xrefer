@@ -61,7 +61,7 @@ class ClusterAnalyzer:
 
         try:
             cluster_count = 0
-            batch_size = 30
+            batch_size = 20
 
             def count_clusters(cluster):
                 nonlocal cluster_count

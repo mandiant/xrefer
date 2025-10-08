@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-CLUSTER_ANALYZER_PROMPT = """You are a malware analyst examining a binary. 
+CLUSTER_ANALYZER_PROMPT = """You are a malware analyst examining a binary.
 You will analyze clusters of functions containing suspicious behaviors.
 Each cluster shows functions, their artifacts (APIs and their corresponding calls (if available), strings, library names, CAPA static analysis tool results etc.), and call relationships.
 
@@ -21,20 +21,21 @@ Here's the cluster data formatted hierarchically:
 {cluster_data}
 
 Please analyze each cluster (starting with the deepest subclusters and working up) and provide:
-1. Label: A short name indicating the cluster's functionality. 
-    a. The label should not just be reflective of the cluster's own functionality, but also of the functionality of ALL of it's subclusters or referenced clusters. 
+1. Label: A short name indicating the cluster's functionality.
+    a. The label should not just be reflective of the cluster's own functionality, but also of the functionality of ALL of it's subclusters or referenced clusters.
     b. Try and identify the main orchestrator cluster of most if not all functionality of the binary and reflect that in the corresponding label as well (where applicable).
 2. Description: Short summary of what the cluster appears to do. Do NOT mention function addresses or names.
-    a. The description should not just be reflective of the cluster's own functionality, but also of the functionality of ALL of it's subclusters or referenced clusters. 
+    a. The description should not just be reflective of the cluster's own functionality, but also of the functionality of ALL of it's subclusters or referenced clusters.
 3. Relationships: How it interacts with referenced clusters (if applicable). Defer mentioning specific cluster IDs (cluster.id.xxxx) to this instead of Description. Do NOT mention function addresses or names.
 4. Function Prefix: A one word prefix that can be added to the functions of this cluster, and that captures the functionality of this cluster as best possible.
+5. Part of a Known Library/Runtime: A bool (0/1). If the cluster (based on the artifacts i.e. strings, apis etc) is likely to be part of some known library/runtime then mark this as 1, otherwise mark it as 0.
 
 After analyzing all clusters, please provide:
 4. Provide an overall description of the binary based on your analysis on the above point
 5. Choose a category for the binary that matches closest to one of the following listed below.
-6. A report with general formatting (not markdown) that includes as much detail as available about all of the malware's capabilities and provides an extensive overview of how it functions. 
-    a. This report should be objective, should not assume anything, only state facts and use technical terminology where applicable. 
-    b. If any list of items (functionalities, commands, paths etc) is to be mentioned, the full list should be provided and nothing should be left out. 
+6. A report with general formatting (not markdown) that includes as much detail as available about all of the malware's capabilities and provides an extensive overview of how it functions.
+    a. This report should be objective, should not assume anything, only state facts and use technical terminology where applicable.
+    b. If any list of items (functionalities, commands, paths etc) is to be mentioned, the full list should be provided and nothing should be left out.
     c. This report should NOT have mentions of cluster IDs.
     d. This report should NOT mention APIs or syscalls by name while describing functionality.
     e. This report should include any relevant and unique IoCs (Indicatos of Compromise) such as file paths, URLs, domains, IPs/ports, commands executed, registry keys/values and COM objects.
@@ -88,18 +89,20 @@ Format your response as a JSON object that includes the cluster analyses (with c
             "label": "Network Communication Module",
             "description": "Implements custom protocol for C2 communication",
             "relationships": "Provides encrypted channel used by cluster.id.0067",
-            "function_prefix:" "netmod"
+            "function_prefix": "netmod",
+            "library_or_runtime": 0
         },
         "cluster_67": {
             "label": "Command Execution Module",
             "description": "Executes commands received from the network",
             "relationships": "Uses communication channel from cluster.id.0012",
-            "function_prefix:" "cmd"
+            "function_prefix": "cmd",
+            "library_or_runtime": 0
         }
     },
     "binary_category": "Backdoor",
     "binary_description": "This binary is a backdoor that allows remote command execution via a custom encrypted protocol.",
-    "binary_report": "The malware is a Backdoor that can connect to it's C2 (command and control) server over a custom protocol. The malware has the capability to...
+    "binary_report": "The malware is a Backdoor that can connect to it's C2 (command and control) server over a custom protocol. The malware has the capability to..."
 }
 
 Focus on:

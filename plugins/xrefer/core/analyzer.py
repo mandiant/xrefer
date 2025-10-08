@@ -19,7 +19,7 @@ import os
 import pickle
 import re
 import shutil
-from collections import OrderedDict, defaultdict, deque
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from operator import itemgetter
 from pathlib import Path
@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
 
 from xrefer.backend import Address, BackEnd, FunctionType, XrefType, get_current_backend
 from xrefer.core.clusters import ClusterManager, FunctionalCluster
-from xrefer.core.helpers import enrich_string_data_core, log, log_elapsed_time
+from xrefer.core.helpers import enrich_string_data_core, find_cluster_analysis, log, log_elapsed_time
 from xrefer.core.settings import XReferSettingsManager
 from xrefer.lang import get_language_object
 from xrefer.llm.artifact_analyzer import ArtifactAnalyzer
@@ -1151,6 +1151,18 @@ class XRefer:
 
                 log(f"Generated analysis for {len(self.cluster_analysis.get('clusters', {}))} clusters")
 
+                def populate_library_flag(cluster_list):
+                    for cluster in cluster_list:
+                        analysis = find_cluster_analysis(self.cluster_analysis, cluster.id)
+                        if analysis:
+                            # The LLM returns 0 or 1. Convert to boolean.
+                            is_lib_val = analysis.get('library_or_runtime', 0)
+                            cluster.is_library = bool(int(is_lib_val))
+                        # Recurse into subclusters
+                        if cluster.subclusters:
+                            populate_library_flag(cluster.subclusters)
+
+                populate_library_flag(self.clusters)
             except Exception as e:
                 log(f"[-] Error analyzing clusters: {str(e)}")
                 # Restore previous state
@@ -2199,7 +2211,8 @@ class XRefer:
                         path_api_calls.append((call["index"], f"{call_addr}: {api_name}{call['call_str']} x {call['count']}"))
 
         function_api_calls = self._gather_sorted_function_api_calls(func_ea)
-        path_api_calls.extend(function_api_calls)
+        # We only need the colorized version for the view
+        path_api_calls.extend([(call[0], call[1]) for call in function_api_calls])
         path_api_calls.sort(key=itemgetter(0))
         return [call[1] for call in path_api_calls]
 
@@ -2625,7 +2638,7 @@ class XRefer:
             List[List[int]]: A list of call paths between the initial and final functions.
         """
         all_paths = []
-        path_buffer = deque([[final]])
+        path_buffer = [[final]]
         try:
             func_name_initial = self._backend.get_function_at(Address(initial))
             func_name_final = self._backend.get_function_at(Address(final))
@@ -2637,22 +2650,18 @@ class XRefer:
             raise e
 
         log(f"Building call paths :: {func_name_initial} -> {func_name_final}")
-        xref_cache = {}
         while path_buffer and len(all_paths) < max_limit and len(path_buffer) < max_limit:
-            current_path = path_buffer.popleft()
             refs = set()
-            target = current_path[-1]
-            if target not in xref_cache:
-                refs = set()
+            target = path_buffer[0][-1]
+
+            if len(path_buffer[0]) < max_limit:
                 for cross_ref in self._backend.get_xrefs_to(target):
                     fn = self._backend.get_function_at(cross_ref.source)
                     if fn:
                         refs.add(fn.start)
-                xref_cache[target] = refs
-            else:
-                refs = xref_cache[target]
 
             if refs:
+                current_path = path_buffer.pop(0)
                 for ref in refs:
                     if ref in current_path:
                         continue
@@ -2661,11 +2670,11 @@ class XRefer:
                     else:
                         path_buffer.append(current_path + [ref])
 
-            elif len(current_path) > 0 and initial not in current_path:
-                continue  # Skip this path as it doesn't lead to initial
+            elif initial not in path_buffer[0]:
+                path_buffer.pop(0)
 
-            elif len(current_path) > 0 and initial in current_path:
-                all_paths = self.insert_path(all_paths, current_path[::-1])
+            elif initial in path_buffer[0]:
+                all_paths = self.insert_path(all_paths, path_buffer.pop(0)[::-1])
         return all_paths
 
     def generate_all_simple_call_paths_for_ep(self) -> None:

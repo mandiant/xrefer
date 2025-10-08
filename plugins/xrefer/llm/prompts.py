@@ -17,6 +17,7 @@ from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, Dict, List, Set
 
+from xrefer.core.helpers import log
 from xrefer.llm.templates import ARTIFACT_ANALYZER_PROMPT, CATEGORIZER_PROMPT, CLUSTER_ANALYZER_PROMPT
 
 
@@ -79,6 +80,9 @@ class PromptTemplate(ABC):
         Returns:
             Parsed data in structured format
         """
+        # NOTE: Just use json schema/pydantic and enforce structured output via code?
+        if response.startswith("```json") and response.endswith("```"):
+            response = response[len("```json") : -len("```")].strip()
         try:
             return self._parse_response_impl(response, **kwargs)
         except json.JSONDecodeError as e:
@@ -220,7 +224,9 @@ class ClusterAnalyzerPrompt(PromptTemplate):
                 "cluster_12345": {
                     "label": str,
                     "description": str,
-                    "relationships": str
+                    "relationships": str,
+                    "function_prefix": str,
+                    "library_or_runtime": int
                 },
                 ...
             },
@@ -256,10 +262,8 @@ class ClusterAnalyzerPrompt(PromptTemplate):
             if not isinstance(analysis, dict):
                 raise ValueError(f"Analysis for {cluster_id} must be a dictionary")
 
-            required_analysis_keys = {"label", "description", "relationships"}
-            # if not all(key in analysis for key in required_analysis_keys):
+            required_analysis_keys = {"label", "description", "relationships", "function_prefix", "library_or_runtime"}  # if not all(key in analysis for key in required_analysis_keys):
             for key in required_analysis_keys:
                 if key not in analysis:
-                    raise ValueError(f"Missing required analysis key '{key}' in {cluster_id}")
-
+                    log(f"Warning: Missing some analysis keys in {cluster_id}. Found: {list(analysis.keys())}")
         return result
