@@ -26,6 +26,7 @@ import ida_idaapi
 import ida_idp
 import ida_kernwin
 import ida_lines
+import ida_idaapi
 import idaapi
 import idautils
 import idc
@@ -105,6 +106,14 @@ class XReferView(idaapi.simplecustviewer_t):
                 ("DIRECT XREFS", 1),
             ]
         )
+        # HACK: Bring back color_tags just for IDA. We removed this from the core because we didn't want to keep IDA specific logic in core. However, to bring back the coloring in the IDA plugin, we directly
+        self.xrefer_obj.color_tags = {
+                self.xrefer_obj.table_names[1]: ida_lines.SCOLOR_DEMNAME, # "INDIRECT LIBRARY XREFS"
+                self.xrefer_obj.table_names[2]: ida_lines.SCOLOR_IMPNAME, # "INDIRECT IMPORT XREFS"
+                self.xrefer_obj.table_names[3]: ida_lines.SCOLOR_DSTR,    # "INDIRECT STRING XREFS"
+                self.xrefer_obj.table_names[4]: ida_lines.SCOLOR_CODNAME, # "INDIRECT CAPA XREFS"
+            }
+
         self.table_names: List[str] = list(self.table_states.keys())
         self.subtable_states: Dict[str, Dict[str, bool]] = {}
         self.api_expansion_state = defaultdict(lambda: defaultdict(lambda: {"direct": False, "indirect": False}))

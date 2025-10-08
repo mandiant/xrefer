@@ -1376,6 +1376,10 @@ class XRefer:
         Returns:
             Union[int, Dict[int, List[int]]]: Color tag or a dictionary of color tags.
         """
+        _color_tags = self.color_tags
+        # HACK: hardcode just for IDA (We need to remove IDA logic, but this is the fastest fix without breaking...)
+        if all(v == '' for v in _color_tags.values()):
+            _color_tags = {'INDIRECT LIBRARY XREFS': '\x08', 'INDIRECT IMPORT XREFS': '"', 'INDIRECT STRING XREFS': '\x1d', 'INDIRECT CAPA XREFS': '\x1a'}
         if table_name in self.color_tags:
             return self.color_tags[table_name]
 
