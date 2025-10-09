@@ -36,6 +36,8 @@ class GoogleModel(BaseModel):
         super().__init__(config)
         self.last_request_time = 0
         self.requests_this_minute = 0
+        # HACK: We should be using appropriate API/configs for determining the correct token limits.
+        # ref: https://ai.google.dev/gemini-api/docs/models#gemini-2.5-pro_1
 
     def get_max_input_tokens(self, ignore_limit: bool = False) -> int:
         """
@@ -48,7 +50,7 @@ class GoogleModel(BaseModel):
             int: Maximum token limit (8192) or 1000000 if ignoring limits
         """
         if ignore_limit or self.config.ignore_token_limit:
-            return 1000000  # gemini context windows are very large, however output tokens are very limited
+            return 1_048_576  # gemini context windows are very large, however output tokens are very limited
         return 32768  # limiting input tokens to a small number to allow chunking, since large input sometimes means
         # large output requirements, unless the smaller limit is explicitly ignored
 
@@ -59,7 +61,7 @@ class GoogleModel(BaseModel):
         Returns:
             int: Maximum output token limit (8192)
         """
-        return 8192
+        return 65_536
 
     def validate_api_key(self) -> bool:
         """
