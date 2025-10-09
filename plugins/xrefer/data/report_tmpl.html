@@ -1,0 +1,1050 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8"/>
+  <title>XRefer Binary Anatomy</title>
+
+  <!-- Load jQuery and dabeng/OrgChart -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/orgchart/2.1.9/css/jquery.orgchart.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/orgchart/2.1.9/js/jquery.orgchart.min.js"></script>
+
+  <!-- Exo font - clean modern tech aesthetic -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Exo:wght@400;600;700&display=swap">
+
+  <style>
+    /* Basic resets & dark background */
+    html, body {
+      margin: 0; padding: 0; height: 100%; overflow: hidden;
+      background-color: #2C2C2C;
+      font-family: 'Exo', sans-serif;
+    }
+
+    /* Content area container (fills the whole page now) */
+    #contentArea {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      overflow: hidden;
+    }
+
+    /* --- REFINED LEFT TRAY STYLES --- */
+    #leftTray {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 430px;
+      min-width: 430px; /* Minimum width */
+      max-width: 800px; /* Maximum width */
+      height: 100%;
+      background-color: #1F1F1F;
+      border-right: 2px solid #00CCCC;
+      box-sizing: border-box;
+      padding: 20px; /* Increased padding */
+      font-size: 0.9rem;
+      line-height: 1.4;
+      color: #E0E0E0; /* Slightly softer white for text */
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      gap: 20px; /* Space between sections */
+      transition: width 0.4s cubic-bezier(0.25, 0.8, 0.25, 1); /* Smooth transition for width */
+    }
+
+    /* Header/Branding */
+    .left-tray-header {
+        display: flex;
+        align-items: center;
+        gap: 15px;
+        margin-bottom: 10px;
+    }
+    .left-tray-header img {
+        width: 170px;
+        height: auto;
+    }
+    .left-tray-header h3 {
+        margin: 0;
+        font-family: 'Exo', sans-serif;
+        font-size: 1.5rem;
+        font-weight: 600;
+        color: #00CCCC;
+        letter-spacing: 0.5px;
+        line-height: 1.2;
+    }
+    .left-tray-header h3 span {
+        color: #FFA500;
+    }
+
+    /* Info Card Base Style */
+    .info-card {
+        background-color: #252525;
+        border: 1px solid #444;
+        border-radius: 6px;
+        padding: 12px;
+        display: flex;
+        flex-direction: column;
+    }
+
+    .info-card h4 {
+        margin-top: 0;
+        margin-bottom: 12px;
+        font-size: 1rem;
+        font-weight: 600;
+        color: #00CCCC;
+        border-bottom: 1px solid #444;
+        padding-bottom: 8px;
+    }
+
+    /* File Details Card */
+    .details-grid {
+        display: grid;
+        grid-template-columns: auto 1fr; /* Label and Value */
+        gap: 8px 12px;
+        align-items: center;
+    }
+    .detail-label {
+        font-weight: 600;
+        color: #AAA; /* Lighter grey for better readability */
+        font-size: 0.9rem; /* Increased size for consistency */
+    }
+    .detail-value {
+        font-family: 'Menlo', 'Consolas', monospace;
+        font-size: 0.9rem; /* Increased size to match body text */
+        color: #E0E0E0;
+        word-break: break-all;
+        background-color: #333;
+        padding: 2px 4px;
+        border-radius: 3px;
+    }
+
+    /* --- ANATOMICAL SUMMARY/REPORT STYLES --- */
+    .summary-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .summary-header h4 {
+      margin: 0;
+      border: none;
+      padding: 0;
+    }
+    .toggle-control {
+      display: flex;
+      background-color: #333;
+      border-radius: 6px;
+      padding: 3px;
+      border: 1px solid #555;
+    }
+    .toggle-btn {
+      background-color: transparent;
+      border: none;
+      color: #ccc;
+      padding: 4px 12px;
+      cursor: pointer;
+      border-radius: 4px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      transition: background-color 0.3s, color 0.3s;
+    }
+    .toggle-btn.active {
+      background-color: #00CCCC;
+      color: #000;
+    }
+
+    #summaryContentContainer {
+      position: relative;
+      /* Let the content determine the height */
+    }
+
+    #summaryContentContainer p {
+      margin: 0;
+      transition: opacity 0.4s ease-in-out;
+      white-space: pre-wrap; /* Respect newlines and wrap text */
+      word-break: break-word; /* Break long words */
+    }
+
+    #summaryContentContainer::-webkit-scrollbar { height: 8px; }
+    #summaryContentContainer::-webkit-scrollbar-track { background: transparent; }
+    #summaryContentContainer::-webkit-scrollbar-thumb {
+        background-color: rgba(136, 136, 136, 0.4); border-radius: 4px;
+        border: 2px solid transparent; background-clip: content-box;
+    }
+    #summaryContentContainer::-webkit-scrollbar-thumb:hover { background-color: rgba(136, 136, 136, 0.7); }
+
+    .call-to-action {
+        color: #00CCCC;
+        font-style: italic;
+        font-weight: 600;
+        background-color: rgba(0, 204, 204, 0.1);
+        padding: 8px;
+        border-radius: 6px;
+        text-align: center;
+        margin-top: 15px;
+        margin-bottom: 0;
+    }
+
+    .disclaimer {
+        font-size: 0.75rem;
+        color: #888;
+        font-style: italic;
+        margin-bottom: 12px; /* Space between disclaimer and link */
+    }
+
+    /* GitHub Link at the bottom of the left tray */
+    .left-tray-footer {
+        margin-top: auto; /* Pushes this whole section to the bottom */
+    }
+    .github-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      text-decoration: none;
+      color: #AAA;
+      font-size: 0.8rem;
+      font-weight: 600;
+      transition: color 0.3s ease;
+    }
+    .github-link:hover {
+      color: #00CCCC;
+    }
+    .github-link svg {
+      width: 18px;
+      height: 18px;
+      fill: currentColor; /* The SVG color will match the link's text color */
+    }
+
+    /* Diagram in the center */
+    #myDiagramDiv {
+      position: absolute;
+      top: 0;
+      left: 430px;
+      right: 400px;
+      bottom: 0;
+      background-color: #2C2C2C;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      transition: left 0.4s cubic-bezier(0.25, 0.8, 0.25, 1); /* Smooth transition for left position */
+    }
+
+    /* --- REFINED RIGHT TRAY STYLES --- */
+    #rightTray {
+      position: absolute;
+      top: 0;
+      right: 0;
+      width: 400px;
+      height: 100%;
+      background-color: #1F1F1F;
+      border-left: 2px solid #00CCCC;
+      transform: translateX(0);
+      transition: transform 0.3s ease, width 0.3s ease;
+      z-index: 10;
+      padding: 20px;
+      box-sizing: border-box;
+      overflow-y: auto;
+      overflow-x: hidden;
+      font-family: 'Exo', sans-serif;
+      font-size: 0.9rem;
+      color: #FFFFFF;
+    }
+
+    #rightTray.hidden { transform: translateX(100%); }
+
+    #clusterName {
+      margin: 0 0 16px 0; font-size: 1.25rem; font-weight: 600; color: #FFA500;
+      padding-bottom: 8px; border-bottom: 1px solid #444;
+    }
+
+    .tabs {
+      display: flex; gap: 5px; margin-bottom: 10px;
+    }
+    .tab-btn {
+      flex: 1; background-color: #333; color: #ccc; border: 1px solid #555;
+      padding: 8px; text-align: center; cursor: pointer; border-radius: 4px;
+      transition: background-color 0.2s, color 0.2s;
+    }
+    .tab-btn:hover { background-color: #444; color: #fff; }
+    .tab-btn.active {
+      background-color: #00CCCC; color: #000000; font-weight: bold; border-color: #00CCCC;
+    }
+
+    #rightTrayContent {
+      background-color: #252525; border: 1px solid #444;
+      border-radius: 6px; padding: 12px;
+      overflow-x: auto;
+    }
+
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    #rightTrayPlaceholder {
+      display: flex; flex-direction: column; justify-content: center;
+      align-items: center; height: 80%; text-align: center; color: #777;
+    }
+    #rightTrayPlaceholder span { font-size: 1.5rem; font-weight: bold; color: #555; margin-bottom: 16px; }
+    #rightTrayDetails.hidden, #rightTrayPlaceholder.hidden { display: none; }
+
+    .hideTrayBtn {
+      display: block; width: 100%; margin-top: 20px; padding: 8px;
+      background-color: #333333; border: 1px solid #555; color: #ffffff;
+      cursor: pointer; border-radius: 4px; text-align: center;
+      transition: background-color 0.2s, color 0.2s;
+      box-sizing: border-box;
+    }
+    .hideTrayBtn:hover { background-color: #444; border-color: #777; }
+
+    /* --- ARTIFACTS & API TRACE STYLES --- */
+    .description-card {
+        background-color: #2C2C2C;
+        border: 1px solid #444;
+        border-radius: 4px;
+        padding: 10px;
+        margin-bottom: 20px;
+        color: #E0E0E0;
+        font-size: 0.9rem; /* Increased size to match body text */
+    }
+    .description-card h5 {
+        margin: 0 0 8px 0;
+        font-size: 1rem;
+        font-weight: 600;
+        color: #00CCCC;
+    }
+    .artifact-category { margin-bottom: 15px; }
+    .artifact-category:last-child { margin-bottom: 0; }
+    .artifact-category h5, .api-trace-header h5 {
+        margin: 0 0 8px 0; font-size: 1rem; font-weight: 600;
+        color: #00CCCC;
+        text-transform: uppercase; letter-spacing: 0.5px;
+        border-bottom: 1px solid #444; padding-bottom: 4px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    .copy-btn {
+        display: inline-block;
+        width: 16px;
+        height: 16px;
+        cursor: pointer;
+        background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%23888" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>');
+        background-size: contain;
+        background-repeat: no-repeat;
+        background-position: center;
+        opacity: 0.5;
+        transition: opacity 0.2s;
+    }
+    .artifact-category:hover .copy-btn, .api-trace-log:hover .copy-btn {
+        opacity: 1;
+    }
+    .copy-btn:hover {
+        background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%2300CCCC" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>');
+    }
+    .copy-btn.copied {
+        background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%2398C379" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>');
+        opacity: 1;
+    }
+
+    .artifact-list {
+        list-style: none; margin: 0; padding: 0;
+        font-family: 'Menlo', 'Consolas', monospace;
+        font-size: 0.9rem; /* Increased size to match body text */
+    }
+    .artifact-list li {
+        background-color: #333; padding: 4px 8px; border-radius: 3px;
+        margin-bottom: 4px;
+        white-space: nowrap;
+    }
+    .artifact-api { color: #FFB6C1; }
+    .artifact-string { color: #98C379; }
+    .artifact-capa { color: #FFA500; }
+    .artifact-lib { color: #89CFF0; }
+
+    #apiTraceFilter { border: 1px solid #00CCCC; margin-bottom: 10px !important; }
+    #apiTraceFilter summary { padding: 4px !important; cursor: pointer; color: #00CCCC; font-weight: bold; outline: none; }
+    #apiTraceCheckContainer { margin-left: 1em !important; padding: 8px !important; }
+    .apiCallCheckbox { display: block; margin: 4px 0; color: #FFFFFF; }
+
+    #apiTraceLines ol { list-style: none; padding: 0; margin: 0; }
+    #apiTraceLines li {
+        font-family: 'Menlo', 'Consolas', monospace;
+        font-size: 0.9rem; /* Increased size to match body text */
+        padding: 4px 6px; border-bottom: 1px solid #333;
+        white-space: nowrap;
+    }
+    #apiTraceLines li:nth-child(even) { background-color: rgba(0,0,0,0.2); }
+    .api-function { color: #FFA500; font-weight: 600; }
+    .api-args { color: #E0E0E0; }
+
+    #rightTrayContent::-webkit-scrollbar { height: 8px; }
+    #rightTrayContent::-webkit-scrollbar-track { background: transparent; }
+    #rightTrayContent::-webkit-scrollbar-thumb {
+        background-color: rgba(136, 136, 136, 0.4); border-radius: 4px;
+        border: 2px solid transparent; background-clip: content-box;
+    }
+    #rightTrayContent::-webkit-scrollbar-thumb:hover { background-color: rgba(136, 136, 136, 0.7); }
+
+
+    #diagramStatus {
+      position: absolute; top: 50%; left: 50%;
+      transform: translate(-50%, -50%); color: #00CCCC;
+      font-size: 16px; text-align: center; display: none; z-index: 5;
+    }
+
+    /* --- OrgChart Customizations --- */
+    .orgchart { background: transparent; } /* MODIFICATION: Make background transparent for centering */
+    .orgchart .node {
+      background-color: #4A4A3A; border: 2px solid #00CCCC; border-radius: 8px;
+      width: 220px; transition: all 0.3s; margin: 0 5px; padding: 4px; box-sizing: border-box;
+    }
+    .orgchart .node .title {
+      background-color: #1F1F1F; color: #FFA500; font-weight: 600; font-size: 10pt;
+      padding: 4px; height: 24px; display: flex; align-items: center; justify-content: center;
+      transition: all 0.3s; border-radius: 4px;
+    }
+    .orgchart .node .content {
+      box-sizing: border-box; background-color: #2C2C2C; color: #00CCCC; border: 0;
+      margin-top: 4px; padding: 8px; font-size: 11pt; font-weight: normal; height: auto;
+      white-space: normal; word-break: break-word; transition: all 0.3s; border-radius: 4px;
+    }
+    .orgchart .node#0 { width: auto; min-width: 220px; background-color: transparent; }
+    .orgchart .node#0 .title { height: auto; padding: 12px; font-size: 12pt; background-color: #2C2C2C; color: #00CCCC; }
+    .orgchart .node#0 .content { display: none; }
+    .orgchart .node:hover { border-color: #FFA500; }
+    .orgchart .node:hover .title, .orgchart .node.selected .title { background-color: #FFA500; color: #1F1F1F; }
+    .orgchart .node.selected { border-color: #FFA500; box-shadow: 0 0 15px rgba(255, 165, 0, 0.7); }
+    .orgchart .lines .downLine { background-color: #00CCCC; }
+    .orgchart .lines .leftLine, .orgchart .lines .rightLine, .orgchart .lines .topLine { border-color: #00CCCC; }
+    .orgchart .lines .downLine:first-of-type { background-color: #00CCCC !important; }
+    .orgchart .node .edge.topEdge, .orgchart .node .edge.leftEdge, .orgchart .node .edge.rightEdge { display: none; }
+    .orgchart .node .edge.bottomEdge {
+      display: block; width: 20px; height: 20px; font-size: 16px; font-weight: bold; color: #00CCCC;
+      border: 1px solid #00CCCC; background-color: #2C2C2C; border-radius: 50%; box-shadow: 0 0 8px rgba(0, 204, 204, 0.7);
+      cursor: pointer; position: absolute; bottom: -11px; left: 50%; transform: translateX(-50%);
+      transition: all 0.2s ease-in-out; z-index: 5;
+    }
+    .orgchart .node .edge.bottomEdge:hover {
+      background-color: #00CCCC; color: #2c2c2c; box-shadow: 0 0 12px rgba(0, 204, 204, 1); transform: translateX(-50%) scale(1.1);
+    }
+    .orgchart .node .edge.bottomEdge::before {
+      content: "−"; position: absolute; top: 50%; left: 50%; transform: translate(-62%, -50%); line-height: 1;
+    }
+    .orgchart .node.collapsed .edge.bottomEdge::before {
+      content: "+"; transform: translate(-62%, -50%);
+    }
+
+    /* --- Styles for the view controls --- */
+    #viewControls {
+        position: absolute;
+        left: 440px;
+        top: 10px;
+        z-index: 100;
+        display: flex;
+        flex-direction: column; /* Stack controls vertically */
+        gap: 8px; /* Space between controls */
+        transition: left 0.4s cubic-bezier(0.25, 0.8, 0.25, 1); /* Smooth transition for left position */
+    }
+    .control-btn {
+        padding: 10px;
+        width: 250px;
+        font-size: 14px;
+        background-color: #333;
+        color: white;
+        border: 1px solid #00CCCC;
+        cursor: pointer;
+        text-align: center;
+        transition: background-color 0.2s;
+    }
+    .control-btn:hover {
+        background-color: #444;
+    }
+    .toggle-switch {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        font-size: 12px;
+        color: #E0E0E0;
+        background-color: #333;
+        border: 1px solid #00CCCC;
+        padding: 6px 10px;
+        width: 250px;
+        box-sizing: border-box;
+    }
+    .toggle-switch input { display: none; }
+    .toggle-switch .slider {
+        position: relative; width: 34px; height: 18px;
+        background-color: #555; border-radius: 17px;
+        transition: background-color 0.3s;
+    }
+    .toggle-switch .slider:before {
+        content: ""; position: absolute;
+        height: 12px; width: 12px; left: 3px; bottom: 3px;
+        background-color: white; border-radius: 50%;
+        transition: transform 0.3s;
+    }
+    .toggle-switch input:checked + .slider { background-color: #00CCCC; }
+    .toggle-switch input:checked + .slider:before { transform: translateX(16px); }
+
+  </style>
+</head>
+
+<body>
+
+<!-- CONTENT AREA -->
+<div id="contentArea">
+  <!-- LEFT TRAY -->
+  <div id="leftTray">
+    <!-- Logo and Title -->
+    <div class="left-tray-header">
+      <img src="logo_small.png" alt="XRefer Logo">
+      <h3>XRefer Binary<br><span style="color: #FFA500;">Anatomy</span></h3>
+    </div>
+
+    <!-- Backend Details -->
+    <div class="info-card">
+        <h4>Metadata</h4>
+        <div class="details-grid">
+            <div class="detail-label">Created:</div>
+            <div class="detail-value"><!--CREATED_PLACEHOLDER--></div>
+            <div class="detail-label">Backend:</div>
+            <div class="detail-value"><!--BACKEND_PLACEHOLDER--></div>
+            <div class="detail-label">Xrefer version:</div>
+            <div class="detail-value"><!--XREFER_VERSION_PLACEHOLDER--></div>
+        </div>
+    </div>
+
+    <!-- File Details -->
+    <div class="info-card">
+        <h4>File Details</h4>
+        <div class="details-grid">
+            <div class="detail-label">sha256:</div>
+            <div class="detail-value"><!--SHA256_PLACEHOLDER--></div>
+            <div class="detail-label">md5:</div>
+            <div class="detail-value"><!--MD5_PLACEHOLDER--></div>
+            <div class="detail-label">File Size:</div>
+            <div class="detail-value"><!--SIZE_PLACEHOLDER--></div>
+            <div class="detail-label">File Type:</div>
+            <div class="detail-value"><!--TYPE_PLACEHOLDER--></div>
+        </div>
+    </div>
+
+    <!-- Anatomical Summary / Report -->
+    <div class="info-card">
+        <div class="summary-header">
+            <h4 id="summaryTitle">Anatomical Summary</h4>
+            <div class="toggle-control">
+                <button id="summaryBtn" class="toggle-btn active">Summary</button>
+                <button id="reportBtn" class="toggle-btn">Report</button>
+            </div>
+        </div>
+        <div id="summaryContentContainer">
+            <p id="anatomicalSummaryContent"><!--SUMMARY_PLACEHOLDER--></p>
+            <p id="anatomicalReportContent" style="display: none; opacity: 0;"><!--REPORT_PLACEHOLDER--></p>
+        </div>
+        <p class="call-to-action">Select a node in the diagram for cluster-specific details.</p>
+    </div>
+
+    <div class="left-tray-footer">
+        <div class="info-card">
+            <h4>About</h4>
+            <p class="disclaimer">
+                This report is not based on code analysis. The anatomical descriptions are inferred from the structural relationships between clusters and their internal/external artifacts. This analysis is intended for rapid, high-level triage, and its accuracy can vary based on the completeness of the available/extracted data.
+            </p>
+            <a href="https://github.com/mandiant/xrefer" target="_blank" class="github-link">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16"><path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21-.15.46-.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+                <span>XRefer Github Repository</span>
+            </a>
+        </div>
+    </div>
+  </div>
+
+
+  <!-- DIAGRAM -->
+  <div id="myDiagramDiv"></div>
+  <div id="diagramStatus">Loading diagram...</div>
+
+  <!-- Diagram Controls -->
+  <div id="viewControls">
+    <button id="resetButton" class="control-btn">Reset View</button>
+    <label class="toggle-switch">
+      Hide Library/Runtime Modules
+      <input type="checkbox" id="showLibraryToggle" checked>
+      <span class="slider"></span>
+    </label>
+  </div>
+
+
+  <!-- RIGHT TRAY -->
+  <div id="rightTray">
+    <div id="rightTrayDetails" class="hidden">
+        <h2 id="clusterName"></h2>
+        <div class="tabs">
+          <div class="tab-btn active" data-tab="details">Details</div>
+          <div class="tab-btn" data-tab="apiTrace">API Trace</div>
+        </div>
+        <div id="rightTrayContent">
+            <div id="details" class="tab-content active"></div>
+            <div id="apiTrace" class="tab-content">
+              <details id="apiTraceFilter">
+                <summary>Filter API calls</summary>
+                <div id="apiTraceCheckContainer"></div>
+              </details>
+              <div class="api-trace-log">
+                <div class="api-trace-header">
+                  <h5>Log<span class="copy-btn"></span></h5>
+                </div>
+                <div id="apiTraceLines"></div>
+              </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="rightTrayPlaceholder">
+        <span>⇦</span>
+        <div class="placeholder-text">Select a cluster from the diagram to view its details.</div>
+    </div>
+
+    <div class="hideTrayBtn" onclick="hideTray()">Hide Panel</div>
+  </div>
+</div>
+
+<script>
+  $(function() {
+    try {
+      document.getElementById('diagramStatus').style.display = 'block';
+
+      var oc;
+      var originalNodeData = []; /*DATA_PLACEHOLDER*/
+      var currentActiveTab = "details";
+      var knownApiFunctions = new Set();
+
+      function getFilteredData() {
+        // --- FIX #3: Invert the logic for the "Hide" toggle ---
+        const hideLibrary = $('#showLibraryToggle').is(':checked');
+        if (!hideLibrary) { // If "Hide" is NOT checked, show everything
+          return originalNodeData;
+        }
+
+        // If "Hide" IS checked, filter out library nodes and re-parent
+        const visibleNodes = JSON.parse(JSON.stringify(originalNodeData.filter(n => !n.isLibrary)));
+        const hiddenNodes = originalNodeData.filter(n => n.isLibrary);
+        const hiddenNodeKeys = new Set(hiddenNodes.map(n => n.key));
+        const nodeMap = new Map(originalNodeData.map(n => [n.key, n]));
+
+        function findVisibleParent(nodeKey) {
+            if (!nodeKey || !nodeMap.has(nodeKey)) {
+                return undefined;
+            }
+            let parentKey = nodeMap.get(nodeKey).parent;
+            while(parentKey && hiddenNodeKeys.has(parentKey)) {
+                parentKey = nodeMap.get(parentKey).parent;
+            }
+            return parentKey;
+        }
+
+        for (const node of visibleNodes) {
+          if (node.parent && hiddenNodeKeys.has(node.parent)) {
+            node.parent = findVisibleParent(node.key);
+          }
+        }
+
+        return visibleNodes;
+      }
+
+      function buildHierarchy(array) {
+        let roots = []; let map = {};
+        array.forEach(item => {
+          // --- FIX #1: Correctly split on the literal '\\n' sequence ---
+          let labelParts = item.label.split('\\n');
+          map[item.key] = { id: item.key, name: labelParts[0], title: labelParts[1] || '', children: [], data: item };
+        });
+        array.forEach(item => {
+          if (item.parent !== undefined && map[item.parent]) {
+              map[item.parent].children.push(map[item.key]);
+          } else {
+              roots.push(map[item.key]);
+          }
+        });
+        const hasDummyRoot = array.some(item => item.key === 0);
+        if (hasDummyRoot) { return roots.find(r => r.id === 0); }
+        if (roots.length === 1) { return roots[0]; }
+        if (roots.length > 1) { return { id: 0, name: 'Anatomy', title: '', children: roots, data: {} }; }
+        return {};
+      }
+
+      function centerRootNode() {
+        if (!oc) return;
+        setTimeout(() => {
+          const container = $('#myDiagramDiv');
+          const chart = oc.$chart;
+          const rootNode = chart.find('.node:first');
+          if (!container.length || !rootNode.length || !chart.length) return;
+
+          const currentTransform = chart.css('transform');
+          let currentPanY = 0;
+          let currentScale = 1;
+
+          if (currentTransform && currentTransform !== 'none') {
+            const matrix = currentTransform.match(/matrix\((.+)\)/);
+            if (matrix) {
+              const values = matrix[1].split(', ');
+              currentScale = parseFloat(values[0]);
+              currentPanY = parseFloat(values[5]);
+            }
+          }
+
+          const containerWidth = container.width();
+          const rootPosition = rootNode.position();
+          const rootWidth = rootNode.outerWidth();
+          const rootCenterX = rootPosition.left + rootWidth / 2;
+          const containerCenterX = containerWidth / 2;
+
+          const desiredPanX = containerCenterX - (rootCenterX * currentScale);
+
+          chart.css('transform', `matrix(${currentScale}, 0, 0, ${currentScale}, ${desiredPanX}, ${currentPanY})`);
+          chart.data('pan', { 'left': desiredPanX, 'top': currentPanY });
+        }, 150);
+      }
+
+      function renderChart(options) {
+        options = options || { center: true }; // Default to centering
+        var nodeDataArray = getFilteredData();
+        var datascource = buildHierarchy(nodeDataArray);
+
+        if (oc) {
+            oc.$chart.off('click');
+            $('#myDiagramDiv').empty();
+        }
+
+        if (!datascource || Object.keys(datascource).length === 0) {
+            $('#diagramStatus').show().text('No clusters to display based on current filter.');
+            return;
+        } else {
+            $('#diagramStatus').hide();
+        }
+
+        oc = $('#myDiagramDiv').orgchart({
+          'data' : datascource, 'nodeContent': 'title', 'pan': true, 'zoom': true,
+          'direction': 't2b', 'depth': 2, 'toggleSiblingsResp': false
+        });
+
+        oc.$chart.on('click', '.node', function(event) {
+          if ($(event.target).hasClass('bottomEdge')) { return; }
+          var $this = $(this); var nodeId = $this.attr('id');
+          if (nodeId == 0) { clearRightTray(); oc.$chart.find('.node.selected').removeClass('selected'); return; }
+          oc.$chart.find('.node.selected').removeClass('selected'); $this.addClass('selected');
+          var nodeData = originalNodeData.find(node => node.key == nodeId);
+          if (nodeData) { updateRightTray(nodeData); }
+        });
+
+        oc.$chart.on('click', function(event) {
+          if (!$(event.target).closest('.node').length) { clearRightTray(); oc.$chart.find('.node.selected').removeClass('selected'); }
+        });
+
+        if (options.center) {
+            centerRootNode();
+        }
+      }
+
+      $('#resetButton').on('click', function() {
+        if (!oc) return;
+        renderChart({ center: false }); // Re-render without auto-centering
+        setTimeout(() => {
+            // Expand all nodes in the newly rendered chart
+            oc.showChildren(oc.$chart.find('.node'));
+            // Clear the right-hand details panel
+            clearRightTray();
+            // NOW, perform the final, correct centering
+            centerRootNode();
+        }, 50); // A short delay to ensure the chart has been rendered and expanded
+      });
+
+      $('#showLibraryToggle').on('change', function() {
+          renderChart(); // This will re-render and auto-center by default
+          clearRightTray();
+      });
+
+      const observerTarget = document.getElementById('myDiagramDiv');
+      if (observerTarget) {
+          const observer = new MutationObserver(mutations => {
+              mutations.forEach(mutation => {
+                  if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
+                      const targetElement = mutation.target;
+                      if (targetElement.matches('tr.nodes')) {
+                          const $node = $(targetElement).closest('table').find('tr:first .node');
+                          if ($node.length) {
+                              if (targetElement.classList.contains('hidden')) { $node.addClass('collapsed'); }
+                              else { $node.removeClass('collapsed'); }
+                          }
+                      }
+                  }
+              });
+          });
+          observer.observe(observerTarget, { attributes: true, attributeFilter: ['class'], subtree: true });
+      }
+
+      document.getElementById('diagramStatus').style.display = 'none';
+
+      function buildArtifactsHtml(description, artifactsText) {
+        let html = `<div class="description-card"><h5>Description</h5><p>${description.replace(/\n/g, "<br/>")}</p></div>`;
+          if (!artifactsText) return html;
+
+          const categories = artifactsText.split('@@@');
+          categories.forEach(cat => {
+              if (!cat.trim()) return;
+            const lines = cat.trim().split('\n');
+              const title = lines.shift();
+              const titleLower = title.toLowerCase();
+              let itemClass = '';
+
+              if (titleLower.includes('apis')) itemClass = 'artifact-api';
+              else if (titleLower.includes('binary strings')) itemClass = 'artifact-string';
+              else if (titleLower.includes('capa matches')) itemClass = 'artifact-capa';
+              else if (titleLower.includes('library references')) itemClass = 'artifact-lib';
+
+              html += `<div class="artifact-category"><h5>${title}<span class="copy-btn"></span></h5><ul class="artifact-list">`;
+              lines.forEach(line => {
+                  line = line.trim().replace(/^- /, '');
+                  html += `<li class="${itemClass}">${line.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</li>`;
+              });
+              html += `</ul></div>`;
+          });
+          return html;
+      }
+
+      function buildApiTraceHtml(traceText) {
+          knownApiFunctions.clear();
+          if (!traceText) return "<ol></ol>";
+        const lines = traceText.trim().split('\n');
+          let html = '<ol>';
+          lines.forEach((line) => {
+              const callMatch = line.match(/^([a-zA-Z0-9_]+)(.*)$/);
+              let functionName = line, args = '';
+              if (callMatch) {
+                  functionName = callMatch[1];
+                  args = callMatch[2];
+              } else {
+                  const firstParen = line.indexOf('(');
+                  if (firstParen > -1) {
+                      functionName = line.substring(0, firstParen);
+                      args = line.substring(firstParen);
+                  }
+              }
+              knownApiFunctions.add(functionName);
+              let coloredFunction = `<span class="api-function">${functionName}</span>`;
+              html += `<li data-func="${functionName}">${coloredFunction}<span class="api-args">${args.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</span></li>`;
+          });
+          html += '</ol>';
+          return html;
+      }
+
+      function updateRightTray(data) {
+          showTray();
+          $("#rightTrayDetails").removeClass("hidden");
+          $("#rightTrayPlaceholder").addClass("hidden");
+
+        var descriptivePart = (data.label.split('\\n')[1] || data.label).replace(/\\(|\\)/g, '');
+          $("#clusterName").text(descriptivePart);
+
+          $("#details").html(buildArtifactsHtml(data.description || "", data.artifacts || ""));
+
+          var trace = data.apiTrace || "";
+          $("#apiTraceLines").html(buildApiTraceHtml(trace));
+          buildApiTraceCheckboxes();
+
+          openTab(currentActiveTab);
+      }
+
+      function clearRightTray() {
+          $("#rightTrayDetails").addClass("hidden");
+          $("#rightTrayPlaceholder").removeClass("hidden");
+      }
+
+      window.hideTray = function() { $("#rightTray").addClass("hidden"); }
+      window.showTray = function() { $("#rightTray").removeClass("hidden"); }
+
+      $('.tab-btn').on('click', function() { openTab($(this).data('tab')); });
+
+      $('body').on('click', '.artifact-category .copy-btn', function() {
+        var $this = $(this);
+        var itemsToCopy = $this.closest('.artifact-category').find('.artifact-list li').map(function() {
+            return $(this).text();
+        }).get().join('\n');
+
+        navigator.clipboard.writeText(itemsToCopy).then(() => {
+            $this.addClass('copied');
+            setTimeout(() => {
+                $this.removeClass('copied');
+            }, 1500);
+        });
+      });
+
+      $('body').on('click', '#apiTrace .copy-btn', function() {
+        var $this = $(this);
+        var itemsToCopy = $this.closest('.api-trace-log').find('#apiTraceLines li:visible').map(function() {
+            return $(this).text();
+        }).get().join('\n');
+
+        navigator.clipboard.writeText(itemsToCopy).then(() => {
+            $this.addClass('copied');
+            setTimeout(() => {
+                $this.removeClass('copied');
+            }, 1500);
+        });
+      });
+
+      function openTab(tabId) {
+        $('.tab-btn, .tab-content').removeClass('active');
+        $(`.tab-btn[data-tab="${tabId}"]`).addClass('active');
+        $(`#${tabId}`).addClass('active');
+        currentActiveTab = tabId;
+        adjustTrayWidth(tabId);
+      }
+
+      function adjustTrayWidth(tabId) {
+          const tray = $("#rightTray");
+          const defaultWidth = 400;
+          const maxWidth = 800;
+          if (tabId === 'details') { // Now check for 'details' tab
+              // Even for details, let's see if content needs more space
+              setTimeout(() => {
+                  let contentWidth = 0;
+                  const testDiv = $("<div>").css({
+                      "position": "absolute", "visibility": "hidden", "white-space": "nowrap",
+                      "font-family": "Menlo, 'Consolas', monospace", "font-size": "0.85rem",
+                  }).appendTo('body');
+                  $(`#${tabId}`).find("li, p").each(function() {
+                      testDiv.text($(this).text());
+                      contentWidth = Math.max(contentWidth, testDiv.width());
+                  });
+                  testDiv.remove();
+                  const leftTrayWidth = $('#leftTray').width();
+                  const neededWidth = Math.min(Math.max(contentWidth + 60, defaultWidth), maxWidth, window.innerWidth - (leftTrayWidth + 20));
+                  tray.css("width", neededWidth + "px");
+              }, 0);
+              return;
+          }
+          setTimeout(() => {
+              let contentWidth = 0;
+              const testDiv = $("<div>").css({
+                  "position": "absolute", "visibility": "hidden", "white-space": "nowrap",
+                  "font-family": "Menlo, 'Consolas', monospace", "font-size": "0.85rem",
+              }).appendTo('body');
+              $(`#${tabId}`).find("li, p").each(function() {
+                  testDiv.text($(this).text());
+                  contentWidth = Math.max(contentWidth, testDiv.width());
+              });
+              testDiv.remove();
+              const leftTrayWidth = $('#leftTray').width();
+              const neededWidth = Math.min(Math.max(contentWidth + 60, defaultWidth), maxWidth, window.innerWidth - (leftTrayWidth + 20));
+              tray.css("width", neededWidth + "px");
+          }, 0);
+      }
+
+      function buildApiTraceCheckboxes() {
+        var container = $("#apiTraceCheckContainer").empty();
+        if (knownApiFunctions.size === 0) return;
+        Array.from(knownApiFunctions).sort().forEach(call => {
+          $('<label class="apiCallCheckbox"></label>')
+            .append($('<input type="checkbox" checked="checked">').val(call).on('change', updateApiTraceDisplay))
+            .append(` ${call}`)
+            .appendTo(container);
+        });
+      }
+
+      function updateApiTraceDisplay() {
+        var unchecked = [];
+        $("#apiTraceCheckContainer input:not(:checked)").each(function() { unchecked.push($(this).val()); });
+        $("#apiTraceLines li").each(function() {
+            var funcName = $(this).data('func');
+            $(this).toggle(!unchecked.includes(funcName));
+        });
+        if (currentActiveTab === "apiTrace") adjustTrayWidth("apiTrace");
+      }
+
+      function adjustLeftTrayWidth() {
+        const tray = $('#leftTray');
+        const minWidth = 430;
+        let newWidth = minWidth; // Default to minWidth
+
+        // Check if the "Report" toggle is active
+        if ($('#reportBtn').hasClass('active')) {
+            const contentContainer = $('#summaryContentContainer');
+            const visibleContent = $('#anatomicalReportContent'); // Only measure the report content
+
+            if (visibleContent.length > 0) {
+                // Use a temporary div to measure the actual width needed by the content
+                const measurer = $('<div>').css({
+                    'position': 'absolute', 'visibility': 'hidden', 'white-space': 'pre',
+                    'font-family': visibleContent.css('font-family'),
+                    'font-size': visibleContent.css('font-size'),
+                    'padding': contentContainer.css('padding'),
+                    'line-height': visibleContent.css('line-height')
+                }).html(visibleContent.html().replace(/<br>/g, '\n')).appendTo('body');
+
+                const contentWidth = measurer[0].scrollWidth;
+                measurer.remove();
+
+                const maxWidth = 800;
+                const padding = 40; // Total horizontal padding of the #leftTray
+                newWidth = Math.min(maxWidth, Math.max(minWidth, contentWidth + padding));
+            }
+        }
+
+        // Apply the calculated width to the tray and adjust the diagram's position
+        tray.css('width', newWidth + 'px');
+        $('#myDiagramDiv').css('left', newWidth + 'px');
+        $('#viewControls').css('left', (newWidth + 10) + 'px');
+      }
+
+      $('#summaryBtn').on('click', function() {
+        if ($(this).hasClass('active')) return;
+        $('.toggle-btn').removeClass('active');
+        $(this).addClass('active');
+        $('#summaryTitle').text('Anatomical Summary');
+
+        $('#anatomicalReportContent').css('opacity', 0);
+        setTimeout(() => {
+          $('#anatomicalReportContent').hide();
+          $('#anatomicalSummaryContent').show();
+          setTimeout(() => {
+            $('#anatomicalSummaryContent').css('opacity', 1);
+            adjustLeftTrayWidth();
+          }, 10);
+        }, 400);
+      });
+
+      $('#reportBtn').on('click', function() {
+        if ($(this).hasClass('active')) return;
+        $('.toggle-btn').removeClass('active');
+        $(this).addClass('active');
+        $('#summaryTitle').text('Anatomical Report');
+
+        $('#anatomicalSummaryContent').css('opacity', 0);
+        setTimeout(() => {
+          $('#anatomicalSummaryContent').hide();
+          $('#anatomicalReportContent').show();
+          setTimeout(() => {
+            $('#anatomicalReportContent').css('opacity', 1);
+            adjustLeftTrayWidth();
+          }, 10);
+        }, 400);
+      });
+
+      // Initial and on-resize adjustment
+      adjustLeftTrayWidth();
+      $(window).on('resize', adjustLeftTrayWidth);
+
+      renderChart();
+      clearRightTray();
+
+    } catch (error) {
+      $('#diagramStatus').show().text('Error loading diagram: ' + error.message);
+      console.error('Error initializing diagram:', error);
+    }
+  });
+</script>
+</body>
+</html>

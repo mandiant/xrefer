@@ -1235,6 +1235,7 @@ class XRefer:
             log("Running cluster analysis...")
             self.analyze_clusters(entities_to_cluster)
             self.save_analysis()
+            self.generate_html_report()
 
         except Exception as e:
             import traceback
@@ -1381,7 +1382,7 @@ class XRefer:
         if all(v == '' for v in _color_tags.values()):
             _color_tags = {'INDIRECT LIBRARY XREFS': '\x08', 'INDIRECT IMPORT XREFS': '"', 'INDIRECT STRING XREFS': '\x1d', 'INDIRECT CAPA XREFS': '\x1a'}
         if table_name in self.color_tags:
-            return self.color_tags[table_name]
+            return _color_tags[table_name]
 
         tag_index = {}
 
@@ -2163,17 +2164,29 @@ class XRefer:
     def _gather_sorted_function_api_calls(self, func_ea):
         if func_ea not in self.api_trace_data:
             return []
+        _should_colorize = False
+        if 'ida' == self._backend.name:
+            import ida_lines
+            _should_colorize = True
 
         function_api_calls = []
         for api_name, api_calls in self.api_trace_data[func_ea].items():
-            # TODO(rand0m): This is formatting. Should be in gui/. Refactoring the entire code is needed. No time for this now.
-            # api_name = ida_lines.COLSTR(api_name.split(".")[1], ida_lines.SCOLOR_IMPNAME)
-            api_name = api_name.split(".")[1]
+            api_name_colorized = api_name_clean = api_name.split('.')[1]
+            if _should_colorize:
+                api_name_colorized = ida_lines.COLSTR(api_name.split('.')[1], ida_lines.SCOLOR_IMPNAME)
 
             for call in api_calls:
-                # call_addr = ida_lines.COLSTR(f"0x{call['call_addr']:x}", ida_lines.SCOLOR_LIBNAME)
-                call_addr = f"0x{call['call_addr']:x}"
-                function_api_calls.append((call["index"], f"{call_addr}: {api_name}{call['call_str']} x {call['count']}"))
+                call_addr_colorized = call_addr_clean = f'0x{call["call_addr"]:x}'
+                if _should_colorize:
+                    call_addr_colorized = ida_lines.COLSTR(f'0x{call["call_addr"]:x}', ida_lines.SCOLOR_LIBNAME)
+
+                # We need both colorized for the view and clean for the report
+                function_api_calls.append((
+                    call['index'],
+                    f'{call_addr_colorized}: {api_name_colorized}{call["call_str"]} x {call["count"]}',
+                    # f'{call_addr_clean}: {api_name_clean}{ida_lines.tag_remove(call["call_str"])} x {call["count"]}'
+                    f'{call_addr_clean}: {api_name_clean}{call["call_str"]} x {call["count"]}'
+                ))
 
         return function_api_calls
 
@@ -2952,3 +2965,180 @@ class XRefer:
                 rename_function(f_ea, "xunc", allow_cluster_prefix_check=False)
 
         log("Function renaming complete")
+
+    def get_artifacts_for_cluster(self, cluster: "FunctionalCluster") -> Dict[str, List[str]]:
+        """Aggregates all unique artifacts for a given cluster."""
+        artifacts = {
+            "APIS": set(),
+            "Binary strings": set(),
+            "Capa Matches": set(),
+            "Library References": set()
+        }
+
+        # Gather artifacts from all functions within the cluster
+        for func_ea in cluster.nodes:
+            for api in self.get_apis_for_function(func_ea):
+                artifacts["APIS"].add(api)
+            for string in self.get_strings_for_function(func_ea):
+                artifacts["Binary strings"].add(string)
+            for capa in self.get_capa_for_function(func_ea):
+                artifacts["Capa Matches"].add(capa)
+            for lib in self.get_libs_for_function(func_ea):
+                artifacts["Library References"].add(lib)
+
+        # Convert sets to sorted lists for stable output
+        return {key: sorted(list(value)) for key, value in artifacts.items()}
+
+    def get_api_trace_for_cluster_for_html_report(self, cluster: "FunctionalCluster") -> str:
+        """Aggregates and sorts all API trace calls for a cluster, formatted for the HTML report without addresses."""
+        all_calls = []
+        for func_ea in cluster.nodes:
+            calls_with_index = self._gather_sorted_function_api_calls(func_ea)
+            all_calls.extend(calls_with_index)
+
+        all_calls.sort(key=itemgetter(0))
+
+        # For each call, take the clean string (call[2]), split it at the first colon, and take the second part.
+        report_lines = []
+        for call in all_calls:
+            print(f"{call = }")
+            parts = call[2].split(': ', 1)
+            if len(parts) > 1:
+                report_lines.append(parts[1])
+            else:
+                report_lines.append(call[2]) # Fallback
+
+        return "\n".join(report_lines)
+
+    def get_api_trace_for_cluster(self, cluster: "FunctionalCluster") -> str:
+        """Aggregates and sorts all API trace calls for a cluster."""
+        all_calls = []
+        for func_ea in cluster.nodes:
+            # _gather_sorted_function_api_calls returns (index, colorized_str, clean_str)
+            calls_with_index = self._gather_sorted_function_api_calls(func_ea)
+            all_calls.extend(calls_with_index)
+
+        # Sort all collected calls by their original index
+        all_calls.sort(key=itemgetter(0))
+
+        # Return as a single newline-separated string, using the clean version
+        return "\n".join([call[2] for call in all_calls])
+
+    def generate_report_data(self) -> Dict[str, Any]:
+        """Builds the complete data dictionary for the HTML report."""
+        if not self.clusters or not self.cluster_analysis:
+            raise Exception("Cluster analysis data is not available.")
+
+        node_data_array = []
+
+        # Helper to recursively process clusters
+        def process_cluster(cluster, parent_key=None):
+            cluster_id = cluster.id
+            analysis = find_cluster_analysis(self.cluster_analysis, cluster_id)
+            if not analysis: return
+
+            artifacts_dict = self.get_artifacts_for_cluster(cluster)
+            artifacts_str = ""
+            for category, items in artifacts_dict.items():
+                if items:
+                    artifacts_str += f"{category}\n" + "\n".join([f"- {item}" for item in items]) + "\n@@@\n"
+
+            node_data = {
+                "key": cluster_id,
+                "label": f"cluster.id.{cluster.id_str}\\n{analysis.get('label', '')}",
+                "description": analysis.get('description', 'No description available.'),
+                "artifacts": artifacts_str.strip(),
+                "apiTrace": self.get_api_trace_for_cluster_for_html_report(cluster),
+                "isLibrary": cluster.is_library
+            }
+            if parent_key is not None:
+                node_data["parent"] = parent_key
+
+            node_data_array.append(node_data)
+
+            for subcluster in cluster.subclusters:
+                process_cluster(subcluster, parent_key=cluster_id)
+
+        # Handle the "Anatomy" root node logic
+        top_level_clusters = [c for c in self.clusters if c.parent_cluster_id is None]
+
+        # Check if there is a single common ancestor for all top-level clusters
+        # This is a simplified check. A more robust check would build a graph and find roots.
+        if len(top_level_clusters) > 1:
+            # Create a dummy "Anatomy" root node
+            node_data_array.append({
+                "key": 0, # Dummy key for the root
+                "label": "Anatomy\nBinary Functional Clusters",
+                "description": "Top-level view of disjointed functional clusters detected in the binary.",
+                "artifacts": "",
+                "apiTrace": ""
+            })
+            for cluster in top_level_clusters:
+                process_cluster(cluster, parent_key=0)
+        elif len(top_level_clusters) == 1:
+            # Single root cluster, no need for the dummy node
+            process_cluster(top_level_clusters[0])
+
+        file_sha256 = self._backend.binary_hash
+        assert file_sha256 is not None
+        # file_md5 = ida_nalt.retrieve_input_file_md5().hex()
+        # file_size_bytes = self._backend.
+        # file_type_name =
+
+        # Assemble the final data structure
+        import datetime
+        report_data = {
+            "metadata": {
+                "date": datetime.datetime.now(datetime.UTC).isoformat(),
+                "xrefer-version": 'TODO: define it in __init__.py',
+                "backend": self._backend.name,
+            },
+            "file_details": {
+                "sha256": file_sha256,
+                "md5": "TODO: file_md5",
+                "file_size": "TODO: wow" , #f"{file_size_bytes / (1024*1024):.2f} MB",
+                "file_type": "TODO: wowtype",# file_type_name
+            },
+            "anatomical_summary": {
+                "summary": self.cluster_analysis.get('binary_description', 'No summary available.'),
+                "report": self.cluster_analysis.get('binary_report', 'No report available.')
+            },
+            "node_data_array": node_data_array
+        }
+        return report_data
+
+    def generate_html_report(self):
+        """Generates and saves the final HTML report."""
+        data_dir = Path(__file__).parent.parent / "data"
+        assert data_dir.exists(), f"Data directory does not exist: {data_dir}"
+        _html_path = data_dir / "report_tmpl.html"
+        assert _html_path.exists(), f"HTML template does not exist: {_html_path}"
+        _html = _html_path.read_text(encoding='utf-8')
+
+        report_data = self.generate_report_data()
+        json_data = json.dumps(report_data["node_data_array"], indent=2)
+
+        for placeholder, value in (
+            ('var originalNodeData = []; /*DATA_PLACEHOLDER*/', f'var originalNodeData = {json_data};'),
+            ('<!--CREATED_PLACEHOLDER-->', report_data["metadata"]["date"]),
+            ('<!--BACKEND_PLACEHOLDER-->', report_data["metadata"]["backend"]),
+            ('<!--XREFER_VERSION_PLACEHOLDER-->', report_data["metadata"]["xrefer-version"]),
+            ('<!--SHA256_PLACEHOLDER-->', report_data["file_details"]["sha256"]),
+            ('<!--MD5_PLACEHOLDER-->', report_data["file_details"]["md5"]),
+            ('<!--SIZE_PLACEHOLDER-->', report_data["file_details"]["file_size"]),
+            ('<!--TYPE_PLACEHOLDER-->', report_data["file_details"]["file_type"]),
+            ('<!--SUMMARY_PLACEHOLDER-->', report_data["anatomical_summary"]["summary"]),
+            ('<!--REPORT_PLACEHOLDER-->', report_data["anatomical_summary"]["report"]),
+        ):
+            _html = _html.replace(placeholder, value)
+        REPORT_SUFFIX= '_report.html'
+        save_path = f"{self._backend.path}{REPORT_SUFFIX}"
+
+        try:
+            with open(save_path, 'w', encoding='utf-8') as f:
+                f.write(_html)
+            log(f"Report saved to: {save_path}")
+            import webbrowser
+            webbrowser.open(f'file://{os.path.realpath(save_path)}')
+        except Exception as e:
+            log(f"Failed to write or open report: {e}")
