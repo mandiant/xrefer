@@ -46,10 +46,13 @@ FILE_FILTERS = {
 # Available LLM models
 LLM_MODELS = {
     "google": [
-        "gemini-1.5-pro",
+        "gemini-flash-latest",
         "gemini-2.5-flash-preview-05-20",
+        "gemini-2.5-pro",
         "gemini-2.5-pro-preview-05-06",
-    ]
+        "gemini-2.5-pro-preview-06-05",
+    ],
+    "openai": ["gpt-5", "gpt-5-mini", "gpt-5-nano"]  # openai models have much smaller (128K) context windows, that are not ideal for cluster analysis of large binaries. disabling these models for the time being
 }
 
 
@@ -390,14 +393,7 @@ class XReferSettingsDialog(QDialog):
         self.exclusions = self.settings_manager.load_exclusions()
         self.original_exclusions = copy.deepcopy(self.exclusions)
 
-        self.llm_models = {
-            "google": [
-                "gemini-1.5-pro",
-                "gemini-2.5-flash-preview-05-20",
-                "gemini-2.5-pro-preview-05-06",
-            ]  # currently gemini-1.5-pro provides the most accuracy with cluster analysis
-            # "openai": ["gpt-4o-mini", "gpt-4o"]  # openai models have much smaller (128K) context windows, that are not ideal for cluster analysis of large binaries. disabling these models for the time being
-        }
+        self.llm_models = LLM_MODELS
 
         self.setFixedSize(DIALOG_WIDTH, DIALOG_HEIGHT)
         self._center_on_screen()

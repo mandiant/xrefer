@@ -64,7 +64,7 @@ class XReferSettingsManager:
             "git_lookups": False,
             "suppress_notifications": False,
             "llm_origin": "google",
-            "llm_model": "gemini-1.5-pro",
+            "llm_model": "gemini-2.5-pro",
             "api_key": "",
             "enable_exclusions": True,
             "display_options": {"auto_size_graphs": True, "hide_llm_disclaimer": False, "show_help_banner": True, "default_panel_width": 779},
