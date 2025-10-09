@@ -1123,7 +1123,7 @@ class XReferView(idaapi.simplecustviewer_t):
                 if new_name:
                     if idaapi.set_name(xref_to_func_ea, new_name):
                         idaapi.refresh_idaview_anyway()
-                        func_ea: int = idc.get_name_ea_simple(idc.get_func_name(addr))
+                        func_ea: int = idc.get_name_ea_simple(idc.get_func_name(ida_idaapi.ea_t(addr)))
                         self.xref_coverage_dict[func_ea] = self.generate_xref_coverage_dict(func_ea)
                         return True
         except:
@@ -2303,6 +2303,7 @@ class XReferView(idaapi.simplecustviewer_t):
                     addr = int(addr_str, 16)
                     # Check if this is the highlighted address
                     if highlight_addr is not None and addr == highlight_addr:
+                        # TODO: Is this a bug? Why are we using `COLOR_ERROR`. COLOR_ADDR feels more appropriate skip for now.
                         return f"\x01\x12{addr_str}{remainder}\x02\x12"
 
                     # Only apply intermediate node coloring in intermediate graph mode

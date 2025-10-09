@@ -373,8 +373,6 @@ class BNBackend(BackEnd):
             source_symbol = ext_loc.source_symbol
             symbol_address = source_symbol.address
             data_refs = list(self._bv.get_data_refs(symbol_address))
-            if len(data_refs) != 1:
-                print(f"rand0m: {{'bn.import': 'warn', 'sym': '{symbol_address:#x}', 'name': '{source_symbol.raw_name}', 'data_refs': {len(data_refs)}}}")
             # Prefer the callable stub if Binary Ninja lifted one; otherwise fall back to IAT/GOT cell.
             target_addr = symbol_address
             if not self._bv.get_function_at(symbol_address) and data_refs:
@@ -385,8 +383,6 @@ class BNBackend(BackEnd):
             processed_addresses.add(target_addr)
             target_name = ext_loc.target_symbol if ext_loc.has_target_symbol else source_symbol.raw_name
             module_name = ext_loc.library.name.split("/")[-1] if ext_loc.library else ("GLIBC" if is_elf else "unknown")
-
-            print(f"rand0m: {{'bn.import': 'map', 'source_sym': '{source_symbol.raw_name}', 'target_name': '{target_name}', 'module': '{module_name}', 'sym_addr': '{symbol_address:#x}', 'iat_addr': '{iat_addr:#x}'}}")
 
             # Yield raw import data: (address, function_name, module_name)
             yield (Address(target_addr), target_name, module_name)
