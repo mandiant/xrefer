@@ -11,6 +11,20 @@ More can be read about XRefer in the accompanying [blog post](https://cloud.goog
 
 ## Installation
 
+### Using hcli (Recommended)
+
+The easiest way to install XRefer is using the [hcli plugin manager](https://github.com/hex-rays/ida-hcli):
+
+```bash
+hcli install xrefer
+```
+
+This will automatically install the plugin and all its dependencies.
+
+_Note: The `asciinet` dependency requires Java to be installed. OpenJDK or any JRE should work. Ensure `java` is accessible on your system's PATH._
+
+### Manual Installation
+
 1. **Clone the Repository:**
   ```
   git clone https://github.com/mandiant/xrefer.git
