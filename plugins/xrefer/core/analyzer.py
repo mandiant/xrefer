@@ -31,10 +31,8 @@ from xrefer.core.clusters import ClusterManager, FunctionalCluster
 from xrefer.core.helpers import enrich_string_data_core, find_cluster_analysis, log, log_elapsed_time
 from xrefer.core.settings import XReferSettingsManager
 from xrefer.lang import get_language_object
-from xrefer.llm.artifact_analyzer import ArtifactAnalyzer
+from xrefer.llm import ArtifactAnalyzer, ClusterAnalyzer, CATEGORIES, Categorizer
 from xrefer.llm.base import ModelConfig, ModelType
-from xrefer.llm.categorizer import CATEGORIES, Categorizer
-from xrefer.llm.cluster_analyzer import ClusterAnalyzer
 from xrefer.loaders.capa import load_capa_json
 from xrefer.loaders.trace import parse_api_trace
 
