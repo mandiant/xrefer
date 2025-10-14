@@ -1,0 +1,50 @@
+{
+  "IDAMetadataDescriptorVersion": 1,
+  "plugin": {
+    "name": "xrefer",
+    "entryPoint": "plugins/xrefer.py",
+    "version": "1.0",
+    "description": "Context-aware binary navigator with LLM-powered cluster analysis and multi-source data integration",
+    "license": "Apache-2.0",
+    "urls": {
+      "repository": "https://github.com/mandiant/xrefer"
+    },
+    "authors": [
+      {
+        "name": "Muhammad Umair",
+        "email": "muhammadumairx@google.com"
+      }
+    ],
+    "pythonDependencies": [
+      "flare_capa",
+      "networkx",
+      "Requests",
+      "tabulate",
+      "asciinet",
+      "bs4",
+      "langchain",
+      "langchain_google_genai",
+      "langchain_openai",
+      "tenacity",
+      "python-statemachine"
+    ],
+    "categories": [
+      "malware-analysis",
+      "collaboration-and-productivity",
+      "ui-ux-and-visualization",
+      "decompilation"
+    ],
+    "keywords": [
+      "binary-analysis",
+      "navigation",
+      "llm",
+      "gemini",
+      "clustering",
+      "malware-analysis",
+      "context-aware",
+      "path-analysis",
+      "capa",
+      "sandbox-integration"
+    ]
+  }
+}
