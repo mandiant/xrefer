@@ -35,8 +35,7 @@ class ModelConfig:
     Configuration for LLM model.
 
     Attributes:
-        provider (ModelType): LLM provider to use
-        model_name (str): Name of specific model to use
+        model_id (str): Fully qualified model identifier (e.g. "openai/gpt-4o-mini")
         api_key (str): API key for authentication
         organization (Optional[str]): Organization ID for OpenAI
         ignore_token_limit (bool): Whether to ignore token limits
@@ -45,4 +44,3 @@ class ModelConfig:
     api_key: str
     organization: Optional[str] = None
     ignore_token_limit: bool = False
-

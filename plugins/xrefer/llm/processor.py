@@ -65,7 +65,7 @@ class LLMProcessor:
             "cache_seed": 0x72616e64306d,
         }
         # match <https://github.com/stanfordnlp/dspy/blob/1df5984007b7fd9bb56f3a8fba7a68b5517efb69/dspy/clients/lm.py#L92>'s logic
-        if re.match(r'openai\/(?:o[1345]|gpt-5)(?:-(?:mini|nano|codex))?', config.model_id):
+        if re.search(r'openai\/(?:o[1345]|gpt-5)(?:-(?:mini|nano|codex))?', config.model_id):
             lm_kwargs.update({"temperature": 1.0, "max_tokens": 16000})
 
         self.lm = dspy.LM(**lm_kwargs)

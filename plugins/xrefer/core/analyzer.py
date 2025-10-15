@@ -32,10 +32,9 @@ from xrefer.core.helpers import enrich_string_data_core, find_cluster_analysis, 
 from xrefer.core.settings import XReferSettingsManager
 from xrefer.lang import get_language_object
 from xrefer.llm import ArtifactAnalyzer, ClusterAnalyzer, CATEGORIES, Categorizer
-from xrefer.llm.base import ModelConfig, ModelType
+from xrefer.llm.base import ModelConfig
 from xrefer.loaders.capa import load_capa_json
 from xrefer.loaders.trace import parse_api_trace
-
 
 if TYPE_CHECKING:
     from xrefer.lang import LanguageBase
@@ -1126,7 +1125,6 @@ class XRefer:
                                     root_nodes.add(simplified[0])
                                     # Update intermediate paths map
                                     intermediate_paths_map.update(path_intermediates)
-
             if not graph_paths or not root_nodes:
                 log("No valid paths found for clustering")
                 # Restore previous state
@@ -1155,7 +1153,7 @@ class XRefer:
                         analysis = find_cluster_analysis(self.cluster_analysis, cluster.id)
                         if analysis:
                             # The LLM returns 0 or 1. Convert to boolean.
-                            is_lib_val = analysis.library_or_runtime
+                            is_lib_val = analysis.get("library_or_runtime") if isinstance(analysis, dict) else analysis.library_or_runtime
                             cluster.is_library = bool(int(is_lib_val))
                         # Recurse into subclusters
                         if cluster.subclusters:
@@ -1612,21 +1610,15 @@ class XRefer:
             self.llm_lookups = self.settings["llm_lookups"]
 
             if self.llm_lookups:
-                llm_origin = self.settings["llm_origin"]
-                model_name = self.settings["llm_model"]
+                model_id = self.settings["llm_model_id"]
                 api_key = self.settings["api_key"]
-                model_type = None
+                if not model_id:
+                    raise ValueError("LLM model identifier is empty")
 
-                if llm_origin == "openai":
-                    model_type = ModelType.OPENAI
-                elif llm_origin == "google":
-                    model_type = ModelType.GOOGLE
-                else:
-                    raise ValueError(f"Unsupported LLM origin: {llm_origin}")
-
-                log(f"Setting LLM model to: {model_name}")
-                config_1 = ModelConfig(model_type, model_name, api_key, ignore_token_limit=True)
-                config_2 = ModelConfig(model_type, model_name, api_key)
+                log(f"Setting LLM model to: {model_id}")
+                config_1 = ModelConfig(model_id=model_id, api_key=api_key, ignore_token_limit=True)
+                config_2 = ModelConfig(model_id=model_id, api_key=api_key)
+                assert config_2 is not None
                 ArtifactAnalyzer.set_model_config(config_1)
                 ClusterAnalyzer.set_model_config(config_1)
                 Categorizer.set_model_config(config_2)
@@ -3046,8 +3038,8 @@ class XRefer:
 
             node_data = {
                 "key": cluster_id,
-                "label": f"cluster.id.{cluster.id_str}\\n{analysis.label}",
-                "description": analysis.description,
+                "label": f"cluster.id.{cluster.id_str}\\n{analysis.get('label') if isinstance(analysis, dict) else analysis.label}",
+                "description": analysis.get('description') if isinstance(analysis, dict) else analysis.description,
                 "artifacts": artifacts_str.strip(),
                 "apiTrace": self.get_api_trace_for_cluster_for_html_report(cluster),
                 "isLibrary": cluster.is_library
