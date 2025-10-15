@@ -36,6 +36,7 @@ from xrefer.llm.base import ModelConfig, ModelType
 from xrefer.loaders.capa import load_capa_json
 from xrefer.loaders.trace import parse_api_trace
 
+
 if TYPE_CHECKING:
     from xrefer.lang import LanguageBase
 
@@ -1154,7 +1155,7 @@ class XRefer:
                         analysis = find_cluster_analysis(self.cluster_analysis, cluster.id)
                         if analysis:
                             # The LLM returns 0 or 1. Convert to boolean.
-                            is_lib_val = analysis.get('library_or_runtime', 0)
+                            is_lib_val = analysis.library_or_runtime
                             cluster.is_library = bool(int(is_lib_val))
                         # Recurse into subclusters
                         if cluster.subclusters:
@@ -1162,6 +1163,8 @@ class XRefer:
 
                 populate_library_flag(self.clusters)
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 log(f"[-] Error analyzing clusters: {str(e)}")
                 # Restore previous state
                 self.clusters = current_clusters
@@ -3043,8 +3046,8 @@ class XRefer:
 
             node_data = {
                 "key": cluster_id,
-                "label": f"cluster.id.{cluster.id_str}\\n{analysis.get('label', '')}",
-                "description": analysis.get('description', 'No description available.'),
+                "label": f"cluster.id.{cluster.id_str}\\n{analysis.label}",
+                "description": analysis.description,
                 "artifacts": artifacts_str.strip(),
                 "apiTrace": self.get_api_trace_for_cluster_for_html_report(cluster),
                 "isLibrary": cluster.is_library

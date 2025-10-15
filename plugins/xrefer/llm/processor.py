@@ -12,359 +12,295 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict, List
+"""
+DSPy-native LLM processor with Pydantic validation.
+"""
 
-from xrefer.core.helpers import log
+import traceback
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+
+import dspy
+from pydantic import ValidationError
+
+from xrefer.core.helpers import check_internet_connectivity, log
 from xrefer.llm.base import ModelConfig, ModelType
-from xrefer.llm.models import GoogleModel, OpenAIModel
+from xrefer.llm.dspy_modules import ArtifactAnalyzerModule, CategorizerModule, ClusterAnalyzerModule
 from xrefer.llm.prompts import ArtifactAnalyzerPrompt, CategorizerPrompt, ClusterAnalyzerPrompt, PromptType
+
+
+@dataclass
+class ProcessConfig:
+    """Type-safe configuration for processing."""
+    categories: List[str] = field(default_factory=list)
+    item_type: str = "api"
 
 
 class LLMProcessor:
     """
-    Core processor for handling Large Language Model operations.
-
-    Manages interactions with different LLM providers (OpenAI, Google), handles
-    token limits, batching, and response processing for various analysis tasks.
-
-    Attributes:
-        model: Instance of BaseModel implementing provider-specific interactions
-        _prompts (Dict[PromptType, PromptTemplate]): Mapping of prompt types to templates
+    DSPy-native processor for LLM operations.
     """
 
     def __init__(self):
-        self.model = None
-        self._prompts = {PromptType.CATEGORIZER: CategorizerPrompt(), PromptType.ARTIFACT_ANALYZER: ArtifactAnalyzerPrompt(), PromptType.CLUSTER_ANALYZER: ClusterAnalyzerPrompt()}
+        self.lm: Optional[dspy.LM] = None
+        self.config: Optional[ModelConfig] = None
+        self._prompts = {
+            PromptType.CATEGORIZER: CategorizerPrompt(),
+            PromptType.ARTIFACT_ANALYZER: ArtifactAnalyzerPrompt(),
+            PromptType.CLUSTER_ANALYZER: ClusterAnalyzerPrompt()
+        }
+        self._dspy_modules = {}
 
     def set_model_config(self, config: ModelConfig) -> None:
         """
-        Configure the LLM processor with specific model settings.
+        Configure DSPy with the specified LLM.
 
         Args:
-            config (ModelConfig): Configuration containing provider, model name, and API key
-
-        Raises:
-            ValueError: If provider type is not supported
+            config: Model configuration
         """
-        if config.provider == ModelType.GOOGLE:
-            self.model = GoogleModel(config)
-        elif config.provider == ModelType.OPENAI:
-            self.model = OpenAIModel(config)
-        else:
-            raise ValueError(f"Unsupported model provider: {config.provider}")
+        self.config = config
+
+        # Build model name with provider prefix
+        provider_map = {
+            ModelType.OPENAI: ("openai", 16384),
+            ModelType.GOOGLE: ("gemini", 65536)
+        }
+
+        if config.provider not in provider_map:
+            raise ValueError(f"Unsupported provider: {config.provider}")
+
+        prefix, max_tokens = provider_map[config.provider]
+        model_name = config.model_name if config.model_name.startswith(f"{prefix}/") else f"{prefix}/{config.model_name}"
+
+        self.lm = dspy.LM(model_name, api_key=config.api_key, max_tokens=max_tokens, cache_seed=0x72616e64306d,)
+        dspy.settings.configure(lm=self.lm)
+        import mlflow
+
+        mlflow.set_experiment("DSPy Quickstart")
+        mlflow.dspy.autolog()
+
+        # Initialize DSPy modules
+        self._dspy_modules = {
+            PromptType.CATEGORIZER: CategorizerModule(),
+            PromptType.ARTIFACT_ANALYZER: ArtifactAnalyzerModule(),
+            PromptType.CLUSTER_ANALYZER: ClusterAnalyzerModule()
+        }
 
     def validate_api_key(self) -> bool:
-        if not self.model:
+        """Validate API key with a test call."""
+        if not self.lm:
             raise ValueError("Model not configured")
-        validation = self.model.validate_api_key()
 
-        if not validation:
-            log(f"{self.model.config.model_name} API key validation failed")
+        try:
+            self.lm("Say 'valid'")
+            return True
+        except Exception as e:
+            log(f"API validation failed: {e}")
+            return False
 
-        return validation
-
-    def estimate_tokens(self, text: str) -> int:
-        """
-        Estimate the number of tokens in a text using character-based heuristic.
-
-        Uses a simple approximation of 4 characters per token. While not exact,
-        this provides a conservative estimate for batching purposes.
-
-        Args:
-            text (str): Text to estimate tokens for
-
-        Returns:
-            int: Estimated number of tokens
-        """
-        """Estimate number of tokens in text using simple character-based heuristic"""
-        return len(text) // 4  # Rough approximation - 4 chars per token
-
-    def create_artifacts_dict(self, items: List[Dict[str, Any]]) -> Dict[str, Dict[int, str]]:
-        """
-        Convert list of artifacts into structured dictionary format for LLM processing.
-
-        Organizes artifacts by type (Strings, APIs, CAPA, Libraries) for efficient processing.
-
-        Args:
-            items (List[Dict[str, Any]]): List of artifacts with 'type', 'index', and 'content' keys
-
-        Returns:
-            Dict[str, Dict[int, str]]: Nested dictionary organizing artifacts by type and index
-        """
-        artifacts_dict = {"Strings": {}, "APIs": {}, "CAPA": {}, "Libraries": {}}
+    def _create_artifacts_dict(self, items: List[Dict[str, Any]]) -> Dict[str, Dict[int, str]]:
+        """Convert artifacts list to structured dict."""
+        artifacts = {"Strings": {}, "APIs": {}, "CAPA": {}, "Libraries": {}}
+        type_map = {"string": "Strings", "api": "APIs", "capa": "CAPA", "lib": "Libraries"}
 
         for item in items:
-            if item["type"] == "string":
-                artifacts_dict["Strings"][item["index"]] = item["content"]
-            elif item["type"] == "api":
-                artifacts_dict["APIs"][item["index"]] = item["content"]
-            elif item["type"] == "capa":
-                artifacts_dict["CAPA"][item["index"]] = item["content"]
-            elif item["type"] == "lib":
-                artifacts_dict["Libraries"][item["index"]] = item["content"]
+            category = type_map.get(item["type"])
+            if category:
+                artifacts[category][item["index"]] = item["content"]
 
-        return artifacts_dict
+        return artifacts
 
-    def calculate_optimal_batch_size(self, items: List[Any], prompt_type: PromptType, max_tokens: int, **kwargs) -> int:
-        """Calculate optimal batch size based on token limits."""
-        # Start with a small batch size
-        test_size = min(10, len(items))
+    def _process_single(self, items: List[Any], prompt_type: PromptType, config: ProcessConfig) -> Dict[str, Any]:
+        """
+        Process items using DSPy module.
 
-        while test_size > 0:
-            # Create a test prompt with the current batch size
-            test_items = items[:test_size]
-
-            try:
-                if prompt_type == PromptType.CATEGORIZER:
-                    test_prompt = self._prompts[prompt_type].format(items=test_items, categories=kwargs.get("categories", []), type=kwargs.get("type", "api"))
-                elif prompt_type == PromptType.ARTIFACT_ANALYZER:
-                    test_artifacts = self.create_artifacts_dict(test_items)
-                    test_prompt = self._prompts[prompt_type].format(artifacts=test_artifacts)
-                # Handle types that must be processed as single batch
-                elif prompt_type == PromptType.CLUSTER_ANALYZER:
-                    return len(items)
-                else:
-                    raise ValueError(f"Unsupported prompt type: {prompt_type}")
-
-                # Estimate tokens for the full prompt
-                estimated_tokens = self.estimate_tokens(test_prompt)
-
-                # Add safety margin (20%)
-                estimated_tokens = int(estimated_tokens * 1.2)
-
-                if estimated_tokens <= max_tokens:
-                    if test_size == len(items):
-                        return test_size
-
-                    tokens_per_item = estimated_tokens / test_size
-                    max_items = int((max_tokens * 0.9) / tokens_per_item)
-
-                    return min(max_items, len(items))
-
-                test_size = int(test_size * (max_tokens / estimated_tokens) * 0.9)
-
-            except Exception as e:
-                log(f"[-] Error estimating tokens for batch size {test_size}: {e}")
-                test_size = test_size // 2
-
-        return 1
-
-    def process_chunk(self, chunk: List[Any], prompt_type: PromptType, **kwargs) -> Any:
-        """Process a single chunk of items through the LLM."""
+        DSPy/LiteLLM handles:
+        - Rate limiting (automatic backoff on 429)
+        - Retries (exponential backoff)
+        - Token limits (validates before sending)
+        """
         prompt_template = self._prompts[prompt_type]
+        dspy_module = self._dspy_modules[prompt_type]
 
-        if prompt_type == PromptType.CATEGORIZER:
-            prompt = prompt_template.format(items=chunk, categories=kwargs.get("categories", []), type=kwargs.get("type", "api"))
-            response = self.model.query(prompt)
-            return prompt_template.parse_response(response, categories=kwargs.get("categories", []))
+        try:
+            if prompt_type == PromptType.CATEGORIZER:
+                response = dspy_module(items=items, categories=config.categories, item_type=config.item_type)
+                return prompt_template.parse_response(response, categories=config.categories)
 
-        elif prompt_type == PromptType.ARTIFACT_ANALYZER:
-            artifacts_dict = self.create_artifacts_dict(chunk)
-            prompt = prompt_template.format(artifacts=artifacts_dict)
-            response = self.model.query(prompt)
-            return prompt_template.parse_response(response)
+            elif prompt_type == PromptType.ARTIFACT_ANALYZER:
+                artifacts = self._create_artifacts_dict(items)
+                response = dspy_module(artifacts=artifacts)
+                return prompt_template.parse_response(response)
 
-        elif prompt_type == PromptType.CLUSTER_ANALYZER:
-            # For cluster analysis, chunk contains raw formatted cluster data
-            prompt = prompt_template.format(cluster_data=chunk[0])  # Take first item since it's our formatted string
-            response = self.model.query(prompt)
-            return prompt_template.parse_response(response)
+            elif prompt_type == PromptType.CLUSTER_ANALYZER:
+                response = dspy_module(cluster_data=items[0])
+                # return response
+                return prompt_template.parse_response(response)
 
-        else:
-            raise ValueError(f"Unsupported prompt type: {prompt_type}")
+            else:
+                raise ValueError(f"Unsupported prompt type: {prompt_type}")
 
-    def check_for_missed_items(self, original_items: List[Any], results: Dict[str, Any], prompt_type: PromptType, **kwargs) -> Dict[str, Any]:
-        """
-        Check for and reprocess any items that were missed in initial processing.
+        except ValidationError as e:
+            log(f"[x] Pydantic validation error: {e}")
+            raise
+        except Exception as e:
+            log(f"[x] Error processing items: {e}")
+            traceback.print_exc()
+            raise
 
-        Args:
-            original_items: Complete list of items that should have been processed
-            results: Current results dictionary with index-based assignments
-            prompt_type: Type of prompt used
-            **kwargs: Additional prompt formatting arguments
+    def _process_parallel(self, items: List[Any], prompt_type: PromptType, batch_size: int, config: ProcessConfig) -> Dict[int, Any]:
+        """Process items in parallel batches."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        Returns:
-            Dict[str, Any]: Updated results dictionary including retry attempts
-        """
-        if prompt_type == PromptType.CATEGORIZER:
-            # For categorization, check if all indices have been assigned categories
-            original_indices = set(str(i) for i in range(len(original_items)))
-            processed_indices = set(results.keys())
-            missed_indices = original_indices - processed_indices
+        # Use reasonable max_workers (not hardcoded 40)
+        import os
+        max_workers = min(os.cpu_count() * 4, 20, len(items) // batch_size + 1)
 
-            # Create list of missed items with their original indices
-            missed_items = [{"index": int(idx), "name": original_items[int(idx)]} for idx in missed_indices]
-        elif prompt_type == PromptType.ARTIFACT_ANALYZER:
-            # For artifact filtering, check if all item indices are in results
-            original_indices = {item["index"] for item in original_items}
-            processed_indices = set(results.get("interesting_indexes", []))
-            missed_items = [item for item in original_items if item["index"] in (original_indices - processed_indices)]
+        results = {}
 
-        # Skip check for cluster operations which must be complete
-        elif prompt_type == PromptType.CLUSTER_ANALYZER:
-            return results
-        else:
-            raise ValueError(f"Unsupported prompt type: {prompt_type}")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
 
-        if missed_items:
-            log(f"Found {len(missed_items)} missed items. Processing them now.")
-            try:
-                # Process missed items with emphasis on completeness
-                missed_results = self.process_chunk(missed_items, prompt_type, **kwargs)
+            for i in range(0, len(items), batch_size):
+                chunk = items[i:i + batch_size]
+                future = executor.submit(self._process_single, chunk, prompt_type, config)
+                futures[future] = i
 
-                if prompt_type == PromptType.CATEGORIZER:
-                    # Update category_assignments with missed results
-                    if "category_assignments" not in results:
-                        results["category_assignments"] = {}
-                    results["category_assignments"].update(missed_results.get("category_assignments", {}))
+            for future in as_completed(futures):
+                try:
+                    chunk_result = future.result()
+                    chunk_start = futures[future]
 
-                    # Double-check if any indices are still missing
-                    final_missed_indices = set(str(i) for i in range(len(original_items))) - set(results["category_assignments"].keys())
+                    # Adjust indices for categorizer (use int consistently)
+                    if prompt_type == PromptType.CATEGORIZER:
+                        for idx, cat_idx in chunk_result.items():
+                            original_idx = int(idx) + chunk_start
+                            results[original_idx] = cat_idx
+                    else:
+                        results.update(chunk_result)
 
-                    if final_missed_indices:
-                        # For categorization, assign missed items to "Others" category
-                        categories = kwargs.get("categories", [])
-                        others_index = categories.index("Others")
-                        for idx in final_missed_indices:
-                            results["category_assignments"][idx] = others_index
-                            log(f"Assigning missed item index {idx} to Others category")
-                else:
-                    # For artifact filtering
-                    if "interesting_indexes" in missed_results:
-                        if "interesting_indexes" not in results:
-                            results["interesting_indexes"] = []
-                        results["interesting_indexes"].extend(missed_results["interesting_indexes"])
-
-            except Exception as e:
-                log(f"[-] Error processing missed items: {str(e)}")
-                if prompt_type == PromptType.CATEGORIZER:
-                    # Assign any errored items to Others category
-                    categories = kwargs.get("categories", [])
-                    others_index = categories.index("Others")
-                    for idx in missed_indices:
-                        if idx not in results.get("category_assignments", {}):
-                            if "category_assignments" not in results:
-                                results["category_assignments"] = {}
-                            results["category_assignments"][idx] = others_index
-                            log(f"Assigning errored item index {idx} to Others category")
+                except Exception as e:
+                    log(f"[x] Chunk processing failed: {e}")
+                    # Don't swallow - let caller handle
 
         return results
 
-    def process_items(self, items: List[Any], prompt_type: PromptType, ignore_token_limit: bool = False, **kwargs) -> Dict[str, Any]:
-        """
-        Process a list of items in parallel or sequential chunks based on the model type.
+    def _process_sequential(self, items: List[Any], prompt_type: PromptType, batch_size: int, config: ProcessConfig) -> Dict[int, Any]:
+        """Process items sequentially in batches."""
+        results = {}
+        total_chunks = (len(items) + batch_size - 1) // batch_size
 
-        This function is modified to handle indexing correctly for categorizer requests
-        when items are processed in multiple chunks. Each chunk is zero-indexed by the LLM,
-        so we must add the chunk's start index to these returned indexes before merging them
-        into the final result.
+        for i in range(0, len(items), batch_size):
+            chunk = items[i:i + batch_size]
+            chunk_num = i // batch_size + 1
+            log(f"[+]Processing chunk {chunk_num}/{total_chunks}")
+
+            try:
+                chunk_result = self._process_single(chunk, prompt_type, config)
+
+                # Adjust indices for categorizer
+                if prompt_type == PromptType.CATEGORIZER:
+                    for idx, cat_idx in chunk_result.items():
+                        original_idx = int(idx) + i
+                        results[original_idx] = cat_idx
+                else:
+                    results.update(chunk_result)
+
+            except Exception as e:
+                log(f"[x] Chunk {chunk_num} failed: {e}")
+                # Continue processing other chunks
+
+        return results
+
+    def process_items(
+        self,
+        items: List[Any],
+        prompt_type: PromptType,
+        ignore_token_limit: bool = False,
+        categories: Optional[List[str]] = None,
+        type: str = "api"
+    ) -> Dict[str, Any]:
+        """
+        Process items with automatic batching.
+
+        DSPy/LiteLLM automatically handles:
+        - Rate limiting (429 errors with exponential backoff)
+        - Token validation (checks before sending)
+        - Retries on transient failures
 
         Args:
-            items: List of items to process
-            prompt_type: Type of prompt to use (CATEGORIZER, ARTIFACT_ANALYZER, etc.)
-            ignore_token_limit: If True, processes all items in a single batch
-            **kwargs: Additional prompt formatting arguments
+            items: Items to process
+            prompt_type: Type of processing
+            ignore_token_limit: If True, process all items at once
+            categories: List of categories (for categorizer)
+            type: Item type "api" or "lib" (for categorizer)
 
         Returns:
-            Dictionary containing processed results
-
-        Raises:
-            ValueError: If model not configured
+            Processed results
         """
-        if not self.model:
+        if not self.lm:
             raise ValueError("Model not configured")
 
         if not items:
             return {}
 
-        # Check connectivity before processing
-        if not self.model.check_connection():
-            return {}
+        if not check_internet_connectivity():
+            raise ConnectionError("No internet connectivity")
 
-        # Special handling for cluster operations
+        # Create type-safe config
+        config = ProcessConfig(categories=categories or [], item_type=type)
+        print(f"{items = }, {prompt_type = }, {config = }")
+
+        # Cluster analysis: always process all at once
         if prompt_type == PromptType.CLUSTER_ANALYZER:
             try:
-                # Cluster analysis always processes all data at once
-                return self.process_chunk([items], prompt_type, **kwargs)
+                return self._process_single([items], prompt_type, config)
             except Exception as e:
-                import traceback
-
+                log(f"[x] Cluster analysis failed: {e}")
                 traceback.print_exc()
                 return {}
 
+        # Single batch mode
         if ignore_token_limit:
-            log(f"Processing all {len(items)} items in single batch")
+            log(f"[+] Processing all {len(items)} items in single batch")
             try:
-                result = self.process_chunk(items, prompt_type, **kwargs)
-                return result
+                results = self._process_single(items, prompt_type, config)
+                # Convert to str keys for backward compatibility
+                if prompt_type == PromptType.CATEGORIZER:
+                    return {str(k): v for k, v in results.items()}
+                return results
             except Exception as e:
-                log(f"[-] Error processing batch with token limit override: {e}")
+                log(f"[x] Single batch processing failed: {e}")
                 return {}
 
-        max_tokens = self.model.get_max_input_tokens()
-        batch_size = self.calculate_optimal_batch_size(items, prompt_type, max_tokens, **kwargs)
+        # Batched processing
+        # Simple heuristic: 50 items per batch (conservative, no token counting needed)
+        # DSPy/LiteLLM will error if prompt is too large, then we can reduce
+        batch_size = 50
+        log(f"[+] Processing {len(items)} items in batches of {batch_size}")
 
-        log(f"Processing {len(items)} items in batches of {batch_size}")
+        # Use parallel for most providers (DSPy handles rate limiting)
+        # Only use sequential if explicitly needed
+        use_parallel = True  # Let DSPy handle rate limiting for all providers
 
-        results = {}
-        if isinstance(self.model, OpenAIModel):
-            # Parallel processing for OpenAI
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-
-            with ThreadPoolExecutor(max_workers=40) as executor:
-                futures_map = {}
-                # Submit chunks and store their start index
-                for i in range(0, len(items), batch_size):
-                    chunk = items[i : i + batch_size]
-                    future = executor.submit(self.process_chunk, chunk, prompt_type, **kwargs)
-                    futures_map[future] = i
-
-                for future in as_completed(futures_map):
-                    try:
-                        chunk_result = future.result()
-                        chunk_start = futures_map[future]
-
-                        # If categorizer prompt, re-map the returned indices
-                        if prompt_type == PromptType.CATEGORIZER:
-                            adjusted_result = {}
-                            for k, v in chunk_result.items():
-                                original_idx = int(k) + chunk_start
-                                adjusted_result[str(original_idx)] = v
-                            results.update(adjusted_result)
-                        else:
-                            results.update(chunk_result)
-                    except Exception as e:
-                        import traceback
-
-                        traceback.print_exc()
-                        log(f"[-] Error processing chunk: {e}")
-
+        if use_parallel:
+            results = self._process_parallel(items, prompt_type, batch_size, config)
         else:
-            # Google model - sequential processing
-            total_chunks = (len(items) + batch_size - 1) // batch_size
-            for i in range(0, len(items), batch_size):
-                chunk = items[i : i + batch_size]
-                chunk_num = i // batch_size + 1
-                log(f"Processing chunk {chunk_num}/{total_chunks}")
+            results = self._process_sequential(items, prompt_type, batch_size, config)
 
-                try:
-                    chunk_result = self.process_chunk(chunk, prompt_type, **kwargs)
-                    # If categorizer prompt, offset the indexes
-                    if prompt_type == PromptType.CATEGORIZER:
-                        adjusted_result = {}
-                        for k, v in chunk_result.items():
-                            original_idx = int(k) + i
-                            adjusted_result[str(original_idx)] = v
-                        results.update(adjusted_result)
-                    else:
-                        results.update(chunk_result)
-                except Exception as e:
-                    import traceback
+        # Fill in missed items for categorizer
+        if prompt_type == PromptType.CATEGORIZER:
+            all_indices = set(range(len(items)))
+            processed_indices = set(results.keys())
+            missed_indices = all_indices - processed_indices
 
-                    traceback.print_exc()
-                    log(f"[-] Error processing chunk {chunk_num}: {e}")
+            if missed_indices:
+                log(f"[*] Found {len(missed_indices)} missed items, assigning to Others")
+                others_idx = config.categories.index("Others") if "Others" in config.categories else 0
+                for idx in missed_indices:
+                    results[idx] = others_idx
 
-        # Check for missed items and re-process if needed
-        results = self.check_for_missed_items(items, results, prompt_type, **kwargs)
+            # Convert to str keys for backward compatibility
+            return {str(k): v for k, v in results.items()}
 
         return results

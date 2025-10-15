@@ -15,16 +15,18 @@
 from .artifact_analyzer import ArtifactAnalyzer
 from .cluster_analyzer import ClusterAnalyzer
 from .categorizer import Categorizer, CATEGORIES
-from . import artifact_analyzer, base, categorizer, cluster_analyzer, models, processor, prompts
+from . import artifact_analyzer, base, categorizer, cluster_analyzer, processor, prompts, dspy_modules
+
 
 __all__ = [
     "artifact_analyzer",
     "base",
     "categorizer",
     "cluster_analyzer",
-    "models",
     "processor",
     "prompts",
+    # "schemas",
+    "dspy_modules",
     "ArtifactAnalyzer",
     "ClusterAnalyzer",
     "Categorizer",

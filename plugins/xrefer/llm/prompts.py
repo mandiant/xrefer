@@ -17,7 +17,6 @@ from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, Dict, List, Set
 
-from xrefer.core.helpers import log
 from xrefer.llm.templates import ARTIFACT_ANALYZER_PROMPT, CATEGORIZER_PROMPT, CLUSTER_ANALYZER_PROMPT
 
 
@@ -80,8 +79,9 @@ class PromptTemplate(ABC):
         Returns:
             Parsed data in structured format
         """
-        # NOTE: Just use json schema/pydantic and enforce structured output via code?
-        if response.startswith("```json") and response.endswith("```"):
+
+        if type(response) == str and response.startswith("```json") and response.endswith("```"):
+            assert False, "This should never happen"
             response = response[len("```json") : -len("```")].strip()
         try:
             return self._parse_response_impl(response, **kwargs)
@@ -145,7 +145,8 @@ class CategorizerPrompt(PromptTemplate):
         """
 
         # Parse the JSON response
-        result = json.loads(response)
+        # result = json.loads(response)
+        result = response
         category_assignments = result.get("category_assignments", {})
 
         # Validate and normalize category assignments
@@ -192,7 +193,8 @@ class ArtifactAnalyzerPrompt(PromptTemplate):
         Raises:
             ValueError: If response is not valid JSON or missing required key
         """
-        result = json.loads(response)
+        # result = json.loads(response)
+        result = response
         return set(result["interesting_indexes"])
 
 
@@ -244,26 +246,25 @@ class ClusterAnalyzerPrompt(PromptTemplate):
         Raises:
             ValueError: If response is not valid JSON or missing required structure
         """
-        result = json.loads(response)
+        # result = json.loads(response)
+        result = response
         # Validate required keys
-        if not isinstance(result, dict):
-            raise ValueError("Response must be a dictionary")
+        # if not isinstance(result, dict):
+        #     raise ValueError("Response must be a dictionary")
+        from pprint import pprint
+        pprint(result)
 
-        required_keys = {"clusters", "binary_description", "binary_category"}
-        if not all(key in result for key in required_keys):
-            raise ValueError(f"Missing required keys. Found: {list(result.keys())}")
+        # # Validate clusters structure
+        # clusters = result["clusters"]
+        # if not isinstance(clusters, dict):
+        #     raise ValueError("'clusters' must be a dictionary")
 
-        # Validate clusters structure
-        clusters = result["clusters"]
-        if not isinstance(clusters, dict):
-            raise ValueError("'clusters' must be a dictionary")
+        # for cluster_id, analysis in clusters.items():
+        #     if not isinstance(analysis, dict):
+        #         raise ValueError(f"Analysis for {cluster_id} must be a dictionary")
 
-        for cluster_id, analysis in clusters.items():
-            if not isinstance(analysis, dict):
-                raise ValueError(f"Analysis for {cluster_id} must be a dictionary")
-
-            required_analysis_keys = {"label", "description", "relationships", "function_prefix", "library_or_runtime"}  # if not all(key in analysis for key in required_analysis_keys):
-            for key in required_analysis_keys:
-                if key not in analysis:
-                    log(f"Warning: Missing some analysis keys in {cluster_id}. Found: {list(analysis.keys())}")
+        #     required_analysis_keys = {"label", "description", "relationships", "function_prefix", "library_or_runtime"}  # if not all(key in analysis for key in required_analysis_keys):
+        #     for key in required_analysis_keys:
+        #         if key not in analysis:
+        #             log(f"Warning: Missing some analysis keys in {cluster_id}. Found: {list(analysis.keys())}")
         return result

@@ -59,93 +59,99 @@ class ClusterAnalyzer:
         """
         processor = cls._get_processor()
 
-        try:
-            cluster_count = 0
-            batch_size = 20
+        # try:
+        cluster_count = 0
+        batch_size = 20
 
-            def count_clusters(cluster):
-                nonlocal cluster_count
-                cluster_count += 1
-                for subcluster in cluster.subclusters:
-                    count_clusters(subcluster)
+        def count_clusters(cluster):
+            nonlocal cluster_count
+            cluster_count += 1
+            for subcluster in cluster.subclusters:
+                count_clusters(subcluster)
 
-            for cluster in clusters:
-                count_clusters(cluster)
+        for cluster in clusters:
+            count_clusters(cluster)
 
-            if cluster_count == 0:
-                # No clusters to analyze
+        if cluster_count == 0:
+            # No clusters to analyze
+            return {}
+
+        if cluster_count <= batch_size:
+            # Single request scenario, no partial instructions
+            cluster_data = cls.format_cluster_data(clusters, xrefer_obj, start_idx=0, end_idx=cluster_count)
+            log(f"Generated cluster data ({len(cluster_data)} chars)")
+            results = processor.process_items(cluster_data, prompt_type=PromptType.CLUSTER_ANALYZER, ignore_token_limit=True)
+            results = dict(results)  # Ensure it's a dict
+            # TODO: Drop dict across the codebase for better developer experience.
+
+            if not isinstance(results, dict):
+                log("[-] Error: LLM returned invalid format")
                 return {}
 
-            if cluster_count <= batch_size:
-                # Single request scenario, no partial instructions
-                cluster_data = cls.format_cluster_data(clusters, xrefer_obj, start_idx=0, end_idx=cluster_count)
+            required_keys = {"clusters", "binary_description", "binary_category"}
+            if not all(key in results for key in required_keys):
+                log("[-] Error: Missing required keys in LLM response")
+                log(f"Found keys: {list(results.keys())}")
+                return {}
+
+            return results
+        else:
+            # Multiple batch scenario
+            all_clusters_result = {}
+            binary_description = None
+            binary_category = None
+            binary_report = None
+            log(f"Going to process {cluster_count} clusters through the LLM. This will take some time...")
+
+            # Process clusters in batches of batch_size
+            for start in range(0, cluster_count, batch_size):
+                end = min(start + batch_size, cluster_count)
+                log(f"Processing clusters {start + 1} to {end} in this batch")
+
+                cluster_data = cls.format_cluster_data(clusters, xrefer_obj, start_idx=start, end_idx=end)
                 log(f"Generated cluster data ({len(cluster_data)} chars)")
                 results = processor.process_items(cluster_data, prompt_type=PromptType.CLUSTER_ANALYZER, ignore_token_limit=True)
+                results = dict(results)  # Ensure it's a dict
 
-                if not isinstance(results, dict):
-                    log("[-] Error: LLM returned invalid format")
-                    return {}
 
-                required_keys = {"clusters", "binary_description", "binary_category"}
-                if not all(key in results for key in required_keys):
-                    log("[-] Error: Missing required keys in LLM response")
-                    log(f"Found keys: {list(results.keys())}")
-                    return {}
+                # if not isinstance(results, dict) or not results:
+                #     log("[-] Error: LLM returned erroneous response, please re-start cluster analysis")
+                #     break
 
-                return results
-            else:
-                # Multiple batch scenario
-                all_clusters_result = {}
-                binary_description = None
-                binary_category = None
-                binary_report = None
-                log(f"Going to process {cluster_count} clusters through the LLM. This will take some time...")
+                # Extract clusters from partial result
+                partial_clusters = results.get("clusters", {})
+                # Merge cluster analyses
+                for cid, cdata in partial_clusters.items():
+                    all_clusters_result[cid] = cdata
 
-                # Process clusters in batches of batch_size
-                for start in range(0, cluster_count, batch_size):
-                    end = min(start + batch_size, cluster_count)
-                    log(f"Processing clusters {start + 1} to {end} in this batch")
+                # Update binary fields from the latest batch
+                if "binary_description" in results:
+                    binary_description = results["binary_description"]
+                if "binary_category" in results:
+                    binary_category = results["binary_category"]
+                if "binary_report" in results:
+                    binary_report = results["binary_report"]
 
-                    cluster_data = cls.format_cluster_data(clusters, xrefer_obj, start_idx=start, end_idx=end)
-                    log(f"Generated cluster data ({len(cluster_data)} chars)")
-                    results = processor.process_items(cluster_data, prompt_type=PromptType.CLUSTER_ANALYZER, ignore_token_limit=True)
+            # After processing all batches, ensure required fields are present
+            if not all_clusters_result:
+                log("[-] Error: No cluster data received after all batches")
+                return {}
 
-                    if not isinstance(results, dict) or not results:
-                        log("[-] Error: LLM returned erroneous response, please re-start cluster analysis")
-                        break
+            if binary_description is None or binary_category is None:
+                log("[-] Error: Missing binary_description or binary_category after batched analysis")
+                return {}
 
-                    # Extract clusters from partial result
-                    partial_clusters = results.get("clusters", {})
-                    # Merge cluster analyses
-                    for cid, cdata in partial_clusters.items():
-                        all_clusters_result[cid] = cdata
+            final_result = {"clusters": all_clusters_result, "binary_description": binary_description, "binary_category": binary_category}
+            if binary_report is not None:
+                final_result["binary_report"] = binary_report
 
-                    # Update binary fields from the latest batch
-                    if "binary_description" in results:
-                        binary_description = results["binary_description"]
-                    if "binary_category" in results:
-                        binary_category = results["binary_category"]
-                    if "binary_report" in results:
-                        binary_report = results["binary_report"]
+            return final_result
 
-                # After processing all batches, ensure required fields are present
-                if not all_clusters_result:
-                    log("[-] Error: No cluster data received after all batches")
-                    return {}
-
-                if binary_description is None or binary_category is None:
-                    log("[-] Error: Missing binary_description or binary_category after batched analysis")
-                    return {}
-
-                final_result = {"clusters": all_clusters_result, "binary_description": binary_description, "binary_category": binary_category}
-                if binary_report is not None:
-                    final_result["binary_report"] = binary_report
-
-                return final_result
-
-        except Exception as e:
-            log(f"[-] Error analyzing clusters: {str(e)}")
-            return {}
+        # except Exception as e:
+        #     import traceback
+        #     traceback.print_exc()
+        #     log(f"[-] Error analyzing clusters: {str(e)}")
+        #     return {}
 
     @staticmethod
     def format_cluster_data(clusters: List["FunctionalCluster"], xrefer_obj, start_idx: int = 0, end_idx: int = None) -> str:
