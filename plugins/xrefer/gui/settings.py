@@ -43,19 +43,6 @@ FILE_FILTERS = {
     "default": "All Files (*.*)",
 }
 
-# Available LLM models
-LLM_MODELS = {
-    "google": [
-        "gemini-flash-latest",
-        "gemini-2.5-flash-preview-05-20",
-        "gemini-2.5-pro",
-        "gemini-2.5-pro-preview-05-06",
-        "gemini-2.5-pro-preview-06-05",
-    ],
-    "openai": ["gpt-5", "gpt-5-mini", "gpt-5-nano"]  # openai models have much smaller (128K) context windows, that are not ideal for cluster analysis of large binaries. disabling these models for the time being
-}
-
-
 class CustomTabWidget(QTabWidget):
     """
     Customized QTabWidget with equal width tabs.
@@ -383,7 +370,6 @@ class XReferSettingsDialog(QDialog):
         settings (Dict): Current settings dictionary
         exclusions (Dict): Current exclusions dictionary
         original_exclusions (Dict): Copy of exclusions for change detection
-        llm_models (Dict[str, List[str]]): Available models for each LLM provider
     """
 
     def __init__(self, parent=None):
@@ -392,8 +378,6 @@ class XReferSettingsDialog(QDialog):
         self.settings = self.settings_manager.load_settings()
         self.exclusions = self.settings_manager.load_exclusions()
         self.original_exclusions = copy.deepcopy(self.exclusions)
-
-        self.llm_models = LLM_MODELS
 
         self.setFixedSize(DIALOG_WIDTH, DIALOG_HEIGHT)
         self._center_on_screen()
@@ -467,31 +451,36 @@ class XReferSettingsDialog(QDialog):
         # LLM Options
         llm_grid = QGridLayout()
 
-        self.llm_origin_combo = QComboBox()
-        # self.llm_origin_combo.addItems(["google", "openai"])
-        self.llm_origin_combo.addItems(["google"])
-        self.llm_origin_combo.setCurrentText(self.settings["llm_origin"])
-        self.llm_origin_combo.setEnabled(self.settings["llm_lookups"])
-        self.llm_origin_combo.setToolTip("Select LLM provider")
-        self.llm_origin_combo.currentTextChanged.connect(self.update_model_list)
-
         self.llm_model_combo = QComboBox()
-        self.update_model_list(self.settings["llm_origin"])
-        self.llm_model_combo.setCurrentText(self.settings["llm_model"])
+        self.llm_model_combo.addItems([
+            "gemini/gemini-2.5-pro",
+            "gemini/gemini-2.5-pro-preview-06-05",
+            "gemini/gemini-2.5-pro-preview-05-06",
+            "gemini/gemini-2.5-flash-preview-05-20",
+            "gemini/gemini-flash-latest",
+            "openai/gpt-5",
+            "openai/gpt-5-mini",
+            "openai/gpt-5-nano",
+        ])
+        self.llm_model_combo.setEditable(True)
+        self.llm_model_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.llm_model_combo.setCurrentText(self.settings.get("llm_model_id", ""))
         self.llm_model_combo.setEnabled(self.settings["llm_lookups"])
-        self.llm_model_combo.setToolTip("Select the specific LLM model to use")
+        self.llm_model_combo.setToolTip("Enter the fully-qualified LLM identifier (e.g., provider/model)")
+
+        line_edit = self.llm_model_combo.lineEdit()
+        if line_edit:
+            line_edit.setPlaceholderText("Select or type a model id…")
 
         self.api_key_edit = QLineEdit(self.settings["api_key"])
         self.api_key_edit.setEnabled(self.settings["llm_lookups"])
         self.api_key_edit.setEchoMode(QLineEdit.Password)
         self.api_key_edit.setToolTip("API key for the selected LLM provider")
 
-        llm_grid.addWidget(QLabel("LLM Origin:"), 0, 0)
-        llm_grid.addWidget(self.llm_origin_combo, 0, 1)
-        llm_grid.addWidget(QLabel("LLM Model:"), 1, 0)
-        llm_grid.addWidget(self.llm_model_combo, 1, 1)
-        llm_grid.addWidget(QLabel("API Key:"), 2, 0)
-        llm_grid.addWidget(self.api_key_edit, 2, 1)
+        llm_grid.addWidget(QLabel("LLM Model ID:"), 0, 0)
+        llm_grid.addWidget(self.llm_model_combo, 0, 1)
+        llm_grid.addWidget(QLabel("API Key:"), 1, 0)
+        llm_grid.addWidget(self.api_key_edit, 1, 1)
 
         options_layout.addWidget(self.llm_checkbox)
         options_layout.addLayout(llm_grid)
@@ -657,20 +646,9 @@ class XReferSettingsDialog(QDialog):
         self.exclusion_default_check.stateChanged.connect(lambda state: self.toggle_path_default("exclusions", state))
         self.exclusion_browse_btn.clicked.connect(lambda: self.browse_path("exclusions"))
 
-    def update_model_list(self, origin: str) -> None:
-        """
-        Update available models based on selected LLM provider.
-
-        Args:
-            origin (str): Selected provider ('google' or 'openai')
-        """
-        self.llm_model_combo.clear()
-        self.llm_model_combo.addItems(self.llm_models[origin])
-
     def toggle_llm_options(self, state):
         """Toggle LLM-related controls based on checkbox state"""
         enabled = state == Qt.Checked
-        self.llm_origin_combo.setEnabled(enabled)
         self.llm_model_combo.setEnabled(enabled)
         self.api_key_edit.setEnabled(enabled)
 
@@ -721,8 +699,7 @@ class XReferSettingsDialog(QDialog):
             "llm_lookups": self.llm_checkbox.isChecked(),
             "git_lookups": self.git_checkbox.isChecked(),
             "suppress_notifications": self.prompt_checkbox.isChecked(),
-            "llm_origin": self.llm_origin_combo.currentText(),
-            "llm_model": self.llm_model_combo.currentText(),
+            "llm_model_id": self.llm_model_combo.currentText(),
             "api_key": self.api_key_edit.text(),
             "enable_exclusions": self.enable_exclusion_checkbox.isChecked(),
             # Add display options

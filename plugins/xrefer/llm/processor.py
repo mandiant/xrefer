@@ -16,15 +16,15 @@
 DSPy-native LLM processor with Pydantic validation.
 """
 
+import re
 import traceback
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import dspy
-from pydantic import ValidationError
 
 from xrefer.core.helpers import check_internet_connectivity, log
-from xrefer.llm.base import ModelConfig, ModelType
+from xrefer.llm.base import ModelConfig
 from xrefer.llm.dspy_modules import ArtifactAnalyzerModule, CategorizerModule, ClusterAnalyzerModule
 from xrefer.llm.prompts import ArtifactAnalyzerPrompt, CategorizerPrompt, ClusterAnalyzerPrompt, PromptType
 
@@ -59,24 +59,20 @@ class LLMProcessor:
             config: Model configuration
         """
         self.config = config
-
-        # Build model name with provider prefix
-        provider_map = {
-            ModelType.OPENAI: ("openai", 16384),
-            ModelType.GOOGLE: ("gemini", 65536)
+        lm_kwargs = {
+            "model": config.model_id,
+            "api_key": config.api_key,
+            "cache_seed": 0x72616e64306d,
         }
+        # match <https://github.com/stanfordnlp/dspy/blob/1df5984007b7fd9bb56f3a8fba7a68b5517efb69/dspy/clients/lm.py#L92>'s logic
+        if re.match(r'openai\/(?:o[1345]|gpt-5)(?:-(?:mini|nano|codex))?', config.model_id):
+            lm_kwargs.update({"temperature": 1.0, "max_tokens": 16000})
 
-        if config.provider not in provider_map:
-            raise ValueError(f"Unsupported provider: {config.provider}")
-
-        prefix, max_tokens = provider_map[config.provider]
-        model_name = config.model_name if config.model_name.startswith(f"{prefix}/") else f"{prefix}/{config.model_name}"
-
-        self.lm = dspy.LM(model_name, api_key=config.api_key, max_tokens=max_tokens, cache_seed=0x72616e64306d,)
+        self.lm = dspy.LM(**lm_kwargs)
         dspy.settings.configure(lm=self.lm)
         import mlflow
 
-        mlflow.set_experiment("DSPy Quickstart")
+        mlflow.set_experiment("XRefer")
         mlflow.dspy.autolog()
 
         # Initialize DSPy modules
@@ -122,37 +118,27 @@ class LLMProcessor:
         prompt_template = self._prompts[prompt_type]
         dspy_module = self._dspy_modules[prompt_type]
 
-        try:
-            if prompt_type == PromptType.CATEGORIZER:
-                response = dspy_module(items=items, categories=config.categories, item_type=config.item_type)
-                return prompt_template.parse_response(response, categories=config.categories)
+        if prompt_type == PromptType.CATEGORIZER:
+            response = dspy_module(items=items, categories=config.categories, item_type=config.item_type)
+            return prompt_template.parse_response(response, categories=config.categories)
 
-            elif prompt_type == PromptType.ARTIFACT_ANALYZER:
-                artifacts = self._create_artifacts_dict(items)
-                response = dspy_module(artifacts=artifacts)
-                return prompt_template.parse_response(response)
+        elif prompt_type == PromptType.ARTIFACT_ANALYZER:
+            artifacts = self._create_artifacts_dict(items)
+            response = dspy_module(artifacts=artifacts)
+            return prompt_template.parse_response(response)
 
-            elif prompt_type == PromptType.CLUSTER_ANALYZER:
-                response = dspy_module(cluster_data=items[0])
-                # return response
-                return prompt_template.parse_response(response)
+        elif prompt_type == PromptType.CLUSTER_ANALYZER:
+            response = dspy_module(cluster_data=items[0])
+            # return response
+            return prompt_template.parse_response(response)
+        else:
+            raise ValueError(f"Unsupported prompt type: {prompt_type}")
 
-            else:
-                raise ValueError(f"Unsupported prompt type: {prompt_type}")
-
-        except ValidationError as e:
-            log(f"[x] Pydantic validation error: {e}")
-            raise
-        except Exception as e:
-            log(f"[x] Error processing items: {e}")
-            traceback.print_exc()
-            raise
 
     def _process_parallel(self, items: List[Any], prompt_type: PromptType, batch_size: int, config: ProcessConfig) -> Dict[int, Any]:
         """Process items in parallel batches."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        # Use reasonable max_workers (not hardcoded 40)
         import os
         max_workers = min(os.cpu_count() * 4, 20, len(items) // batch_size + 1)
 
@@ -224,9 +210,6 @@ class LLMProcessor:
         Process items with automatic batching.
 
         DSPy/LiteLLM automatically handles:
-        - Rate limiting (429 errors with exponential backoff)
-        - Token validation (checks before sending)
-        - Retries on transient failures
 
         Args:
             items: Items to process
@@ -275,7 +258,6 @@ class LLMProcessor:
 
         # Batched processing
         # Simple heuristic: 50 items per batch (conservative, no token counting needed)
-        # DSPy/LiteLLM will error if prompt is too large, then we can reduce
         batch_size = 50
         log(f"[+] Processing {len(items)} items in batches of {batch_size}")
 

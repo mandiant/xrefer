@@ -19,28 +19,6 @@ from typing import Any, Dict, List, Set
 
 from xrefer.llm.templates import ARTIFACT_ANALYZER_PROMPT, CATEGORIZER_PROMPT, CLUSTER_ANALYZER_PROMPT
 
-
-def _format_json_error(e: json.JSONDecodeError, response: str) -> str:
-    """Format JSONDecodeError with context for better debugging."""
-    lines = response.split("\n")
-    error_line = e.lineno - 1
-    error_col = e.colno - 1
-
-    LINES_TO_SHOW = 5
-    start_line = max(0, error_line - LINES_TO_SHOW)
-    end_line = min(len(lines), error_line + LINES_TO_SHOW + 1)
-    context_lines = []
-
-    for i in range(start_line, end_line):
-        prefix = ">>> " if i == error_line else "    "
-        context_lines.append(f"{prefix}{i + 1:3d}: {lines[i]}")
-    if error_line < len(lines):
-        pointer = " " * (8 + error_col) + "^"
-        context_lines.append(pointer)
-    context = "\n".join(context_lines)
-    return f"Invalid JSON response from model at line {e.lineno}, column {e.colno}: {e.msg}\n\nContext:\n{context}\n\nFull response length: {len(response)} chars"
-
-
 class PromptType(Enum):
     CATEGORIZER = "categorizer"
     ARTIFACT_ANALYZER = "artifact_analyzer"
@@ -246,25 +224,23 @@ class ClusterAnalyzerPrompt(PromptTemplate):
         Raises:
             ValueError: If response is not valid JSON or missing required structure
         """
-        # result = json.loads(response)
         result = response
-        # Validate required keys
-        # if not isinstance(result, dict):
-        #     raise ValueError("Response must be a dictionary")
-        from pprint import pprint
-        pprint(result)
 
-        # # Validate clusters structure
-        # clusters = result["clusters"]
-        # if not isinstance(clusters, dict):
-        #     raise ValueError("'clusters' must be a dictionary")
+        # Convert Pydantic model to dict if needed
+        from pydantic import BaseModel
+        if isinstance(result, BaseModel):
+            result_dict = result.model_dump()
+        else:
+            result_dict = result
 
-        # for cluster_id, analysis in clusters.items():
-        #     if not isinstance(analysis, dict):
-        #         raise ValueError(f"Analysis for {cluster_id} must be a dictionary")
+        # Ensure clusters are also converted to dicts
+        if "clusters" in result_dict:
+            clusters_dict = {}
+            for cluster_id, cluster_data in result_dict["clusters"].items():
+                if isinstance(cluster_data, BaseModel):
+                    clusters_dict[cluster_id] = cluster_data.model_dump()
+                else:
+                    clusters_dict[cluster_id] = cluster_data
+            result_dict["clusters"] = clusters_dict
 
-        #     required_analysis_keys = {"label", "description", "relationships", "function_prefix", "library_or_runtime"}  # if not all(key in analysis for key in required_analysis_keys):
-        #     for key in required_analysis_keys:
-        #         if key not in analysis:
-        #             log(f"Warning: Missing some analysis keys in {cluster_id}. Found: {list(analysis.keys())}")
-        return result
+        return result_dict
