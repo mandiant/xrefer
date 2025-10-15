@@ -16,7 +16,9 @@ CATEGORIZER_PROMPT = """
 Categorize the following {{TYPE}}s according to their most basic and direct functionality. Use ONLY the categories in the provided list. If an item doesn't clearly fit into the main categories, assign it to the 'Others' category. Base your decision solely on the function or library item name, focusing on recognizable patterns, prefixes, and keywords, without making assumptions about higher-level behaviors or implementations. The names may come from any programming language or library, and can be arbitrary.
 
 Categories:
+<CATEGORIES>
 {{CATEGORIES}}
+</CATEGORIES>
 
 Guidelines for categorization (do not include in response):
 
