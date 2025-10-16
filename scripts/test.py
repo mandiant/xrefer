@@ -101,19 +101,10 @@ def setup_ida_backend():
         except ImportError:
             raise ImportError("Please ensure IDA Pro is installed and the idapro module is available.")
         import ida_undo
-        from PyQt5.QtWidgets import QApplication
     except ImportError as e:
         raise BackendNotAvailableError(f"IDA Pro backend not available: {e}")
 
-    def ensure_qapplication():
-        """Ensures a QApplication instance exists."""
-        if QApplication.instance():
-            return QApplication.instance()
-        app = QApplication(sys.argv if sys.argv else ["idaclixrefer_headless"])
-        return app
-
-    app = ensure_qapplication()
-    return {"app": app, "ida_undo": ida_undo, "idapro": idapro}
+    return { "ida_undo": ida_undo, "idapro": idapro}
 
 
 def setup_binaryninja_backend():
