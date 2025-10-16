@@ -59,7 +59,6 @@ class ClusterAnalyzer:
         """
         processor = cls._get_processor()
 
-        # try:
         cluster_count = 0
         batch_size = 20
 
@@ -147,11 +146,6 @@ class ClusterAnalyzer:
 
             return final_result
 
-        # except Exception as e:
-        #     import traceback
-        #     traceback.print_exc()
-        #     log(f"[-] Error analyzing clusters: {str(e)}")
-        #     return {}
 
     @staticmethod
     def format_cluster_data(clusters: List["FunctionalCluster"], xrefer_obj, start_idx: int = 0, end_idx: int = None) -> str:

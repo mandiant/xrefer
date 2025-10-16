@@ -167,7 +167,6 @@ class LLMProcessor:
 
                 except Exception as e:
                     log(f"[x] Chunk processing failed: {e}")
-                    # Don't swallow - let caller handle
 
         return results
 
@@ -232,7 +231,6 @@ class LLMProcessor:
 
         # Create type-safe config
         config = ProcessConfig(categories=categories or [], item_type=type)
-        print(f"{items = }, {prompt_type = }, {config = }")
 
         # Cluster analysis: always process all at once
         if prompt_type == PromptType.CLUSTER_ANALYZER:

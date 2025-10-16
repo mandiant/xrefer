@@ -57,14 +57,8 @@ class PromptTemplate(ABC):
         Returns:
             Parsed data in structured format
         """
+        return self._parse_response_impl(response, **kwargs)
 
-        if type(response) == str and response.startswith("```json") and response.endswith("```"):
-            assert False, "This should never happen"
-            response = response[len("```json") : -len("```")].strip()
-        try:
-            return self._parse_response_impl(response, **kwargs)
-        except json.JSONDecodeError as e:
-            raise ValueError(_format_json_error(e, response))
 
     @abstractmethod
     def _parse_response_impl(self, response: str, **kwargs) -> Dict[str, Any] | Set[int]:
@@ -122,8 +116,7 @@ class CategorizerPrompt(PromptTemplate):
             ValueError: If response is not valid JSON
         """
 
-        # Parse the JSON response
-        # result = json.loads(response)
+
         result = response
         category_assignments = result.get("category_assignments", {})
 
