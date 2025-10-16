@@ -407,6 +407,12 @@ class BackEnd(ABC):
         """Get image base address where binary is loaded."""
 
     @property
+    @abstractmethod
+    def size(self) -> int:
+        """Get total size of the binary in bytes."""
+        ...
+
+    @property
     def binary_hash(self) -> str:
         """
         Get SHA256 hash of the binary file (cached).
