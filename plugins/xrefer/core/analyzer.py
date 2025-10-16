@@ -3093,7 +3093,7 @@ class XRefer:
             },
             "file_details": {
                 "sha256": self._backend.binary_hash,
-                "file_size": str(self._backend.size),
+                "file_size": f"{self._backend.size / (1024 * 1024):.2f} MB",
                 "file_type": "TODO: wowtype",# file_type_name
             },
             "anatomical_summary": {
