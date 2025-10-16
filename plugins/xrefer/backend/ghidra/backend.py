@@ -305,6 +305,23 @@ class GhidraBackend(BackEnd):
         except Exception as e:
             raise BackendError(f"Failed to get image base: {e}")
 
+    @property
+    def size(self) -> int:
+        """Get total size of the binary in bytes."""
+        program = self._get_actual_program()
+        memory = program.getMemory()
+        file_bytes_list = memory.getAllFileBytes()
+
+        if file_bytes_list:
+            max_size = 0
+            for file_bytes in file_bytes_list:
+                original_size = file_bytes.getSize()
+                offset = file_bytes.getFileOffset()
+                max_size = max(max_size, int(original_size + offset))
+
+            if max_size > 0:
+                return max_size
+
     def functions(self) -> Iterator[Function]:
         """Iterate over all functions in the binary."""
         program = self._get_actual_program()

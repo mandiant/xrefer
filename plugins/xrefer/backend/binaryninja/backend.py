@@ -242,6 +242,10 @@ class BNBackend(BackEnd):
     def image_base(self) -> Address:
         return Address(self._bv.start)
 
+    @property
+    def size(self) -> int:
+        return self._bv.file.raw.length
+
     def functions(self) -> Iterator[BinaryNinjaFunction]:
         for f in self._bv.functions:
             yield BinaryNinjaFunction(f)

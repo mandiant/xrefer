@@ -19,6 +19,7 @@ import os
 import pickle
 import re
 import shutil
+import datetime
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from operator import itemgetter
@@ -3084,24 +3085,15 @@ class XRefer:
             # Single root cluster, no need for the dummy node
             process_cluster(top_level_clusters[0])
 
-        file_sha256 = self._backend.binary_hash
-        assert file_sha256 is not None
-        # file_md5 = ida_nalt.retrieve_input_file_md5().hex()
-        # file_size_bytes = self._backend.
-        # file_type_name =
-
-        # Assemble the final data structure
-        import datetime
         report_data = {
             "metadata": {
-                "date": datetime.datetime.now(datetime.UTC).isoformat(),
+                "date": datetime.datetime.now(datetime.UTC).isoformat(timespec='hours'),
                 "xrefer-version": 'TODO: define it in __init__.py',
                 "backend": self._backend.name,
             },
             "file_details": {
-                "sha256": file_sha256,
-                "md5": "TODO: file_md5",
-                "file_size": "TODO: wow" , #f"{file_size_bytes / (1024*1024):.2f} MB",
+                "sha256": self._backend.binary_hash,
+                "file_size": str(self._backend.size),
                 "file_type": "TODO: wowtype",# file_type_name
             },
             "anatomical_summary": {
@@ -3129,7 +3121,7 @@ class XRefer:
             ('<!--BACKEND_PLACEHOLDER-->', report_data["metadata"]["backend"]),
             ('<!--XREFER_VERSION_PLACEHOLDER-->', report_data["metadata"]["xrefer-version"]),
             ('<!--SHA256_PLACEHOLDER-->', report_data["file_details"]["sha256"]),
-            ('<!--MD5_PLACEHOLDER-->', report_data["file_details"]["md5"]),
+            # ('<!--MD5_PLACEHOLDER-->', report_data["file_details"]["md5"]),
             ('<!--SIZE_PLACEHOLDER-->', report_data["file_details"]["file_size"]),
             ('<!--TYPE_PLACEHOLDER-->', report_data["file_details"]["file_type"]),
             ('<!--SUMMARY_PLACEHOLDER-->', report_data["anatomical_summary"]["summary"]),

@@ -246,6 +246,11 @@ class IDABackend(BackEnd):
         """Get IDA image base address."""
         return Address(idaapi.get_imagebase())
 
+    @property
+    def size(self) -> int:
+        """Get size of the currently opened IDA database."""
+        return ida_nalt.retrieve_input_file_size()
+
     def _path_impl(self) -> str:
         """Get the path of the currently opened IDA database."""
         input_path: Optional[str] = idc.get_idb_path()
