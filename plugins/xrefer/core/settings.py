@@ -62,7 +62,7 @@ class XReferSettingsManager:
         settings = {
             "llm_lookups": True,
             "git_lookups": False,
-            "suppress_notifications": False,
+            "suppress_notifications": True,
             "llm_model_id": "gemini/gemini-2.5-pro",
             "api_key": "",
             "enable_exclusions": True,

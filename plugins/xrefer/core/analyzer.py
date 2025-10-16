@@ -2571,6 +2571,8 @@ class XRefer:
         Returns:
             bool: True if analysis should proceed, False if it should be cancelled
         """
+        if self.settings["suppress_notifications"]:
+            return True
         missing_files = {}
 
         # Check for API trace file
@@ -2589,17 +2591,27 @@ class XRefer:
             missing_files["xrefs"] = xrefs_path
 
         # If only user xrefs is missing or notifications are suppressed, proceed
-        if not missing_files or (len(missing_files) == 1 and "xrefs" in missing_files) or self.settings["suppress_notifications"]:
+        if not missing_files or (len(missing_files) == 1 and "xrefs" in missing_files):
             return True
+        _WARNING_MSG = f"Missing required analysis files: {missing_files}. If you want to suppress this check, enable 'suppress_notifications' in settings ({self.settings_manager.settings_file})."
+        if self._backend.name == "ida":
+            try:
+                from PyQt5.QtWidgets import QApplication, QDialog
+            except ImportError as exc:
+                log(f"{_WARNING_MSG} PyQt5 is not available; running in headless mode.")
+                raise EnvironmentError(f"{_WARNING_MSG} PyQt5 is required to prompt for missing files. Enable 'suppress_notifications' to bypass this check.") from exc
+            if not QApplication.instance():
+                log(f"{_WARNING_MSG} No active QApplication; running in headless mode.")
+                raise EnvironmentError(f"{_WARNING_MSG} This run is headless. Enable 'suppress_notifications' to bypass this check.")
 
-        # Show dialog (lazy import to avoid circular dependency)
-        from xrefer.gui.settings import MissingFilesDialog
+            from xrefer.gui.settings import MissingFilesDialog
 
-        dialog = MissingFilesDialog(missing_files)
-        result = dialog.exec_()
-        from PyQt5.QtWidgets import QDialog
+            dialog = MissingFilesDialog(missing_files)
+            result = dialog.exec_()
+            return result == QDialog.Accepted
 
-        return result == QDialog.Accepted
+        log(_WARNING_MSG)
+        raise EnvironmentError(_WARNING_MSG)
 
     def clear_affected_graph_cache(self) -> None:
         """
