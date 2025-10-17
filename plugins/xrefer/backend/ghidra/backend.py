@@ -4,6 +4,39 @@ from collections.abc import Iterator
 from ..base import Address, BackEnd, BackendError, BasicBlock, Function, FunctionType, Instruction, InvalidAddressError, Operand, OperandType, Section, SectionType, String, StringEncType, Xref, XrefType
 
 
+def configure_fast_analysis(program) -> None:
+    """Disables time-consuming analyzers while keeping essential analyzers enabled.
+    This should be called before running analyzeAll() on a program.
+
+    note:
+    - Decompiler analyzers: +4.29s overhead (17x slower)
+    - Demanglers: +0.14s overhead
+    - Stack analyzer: +0.01s overhead
+
+    Args:
+        program: Ghidra Program object
+    """
+    from ghidra.program.model.listing import Program as GhidraProgram
+
+    logger = logging.getLogger(__name__)
+    logger.info("Configuring optimized Ghidra analysis...")
+
+    options = program.getOptions(GhidraProgram.ANALYSIS_PROPERTIES)
+
+    disabled_analyzers = [
+        "Decompiler Parameter ID",
+        "Decompiler Switch Analysis",
+    ]
+
+    for analyzer in disabled_analyzers:
+        options.setBoolean(analyzer, False)
+        logger.info(f"Disabled analyzer: {analyzer}")
+
+    essential = ["Subroutine References", "ASCII Strings", "Scalar Operand References"]
+    for analyzer in essential:
+        options.setBoolean(analyzer, True)
+        logger.debug(f"Enabled analyzer: {analyzer}")
+
 class GhidraFunction(Function):
     def __init__(self, ghidra_func, backend) -> None:
         """Initialize with Ghidra function object."""
@@ -475,7 +508,6 @@ class GhidraBackend(BackEnd):
     def get_xrefs_from(self, address: Address) -> Iterator[Xref]:
         """Get all references FROM the specified address."""
         program = self._get_actual_program()
-        # Use program's reference manager
         ref_manager = program.getReferenceManager()
         addr_value = address.value if isinstance(address, Address) else int(address)
         ghidra_addr = self._addr_factory.getAddress(f"{addr_value:x}")
@@ -490,7 +522,16 @@ class GhidraBackend(BackEnd):
             if to_addr.isStackAddress():
                 stack_refs_skipped += 1
                 continue
+            var_from = Address(ref.getFromAddress().getOffset())
+            if to_addr.getOffset() < 0:
+                var_to = Address(var_from.value + to_addr.getOffset())
+            else:
+                var_to = Address(to_addr.getOffset())
+            yield GhidraXref(var_from, var_to, xref_type)
 
+        if stack_refs_skipped > 0:
+            logger = logging.getLogger(__name__)
+            logger.debug(f"Skipped {stack_refs_skipped} stack references from {address}")
 
     def _resolve_file_offset_impl(self, file_offset: int) -> Address | None:
         """Translate a file offset to an Address within the current program."""

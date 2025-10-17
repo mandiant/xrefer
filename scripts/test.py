@@ -16,7 +16,7 @@ BACKEND = Literal["ida", "binaryninja", "ghidra"]
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
-_prjdir = os.environ.get("PROJECT")
+_prjdir = os.environ.get("PROJECT") or os.path.join(os.path.dirname(__file__), "..", "plugins")
 if _prjdir is None:
     raise OSError("set PROJECT to the plugins dir")
 PROJECT_DIR = Path(_prjdir)
@@ -248,6 +248,17 @@ def _analyze_binaryninja(file_path: Path, auto_analysis: bool = True, save_chang
         bv.file.close()
 
 
+def configure_fast_ghidra_analysis(program, auto_analysis: bool) -> None:
+    """Wrapper to configure fast Ghidra analysis."""
+    if not auto_analysis:
+        return
+
+    # Use the backend's optimized configuration
+    from xrefer.backend.ghidra.backend import configure_fast_analysis
+    print("[*] Configuring optimized Ghidra analysis (disabling decompiler analyzers)...")
+    configure_fast_analysis(program)
+
+
 def _analyze_ghidra(file_path: Path, auto_analysis: bool = True, save_changes: bool = False, force_analysis: bool = False) -> None:
     """Analyze with Ghidra backend."""
     modules = setup_ghidra_backend()
@@ -257,7 +268,16 @@ def _analyze_ghidra(file_path: Path, auto_analysis: bool = True, save_changes: b
 
     pyghidra.start()
 
-    with pyghidra.open_program(str(file_path), analyze=auto_analysis) as flat_api:
+    # Open with analyze=False to allow custom analyzer configuration
+    with pyghidra.open_program(str(file_path), analyze=False) as flat_api:
+        from ghidra.program.util import GhidraProgramUtilities
+
+        program = flat_api.getCurrentProgram()
+        configure_fast_ghidra_analysis(program, auto_analysis)
+
+        if auto_analysis and GhidraProgramUtilities.shouldAskToAnalyze(program):
+            flat_api.analyzeAll(program)
+
         from xrefer.backend.factory import backend_manager
 
         ghidra_backend = backend_manager.create_backend("ghidra", program=flat_api.getCurrentProgram())

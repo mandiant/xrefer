@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Deque, Dict, List, Optional, Tuple
 
 from tabulate import tabulate
+from xrefer.backend.base import Instruction
 from xrefer.backend import Address, FunctionType, OperandType, Section, SectionType, XrefType
 from xrefer.core.helpers import filter_null_string, log, normalize_path
 from xrefer.lang.lang_base import LanguageBase
@@ -33,32 +34,24 @@ ADDRESS_TOKEN_RE = re.compile(r"(?:0x)?[0-9A-Fa-f]{5,}")
 PLACEHOLDER_PREFIXES = ("sub_", "fun_", "lab_", "nullsub_", "thunk_")
 
 
-def operand_address(inst, operand_index: int) -> Optional[int]:
+def operand_address(inst: Instruction, operand_index: int) -> Optional[int]:
     """Best-effort resolve operand address across backends."""
 
-    operands = getattr(inst, "operands", None)
+    operands = inst.operands
     if not operands or operand_index >= len(operands):
         return None
 
     operand = operands[operand_index]
 
     # Prefer explicit value if backend populated one
-    value = getattr(operand, "value", None)
-    if value is not None:
-        try:
-            resolved = int(value)
-        except Exception:
-            resolved = None
-        else:
-            if not isinstance(value, Address) or value.is_valid():
-                return resolved
-
+    if value := operand.value is not None:
+        resolved = int(value)
+        return resolved
     texts = []
-    op_text = getattr(operand, "text", None)
-    if op_text:
+    if op_text := operand.text:
         texts.append(op_text)
-    inst_text = getattr(inst, "text", None)
-    if inst_text:
+
+    if inst_text := inst.text:
         texts.append(inst_text)
 
     for text in texts:
