@@ -356,6 +356,21 @@ class BNBackend(BackEnd):
         data = self._bv.read(int(address), size)
         return data if data else None
 
+    def _resolve_file_offset_impl(self, file_offset: int) -> Optional[Address]:
+        """Resolve a file offset to a virtual address using Binary Ninja APIs."""
+        try:
+            addr = self._bv.get_address_for_data_offset(file_offset)
+        except Exception:
+            return None
+
+        if addr is None:
+            return None
+
+        try:
+            return Address(int(addr))
+        except Exception:
+            return None
+
     def _get_sections_impl(self) -> Iterator[BinaryNinjaSection]:
         for name, section in self._bv.sections.items():
             yield BinaryNinjaSection(name, section, self._bv)

@@ -327,6 +327,13 @@ class IDABackend(BackEnd):
         except Exception:
             return None
 
+    def _resolve_file_offset_impl(self, file_offset: int) -> Address | None:
+        """Resolve a file offset to a linear address using IDA APIs."""
+        ea = idaapi.get_fileregion_ea(file_offset)
+        if ea == idaapi.BADADDR:
+            return None
+        return Address(int(ea))
+
     def instructions(self, start: Address, end: Address) -> Iterator[Address]:
         """Iterate over instruction addresses in the specified range."""
         for ea in idautils.Heads(int(start), int(end)):

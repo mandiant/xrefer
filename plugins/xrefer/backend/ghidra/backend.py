@@ -491,12 +491,16 @@ class GhidraBackend(BackEnd):
                 stack_refs_skipped += 1
                 continue
 
-            yield GhidraXref(Address(ref.getFromAddress().getOffset()), Address(to_addr.getOffset()), xref_type)
 
-        # Log summary instead of individual skips
-        if stack_refs_skipped > 0:
-            logger = logging.getLogger(__name__)
-            logger.debug(f"Skipped {stack_refs_skipped} stack references from {address}")
+    def _resolve_file_offset_impl(self, file_offset: int) -> Address | None:
+        """Translate a file offset to an Address within the current program."""
+        program = self._get_actual_program()
+        memory = program.getMemory()
+        addresses = memory.locateAddressesForFileOffset(file_offset)
+
+        for addr in addresses:
+            return Address(addr.getOffset())
+        return None
 
     def _convert_ref_type(self, ghidra_ref_type) -> XrefType:
         """Convert Ghidra reference type to XrefType."""

@@ -810,3 +810,21 @@ class BackEnd(ABC):
     def _get_disassembly_impl(self, address: Address) -> Instruction:
         """Backend-specific implementation for getting disassembly at a specific address."""
         ...
+
+    def resolve_file_offset(self, file_offset: int) -> Address | None:
+        """Resolve a file offset to a memory address if possible.
+
+        Args:
+            file_offset: Raw file offset to resolve
+
+        Returns:
+            Resolved Address or None if the offset does not map to memory
+        """
+        if file_offset < 0:
+            raise ValueError("file_offset must be non-negative")
+        return self._resolve_file_offset_impl(file_offset)
+
+    @abstractmethod
+    def _resolve_file_offset_impl(self, file_offset: int) -> Address | None:
+        """Backend-specific implementation for resolving file offsets."""
+        ...

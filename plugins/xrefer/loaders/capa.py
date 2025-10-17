@@ -109,15 +109,14 @@ def to_locations(addresses: Set[frz.Address]) -> Set[int]:
         Set[int]: Set of converted location addresses
     """
     locs = set()
+    backend = get_current_backend()
     for addr in addresses:
         if addr.type == frz.AddressType.ABSOLUTE:
             v = addr.value
         elif addr.type == frz.AddressType.RELATIVE:
             v = addr.value
         elif addr.type == frz.AddressType.FILE:
-            import idaapi
-
-            v = idaapi.get_fileregion_ea(addr.value)
+            v = backend.resolve_file_offset(addr.value)
         elif addr.type in (frz.AddressType.DN_TOKEN, frz.AddressType.DN_TOKEN_OFFSET, frz.AddressType.NO_ADDRESS):
             continue
         locs.add(v)
