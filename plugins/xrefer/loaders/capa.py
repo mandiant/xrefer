@@ -52,12 +52,12 @@ def load_capa_json(capa_json_path: str) -> Dict[int, List[Dict[str, Any]]]:
     # Get image bases and calculate relocation delta if needed
     capa_base = doc.meta.analysis.base_address.value
 
-    # ida_base = idaapi.get_imagebase()
-    ida_base = get_current_backend().image_base
-    relocation_delta = ida_base - capa_base if capa_base != ida_base else 0
+    backend = get_current_backend()
+    backend_base = backend.image_base
+    relocation_delta = backend_base - capa_base if capa_base != backend_base else 0
 
     if relocation_delta:
-        log(f"Detected image base mismatch: CAPA base=0x{capa_base:x}, IDA base=0x{ida_base:x}")
+        log(f"Detected image base mismatch: CAPA base=0x{capa_base:x}, backend({backend.name}) base=0x{backend_base:x}")
         log(f"Applying relocation delta: 0x{relocation_delta:x}")
 
     rmatches = get_rule_matches_dict(doc)
