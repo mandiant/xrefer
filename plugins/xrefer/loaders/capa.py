@@ -117,6 +117,8 @@ def to_locations(addresses: Set[frz.Address]) -> Set[int]:
             v = addr.value
         elif addr.type == frz.AddressType.FILE:
             v = backend.resolve_file_offset(addr.value)
+            if v is None:
+                continue
         elif addr.type in (frz.AddressType.DN_TOKEN, frz.AddressType.DN_TOKEN_OFFSET, frz.AddressType.NO_ADDRESS):
             continue
         locs.add(v)
