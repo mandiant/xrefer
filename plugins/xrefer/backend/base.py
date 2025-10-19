@@ -41,14 +41,13 @@ class FunctionType(Enum):
 class XrefType(Enum):
     """Cross-reference types for different kinds of references."""
 
-    CALL = auto()
-    JUMP = auto()
-    BRANCH_TRUE = auto()
-    BRANCH_FALSE = auto()
-    DATA_READ = auto()
-    DATA_WRITE = auto()
-    DATA_OFFSET = auto()
-    STRING_REF = auto()
+    CALL = auto() # direct/indirect call
+    JUMP = auto() # direct/conditional/indirect jump
+    BRANCH_TRUE = JUMP   # alias: treat as JUMP
+    BRANCH_FALSE = JUMP  # alias: treat as JUMP
+    DATA_READ = auto() # data read access (e.g. mov eax, [addr])
+    DATA_WRITE = auto() # data write access (e.g. mov [addr], eax)
+    DATA_OFFSET = auto() # data offset reference (e.g. lea eax, [addr])
     UNKNOWN = auto()
 
 
