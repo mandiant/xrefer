@@ -732,6 +732,7 @@ class XRefer:
         """
         log("Mapping references to leaf functions...")
         ref_to_search: List[Reference] = []
+        initial_leaf_count = len(self.leaf_funcs)
 
         while ref_list:
             # addr, item, type = ref_list.pop()
@@ -764,6 +765,7 @@ class XRefer:
                 ref_list = ref_to_search
                 ref_to_search = []
 
+        log(f"Mapped {len(self.mapped_refs)} references to {len(self.leaf_funcs) - initial_leaf_count} new leaf functions (total: {len(self.leaf_funcs)})")
     def propagate_xref_nodes(self, iter: int) -> bool:
         """
         Propagate cross-reference information through call paths.
@@ -1174,6 +1176,8 @@ class XRefer:
             # Restore previous state
             self.clusters = current_clusters
             self.cluster_analysis = current_analysis
+        assert self.clusters is not None
+        assert self.cluster_analysis is not None
 
     def generate_list_of_non_excluded_functions(self) -> None:
         """
@@ -2524,6 +2528,8 @@ class XRefer:
 
         if not self.current_analysis_ep:
             self.current_analysis_ep = self.lang.entry_point
+        if self.current_analysis_ep is None:
+            raise AssertionError("Analysis entry point could not be determined")
 
         self._backend.set_function_comment(Address(self.lang.entry_point), self.lang.ep_annotation)
         self.process_exclusions()
@@ -2533,7 +2539,15 @@ class XRefer:
         """
         Run secondary analysis, including generating call paths and propagating cross-reference nodes.
         """
+        if self.current_analysis_ep is None:
+            raise AssertionError("Current analysis entry point is unset before path generation")
         self.generate_all_simple_call_paths_for_ep()
+
+        ep_paths = self.paths.get(self.current_analysis_ep, {})
+        if not ep_paths:
+            raise AssertionError(f"No call paths were generated for entry point 0x{self.current_analysis_ep:x}")
+        if not any(ep_paths.values()):
+            raise AssertionError(f"Call path generation produced only empty targets for entry point 0x{self.current_analysis_ep:x}")
         iters = 1
 
         while self.propagate_xref_nodes(iters):
@@ -2662,17 +2676,11 @@ class XRefer:
         """
         all_paths = []
         path_buffer = [[final]]
-        try:
-            func_name_initial = self._backend.get_function_at(Address(initial))
-            func_name_final = self._backend.get_function_at(Address(final))
-        except Exception as e:
-            import ida_idaapi
-            import idc
 
-            log(f"Error {idc.get_func_name(ida_idaapi.ea_t(initial)) = }")
-            raise e
-
+        func_name_initial = self._backend.get_function_at(Address(initial))
+        func_name_final = self._backend.get_function_at(Address(final))
         log(f"Building call paths :: {func_name_initial} -> {func_name_final}")
+
         while path_buffer and len(all_paths) < max_limit and len(path_buffer) < max_limit:
             refs = set()
             target = path_buffer[0][-1]
@@ -2707,6 +2715,8 @@ class XRefer:
         if self.current_analysis_ep not in self.paths:
             self.paths[self.current_analysis_ep] = {}
 
+        log(f"Generating call paths from EP {self.current_analysis_ep:#x} to {len(self.leaf_funcs)} leaf functions...")
+
         for func_ea in self.leaf_funcs:
             if self.current_analysis_ep != func_ea:
                 # Check if the paths from current_analysis_ep to func_ea are already stored
@@ -2714,6 +2724,13 @@ class XRefer:
                     _paths = self.generate_simple_call_paths(self.current_analysis_ep, func_ea)
                     if len(_paths):
                         self.paths[self.current_analysis_ep][func_ea] = _paths
+
+        total_paths_generated = len(self.paths[self.current_analysis_ep])
+        log(f"Generated {total_paths_generated} call path groups for EP {self.current_analysis_ep:#x}")
+        if total_paths_generated == 0:
+            log(f"WARNING: No paths found from EP {self.current_analysis_ep:#x} to any leaf functions!")
+        elif total_paths_generated < len(self.leaf_funcs) / 2:
+            log(f"WARNING: Only {total_paths_generated}/{len(self.leaf_funcs)} leaf functions are reachable from EP")
 
     def is_node_in_existing_paths(self, node_ea: int) -> bool:
         """
