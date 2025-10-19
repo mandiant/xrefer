@@ -44,7 +44,7 @@ def operand_address(inst: Instruction, operand_index: int) -> Optional[int]:
     operand = operands[operand_index]
 
     # Prefer explicit value if backend populated one
-    if value := operand.value is not None:
+    if (value := operand.value) is not None:
         resolved = int(value)
         return resolved
     texts = []
@@ -69,14 +69,9 @@ def operand_address(inst: Instruction, operand_index: int) -> Optional[int]:
 
 
 def address_in_sections(backend: "BackEnd", addr: Optional[int], section_names: Tuple[str, ...] = STATIC_DATA_SECTIONS) -> bool:
-    if addr is None or addr < 0:
+    if addr is None:
         return False
-
-    try:
-        address_obj = Address(int(addr))
-    except Exception:
-        return False
-
+    address_obj = Address(int(addr))
     for name in section_names:
         section = backend.get_section_by_name(name)
         if section and section.contains(address_obj):
@@ -85,17 +80,12 @@ def address_in_sections(backend: "BackEnd", addr: Optional[int], section_names: 
 
 
 def address_in_code_sections(backend: "BackEnd", addr: Optional[int]) -> bool:
-    if addr is None or addr < 0:
+    if addr is None:
         return False
-
-    try:
-        address_obj = Address(int(addr))
-    except Exception:
-        return False
+    address_obj = Address(int(addr))
 
     for section in backend.get_sections():
-        section_type = getattr(section, "type", None)
-        if section_type == SectionType.CODE and section.contains(address_obj):
+        if section.type == SectionType.CODE and section.contains(address_obj):
             return True
     return False
 
@@ -788,7 +778,7 @@ class LangRust(LanguageBase):
                 except Exception:
                     pass
 
-                inst_mnemonic = getattr(inst, "mnemonic", "")
+                inst_mnemonic = inst.mnemonic
                 inst_is_call = inst and inst_mnemonic.lower() == "call"
 
                 for xr in self.backend.get_xrefs_from(ins):
@@ -846,7 +836,7 @@ class LangRust(LanguageBase):
             except Exception:
                 continue
 
-            for idx, _ in enumerate(getattr(inst, "operands", ())):
+            for idx, _ in enumerate(inst.operands):
                 addr = operand_address(inst, idx)
                 if addr is None:
                     continue
