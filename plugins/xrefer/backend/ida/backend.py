@@ -221,6 +221,8 @@ class IDASection(Section):
             return SectionType.CODE
         elif self._seg.perm & ida_segment.SEGPERM_WRITE:
             return SectionType.DATA
+        elif self._seg.perm & ida_segment.SEG_DATA:
+            return SectionType.DATA
         elif self._seg.perm & ida_segment.SEGPERM_READ:
             return SectionType.DATA
         else:

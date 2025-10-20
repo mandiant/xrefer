@@ -46,9 +46,14 @@ class LanguageBase(ABC):
         self.ep_annotation = ""
         self.id = "base"
 
+
     def initialize(self) -> None:
         """Initialize language-specific data after language matching."""
         self.entry_point = self.get_entry_point()
+        if self.entry_point is None:
+            raise AssertionError("Language analysis failed to determine an entry point")
+        if self.entry_point < 0x100:
+            raise AssertionError(f"Entry point 0x{self.entry_point:x} is suspiciously low")
         self.strings = self.get_strings()
 
     def __str__(self) -> str:
@@ -94,6 +99,11 @@ class LanguageBase(ABC):
         """
 
         entry_points = [
+            # 6. Golang (not supported yet, but reserving the spot)
+            "main.main",
+            # 7. rust, if we are lucky
+            "main::main",
+            "_ZN4main4main17hac82363469e1a7a2E",
             # 1. Main variants (standard CLI entry points; underscores often used by older toolchains)
             "main",
             "_main",
@@ -113,28 +123,29 @@ class LanguageBase(ABC):
             # 5. DriverEntry variants (Windows driver entry points; decorated form for 32-bit)
             "DriverEntry",
             "_DriverEntry@8",
-            # 6. Remaining known user-defined entry points
+            # 7. Remaining known user-defined entry points
             "_start",
             "start",
             "__start",
+            # 8. Fallback alias observed in some backends (e.g., Ghidra)
+            "entry",
         ]
+
+        # ghidra_entry_symbol: Optional[Address] = None
 
         for point in entry_points:
             address = self.backend.get_address_for_name(point)
             if address is not None:
+                # if self.backend.name == "ghidra" and point == "entry":
+                #     ghidra_entry_symbol = address
+                #     continue
                 return address.value
 
-        # Prefer the program entry symbol if present (e.g., 'entry' in PE binaries)
-        entry_sym = self.backend.get_address_for_name("entry")
-        if entry_sym is not None:
-            ghidra_fallback = self._resolve_ghidra_user_entry(entry_sym)
-            if ghidra_fallback is not None:
-                return ghidra_fallback
-            return entry_sym.value
-
-        ghidra_fallback = self._resolve_ghidra_user_entry(None)
-        if ghidra_fallback is not None:
-            return ghidra_fallback
+        # if ghidra_entry_symbol is not None:
+        #     ghidra_user_entry = self._resolve_ghidra_user_entry(ghidra_entry_symbol)
+        #     if ghidra_user_entry is not None:
+        #         return ghidra_user_entry
+        #     return ghidra_entry_symbol.value
 
         # Fallback: try to find main function through common patterns
         fallback = self.fallback_cmain_detection(self.backend)
@@ -172,11 +183,11 @@ class LanguageBase(ABC):
         if text_section is None:
             return None
 
-        exec_sections = [section for section in self.backend.get_sections() if getattr(section, "type", None) == SectionType.CODE]
+        exec_sections = [section for section in self.backend.get_sections() if section.type == SectionType.CODE]
 
         def _in_exec_section(addr: Address) -> bool:
             if text_section.contains(addr):
-                if getattr(text_section, "type", None) == SectionType.CODE:
+                if text_section.type == SectionType.CODE:
                     return True
             for section in exec_sections:
                 if section.contains(addr):
@@ -187,21 +198,18 @@ class LanguageBase(ABC):
         end = min(text_section.end.value, entry_address_obj.value + 0x2000)
 
         candidates: list[tuple[int, int]] = []
-        try:
-            for inst_addr in self.backend.instructions(Address(start), Address(end)):
-                inst = self.backend.disassemble(inst_addr)
-                if inst.mnemonic != "call" or not inst.operands:
-                    continue
-                target_val = inst.operands[0].value if inst.operands[0].value is not None else None
-                if target_val is None:
-                    continue
-                if not _in_exec_section(target_val):
-                    continue
-                if target_val == entry_address_obj:
-                    continue
-                candidates.append((int(target_val), int(inst_addr)))
-        except Exception:
-            return None
+        for inst_addr in self.backend.instructions(Address(start), Address(end)):
+            inst = self.backend.disassemble(inst_addr)
+            if inst.mnemonic != "call" or not inst.operands:
+                continue
+            target_val = inst.operands[0].value if inst.operands[0].value is not None else None
+            if target_val is None:
+                continue
+            if not _in_exec_section(target_val):
+                continue
+            if target_val == entry_address_obj:
+                continue
+            candidates.append((int(target_val), int(inst_addr)))
 
         if not candidates:
             return None

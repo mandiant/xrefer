@@ -398,7 +398,7 @@ class LangRust(LanguageBase):
         log("Rust compiled binary detected")
         self.user_xrefs = self.get_user_xrefs() or []
         self._process_strings()
-        self._ensure_rust_entry_alias()
+        # self._ensure_rust_entry_alias()
         self.ep_annotation = self._get_ep_annotation()
 
     def _process_strings(self) -> None:
@@ -757,10 +757,9 @@ class LangRust(LanguageBase):
         if isinstance(main_addr, int):
             main_addr = Address(main_addr)
         fn = self.backend.get_function_at(main_addr)
+        assert fn is not None, f"Should only be called with valid function address ({main_addr = })"
         # TODO: In ghidra, this value is wrong cause the `main` isn't automatically set (i.e. we need to manually set `main` from `__scrt_common_main_seh`)
 
-        # start  = fn.start
-        # # end = idc.prev_addr(idc.get_func_attr(main_ea, idc.FUNCATTR_END))
 
         # is_64 = not is_32bit()  # Use different variable name
         block_ranges = sorted(
@@ -768,16 +767,11 @@ class LangRust(LanguageBase):
             key=lambda pair: pair[0].value,
         )
         instruction_window: Deque[Address] = deque(maxlen=12)
-
         for start, end in block_ranges:
             for ins in self.backend.instructions(start, end):
                 instruction_window.append(ins)
                 inst = None
-                try:
-                    inst = self.backend.disassemble(ins)
-                except Exception:
-                    pass
-
+                inst = self.backend.disassemble(ins)
                 inst_mnemonic = inst.mnemonic
                 inst_is_call = inst and inst_mnemonic.lower() == "call"
 
@@ -800,25 +794,35 @@ class LangRust(LanguageBase):
                         candidate_addr = xr.target.value
 
                     candidate_fn = self.backend.get_function_at(Address(candidate_addr))
-                    if not candidate_fn:
-                        self._define_function_if_absent(candidate_addr)
-                        candidate_fn = self.backend.get_function_at(Address(candidate_addr))
-                        if not candidate_fn:
-                            if candidate_addr != xr.target.value:
-                                continue
-                            candidate_fn = wrapper_fn
+                    # if not candidate_fn:
+                    #     self._define_function_if_absent(candidate_addr)
+                    #     candidate_fn = self.backend.get_function_at(Address(candidate_addr))
+                    #     if not candidate_fn:
+                    #         if candidate_addr != xr.target.value:
+                    #             continue
+                    #         candidate_fn = wrapper_fn
+
+                    if candidate_fn is None:
+                        candidate_fn = wrapper_fn
+
+                    if candidate_fn is None:
+                        continue
 
                     if candidate_fn.type in (FunctionType.IMPORT, FunctionType.LIBRARY, FunctionType.THUNK, FunctionType.EXPORT, FunctionType.EXTERN):
                         continue
 
                     current_name = (candidate_fn.name or "").lower()
-                    if current_name and not current_name.startswith(("fun_", "sub_", "replace_me_", "lab_")):
-                        return candidate_fn.start.value
+                    placeholder_prefixes = ("fun_", "sub_", "replace_me_", "lab_", "nullsub_", "entry", "se_func")
 
-                    try:
-                        candidate_fn.name = "rust_main"
-                    except Exception:
-                        pass
+                    if current_name and current_name != "rust_main" and not current_name.startswith(placeholder_prefixes):
+                        # Skip functions that already carry a meaningful name (e.g., fmt).
+                        continue
+
+                    if current_name != "rust_main":
+                        try:
+                            candidate_fn.name = "rust_main"
+                        except Exception:
+                            pass
                     return candidate_fn.start.value
         return None
 
@@ -847,23 +851,23 @@ class LangRust(LanguageBase):
 
         return None
 
-    def _define_function_if_absent(self, addr: int) -> None:
-        """Ensure a function exists at `addr` when backends defer closure emission.
-        HACK: Ghidra is the only backend as of now that requires this (i.e. )
-        """
+    # def _define_function_if_absent(self, addr: int) -> None:
+    #     """Ensure a function exists at `addr` when backends defer closure emission.
+    #     HACK: Ghidra is the only backend as of now that requires this (i.e. )
+    #     """
 
-        if self.backend.name != "ghidra":
-            return
+    #     if self.backend.name != "ghidra":
+    #         return
 
-        program = self.backend._get_actual_program()  # type: ignore[attr-defined]
-        addr_factory = program.getAddressFactory()
-        gh_addr = addr_factory.getAddress(f"{addr:x}")
-        from ghidra.program.flatapi import FlatProgramAPI
+    #     program = self.backend._get_actual_program()  # type: ignore[attr-defined]
+    #     addr_factory = program.getAddressFactory()
+    #     gh_addr = addr_factory.getAddress(f"{addr:x}")
+    #     from ghidra.program.flatapi import FlatProgramAPI
 
-        flat_api = FlatProgramAPI(program)
-        existing = program.getFunctionManager().getFunctionAt(gh_addr)
-        if existing is None:
-            flat_api.createFunction(gh_addr, f"FUN_{addr:x}")
+    #     flat_api = FlatProgramAPI(program)
+    #     existing = program.getFunctionManager().getFunctionAt(gh_addr)
+    #     if existing is None:
+    #         flat_api.createFunction(gh_addr, f"FUN_{addr:x}")
 
     def rename_functions(self, xrefer_obj: "XRefer") -> None:
         """

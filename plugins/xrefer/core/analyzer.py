@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
 from xrefer.backend import Address, BackEnd, FunctionType, XrefType, get_current_backend
 from xrefer.core.clusters import ClusterManager, FunctionalCluster
 from xrefer.core.helpers import enrich_string_data_core, find_cluster_analysis, log, log_elapsed_time
+# from xrefer.core.report_sanitizer import escape_plain_text, json_dumps_for_script, render_markdown_to_safe_html
 from xrefer.core.settings import XReferSettingsManager
 from xrefer.lang import get_language_object
 from xrefer.llm import ArtifactAnalyzer, ClusterAnalyzer, CATEGORIES, Categorizer
@@ -789,6 +790,7 @@ class XRefer:
             - Updates entity visibility through call chains
         """
         total = len(self.paths[self.current_analysis_ep]) - 1
+        assert total >= 0, f"Hmm, {self.current_analysis_ep = :#x}, {self.paths = }"
         modified = False
 
         for index, (_, path_group) in enumerate(self.paths[self.current_analysis_ep].items()):
@@ -1129,11 +1131,7 @@ class XRefer:
                                     # Update intermediate paths map
                                     intermediate_paths_map.update(path_intermediates)
             if not graph_paths or not root_nodes:
-                log("No valid paths found for clustering")
-                # Restore previous state
-                self.clusters = current_clusters
-                self.cluster_analysis = current_analysis
-                return
+                raise AssertionError("Cluster analysis invoked without any valid call paths")
 
             # Create clusters
             log(f"Creating clusters from {len(graph_paths)} paths with {len(root_nodes)} root nodes")
@@ -2528,6 +2526,14 @@ class XRefer:
 
         if not self.current_analysis_ep:
             self.current_analysis_ep = self.lang.entry_point
+            assert self.current_analysis_ep is not None
+            if self._backend.binary_hash == 'c6b727d7cff517577db838db18ad17b46334d3c91c2e50893634e56cdc19e41f':
+            #     print(f"{self.lang = }")
+            #     import IPython
+            #     IPython.embed()
+                assert self.current_analysis_ep != 0x401000
+                # assert self.current_analysis_ep == 0x4694E0
+
         if self.current_analysis_ep is None:
             raise AssertionError("Analysis entry point could not be determined")
 
@@ -2681,6 +2687,7 @@ class XRefer:
         func_name_final = self._backend.get_function_at(Address(final))
         log(f"Building call paths :: {func_name_initial} -> {func_name_final}")
 
+        paths_found = 0
         while path_buffer and len(all_paths) < max_limit and len(path_buffer) < max_limit:
             refs = set()
             target = path_buffer[0][-1]
@@ -2698,6 +2705,7 @@ class XRefer:
                         continue
                     if ref == initial:
                         all_paths = self.insert_path(all_paths, (current_path + [ref])[::-1])
+                        paths_found += 1
                     else:
                         path_buffer.append(current_path + [ref])
 
@@ -2706,6 +2714,12 @@ class XRefer:
 
             elif initial in path_buffer[0]:
                 all_paths = self.insert_path(all_paths, path_buffer.pop(0)[::-1])
+                paths_found += 1
+
+        if paths_found == 0:
+            log(f"  -> No path found from {func_name_initial} to {func_name_final}")
+        else:
+            log(f"  -> Found {paths_found} path(s)")
         return all_paths
 
     def generate_all_simple_call_paths_for_ep(self) -> None:
@@ -3024,7 +3038,6 @@ class XRefer:
         # For each call, take the clean string (call[2]), split it at the first colon, and take the second part.
         report_lines = []
         for call in all_calls:
-            print(f"{call = }")
             parts = call[2].split(': ', 1)
             if len(parts) > 1:
                 report_lines.append(parts[1])
@@ -3091,7 +3104,7 @@ class XRefer:
             # Create a dummy "Anatomy" root node
             node_data_array.append({
                 "key": 0, # Dummy key for the root
-                "label": "Anatomy\nBinary Functional Clusters",
+                "label": "High Level Clusters",
                 "description": "Top-level view of disjointed functional clusters detected in the binary.",
                 "artifacts": "",
                 "apiTrace": ""
@@ -3102,6 +3115,9 @@ class XRefer:
             # Single root cluster, no need for the dummy node
             process_cluster(top_level_clusters[0])
 
+
+        # magic.from_buffer(self._backend.read_bytes(0, 2048))
+        file_type = "TODO: wowtype"
         report_data = {
             "metadata": {
                 "date": datetime.datetime.now(datetime.UTC).isoformat(timespec='hours'),
@@ -3111,9 +3127,10 @@ class XRefer:
             "file_details": {
                 "sha256": self._backend.binary_hash,
                 "file_size": f"{self._backend.size / (1024 * 1024):.2f} MB",
-                "file_type": "TODO: wowtype",# file_type_name
+                "file_type": file_type,# file_type_name
             },
             "anatomical_summary": {
+                "category": self.cluster_analysis.get('binary_category', 'Uncategorized'),
                 "summary": self.cluster_analysis.get('binary_description', 'No summary available.'),
                 "report": self.cluster_analysis.get('binary_report', 'No report available.')
             },

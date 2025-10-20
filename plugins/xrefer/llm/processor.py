@@ -67,6 +67,13 @@ class LLMProcessor:
         # match <https://github.com/stanfordnlp/dspy/blob/1df5984007b7fd9bb56f3a8fba7a68b5517efb69/dspy/clients/lm.py#L92>'s logic
         if re.search(r'openai\/(?:o[1345]|gpt-5)(?:-(?:mini|nano|codex))?', config.model_id):
             lm_kwargs.update({"temperature": 1.0, "max_tokens": 16000})
+        # For Gemini models, use full 65k output token capacity and force JSON mode
+        # Gemini's structured output doesn't support dynamic object properties
+        if 'gemini' in config.model_id.lower():
+            lm_kwargs.update({
+                "max_tokens": 65536,
+                # "response_format": {"type": "json_object"}  # Force JSON mode instead of structured output
+            })
 
         self.lm = dspy.LM(**lm_kwargs)
         dspy.settings.configure(lm=self.lm)
@@ -153,20 +160,16 @@ class LLMProcessor:
                 futures[future] = i
 
             for future in as_completed(futures):
-                try:
-                    chunk_result = future.result()
-                    chunk_start = futures[future]
+                chunk_result = future.result()
+                chunk_start = futures[future]
 
-                    # Adjust indices for categorizer (use int consistently)
-                    if prompt_type == PromptType.CATEGORIZER:
-                        for idx, cat_idx in chunk_result.items():
-                            original_idx = int(idx) + chunk_start
-                            results[original_idx] = cat_idx
-                    else:
-                        results.update(chunk_result)
-
-                except Exception as e:
-                    log(f"[x] Chunk processing failed: {e}")
+                # Adjust indices for categorizer (use int consistently)
+                if prompt_type == PromptType.CATEGORIZER:
+                    for idx, cat_idx in chunk_result.items():
+                        original_idx = int(idx) + chunk_start
+                        results[original_idx] = cat_idx
+                else:
+                    results.update(chunk_result)
 
         return results
 
@@ -180,20 +183,15 @@ class LLMProcessor:
             chunk_num = i // batch_size + 1
             log(f"[+]Processing chunk {chunk_num}/{total_chunks}")
 
-            try:
-                chunk_result = self._process_single(chunk, prompt_type, config)
+            chunk_result = self._process_single(chunk, prompt_type, config)
 
-                # Adjust indices for categorizer
-                if prompt_type == PromptType.CATEGORIZER:
-                    for idx, cat_idx in chunk_result.items():
-                        original_idx = int(idx) + i
-                        results[original_idx] = cat_idx
-                else:
-                    results.update(chunk_result)
-
-            except Exception as e:
-                log(f"[x] Chunk {chunk_num} failed: {e}")
-                # Continue processing other chunks
+            # Adjust indices for categorizer
+            if prompt_type == PromptType.CATEGORIZER:
+                for idx, cat_idx in chunk_result.items():
+                    original_idx = int(idx) + i
+                    results[original_idx] = cat_idx
+            else:
+                results.update(chunk_result)
 
         return results
 

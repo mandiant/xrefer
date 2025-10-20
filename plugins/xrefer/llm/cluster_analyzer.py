@@ -60,7 +60,7 @@ class ClusterAnalyzer:
         processor = cls._get_processor()
 
         cluster_count = 0
-        batch_size = 20
+        batch_size = 10
 
         def count_clusters(cluster):
             nonlocal cluster_count
@@ -261,16 +261,24 @@ class ClusterAnalyzer:
                     f"for the entire binary. All clusters are provided below for context. "
                 )
 
-            formatted = "Binary Analysis Clusters\n=====================\n\n"
-            formatted += "Structure is organized hierarchically with primary clusters and their subclusters.\n"
-            formatted += "Each cluster shows its functions, artifacts (APIs, strings, etc.), and call flows.\n"
-            formatted += "References to subclusters indicate where complex behavior is encapsulated.\n\n"
-            formatted += note
+            formatted = '''Binary Analysis Clusters
+=====================
 
-            for cluster in clusters:
-                formatted += format_cluster(cluster) + "\n\n"
+Structure is organized hierarchically with primary clusters and their subclusters.
+Each cluster shows its functions, artifacts (APIs, strings, etc.), and call flows.
+References to subclusters indicate where complex behavior is encapsulated.
 
-            formatted += ps_note
+{note}
+
+<CLUSTER>
+{formatted_clusters}
+</CLUSTER>
+
+{ps_note}
+'''.format(
+    note=note,
+    formatted_clusters='\n\n'.join(format_cluster(c) for c in clusters),
+    ps_note=ps_note)
             return formatted
 
         finally:

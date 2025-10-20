@@ -57,7 +57,14 @@ class PromptTemplate(ABC):
         Returns:
             Parsed data in structured format
         """
-        return self._parse_response_impl(response, **kwargs)
+        assert response is not None, "No response to parse"
+        v = self._parse_response_impl(response, **kwargs)
+        # basemodel? -> model_dump()
+        print(f"{v = }")
+        if hasattr(v, "model_dump"):
+            return v.model_dump()
+        return v
+
 
 
     @abstractmethod
@@ -115,10 +122,8 @@ class CategorizerPrompt(PromptTemplate):
         Raises:
             ValueError: If response is not valid JSON
         """
-
-
         result = response
-        category_assignments = result.get("category_assignments", {})
+        category_assignments = result.category_assignments
 
         # Validate and normalize category assignments
         categorized_items = {}
@@ -218,8 +223,8 @@ class ClusterAnalyzerPrompt(PromptTemplate):
             ValueError: If response is not valid JSON or missing required structure
         """
         result = response
+        assert result is not None, "No response to parse"
 
-        # Convert Pydantic model to dict if needed
         from pydantic import BaseModel
         if isinstance(result, BaseModel):
             result_dict = result.model_dump()

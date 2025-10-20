@@ -513,25 +513,39 @@ class GhidraBackend(BackEnd):
         ghidra_addr = self._addr_factory.getAddress(f"{addr_value:x}")
 
         raw_refs = ref_manager.getReferencesFrom(ghidra_addr)
+        memory = program.getMemory()
         stack_refs_skipped = 0
         for ref in raw_refs:
             xref_type = self._convert_ref_type(ref.getReferenceType())
 
-            # Skip stack references as they use a different address space and can have negative offsets
             to_addr = ref.getToAddress()
+            if to_addr is None:
+                continue
+
+            # Skip stack references as they use a different address space
             if to_addr.isStackAddress():
                 stack_refs_skipped += 1
                 continue
-            var_from = Address(ref.getFromAddress().getOffset())
-            if to_addr.getOffset() < 0:
-                var_to = Address(var_from.value + to_addr.getOffset())
-            else:
-                var_to = Address(to_addr.getOffset())
+
+            # Only keep references that resolve to a valid memory block
+            if not to_addr.isMemoryAddress():
+                continue
+
+            if memory.getBlock(to_addr) is None:
+                continue
+
+            from_ghidra = ref.getFromAddress()
+            from_bits = from_ghidra.getAddressSpace().getSize()
+            from_mask = (1 << from_bits) - 1 if from_bits else 0xFFFFFFFFFFFFFFFF
+            var_from = Address(int(from_ghidra.getOffset() & from_mask))
+
+            var_to = Address(int(to_addr.getOffset()))
+
             yield GhidraXref(var_from, var_to, xref_type)
 
         if stack_refs_skipped > 0:
             logger = logging.getLogger(__name__)
-            logger.debug(f"Skipped {stack_refs_skipped} stack references from {address}")
+            logger.debug(f"Skipped {stack_refs_skipped} stack references from %s", address)
 
     def _resolve_file_offset_impl(self, file_offset: int) -> Address | None:
         """Translate a file offset to an Address within the current program."""
@@ -548,13 +562,15 @@ class GhidraBackend(BackEnd):
         import ghidra.program.model.symbol as symbol_module
 
         RefType = symbol_module.RefType
-
+        print(f"{ghidra_ref_type = }")
         if ghidra_ref_type == RefType.UNCONDITIONAL_CALL:
             return XrefType.CALL
         if ghidra_ref_type == RefType.UNCONDITIONAL_JUMP:
             return XrefType.JUMP
         if ghidra_ref_type == RefType.CONDITIONAL_JUMP:
             return XrefType.BRANCH_TRUE
+        if ghidra_ref_type == RefType.PARAM:
+            return XrefType.DATA_READ
         if ghidra_ref_type in (RefType.DATA, RefType.READ):
             return XrefType.DATA_READ
         if ghidra_ref_type == RefType.WRITE:
@@ -806,6 +822,7 @@ class GhidraBackend(BackEnd):
         operands: list[Operand] = []
         num_ops = inst.getNumOperands()
         # Pre-fetch references for value recovery (e.g., RIP-relative immediates)
+        memory = program.getMemory()
         inst_refs = list(inst.getReferencesFrom())
         for i in range(num_ops):
             op_text = inst.getDefaultOperandRepresentation(i)
@@ -855,9 +872,23 @@ class GhidraBackend(BackEnd):
                 for ref in inst_refs:
                     if ref.getOperandIndex() == i:
                         to_addr = ref.getToAddress()
-                        if to_addr is not None and not to_addr.isStackAddress():
-                            val = Address(int(to_addr.getOffset()))
-                            break
+                        if to_addr is None:
+                            continue
+                        if to_addr.isStackAddress() or not to_addr.isMemoryAddress():
+                            continue
+                        if memory and not memory.contains(to_addr):
+                            continue
+                        offset = to_addr.getOffset()
+                        if offset < 0 and hasattr(to_addr, "getUnsignedOffset"):
+                            offset = to_addr.getUnsignedOffset()
+                        if offset is None or offset < 0:
+                            continue
+                        try:
+                            val = Address(int(offset))
+
+                        except ValueError:
+                            continue
+                        break
 
             operands.append(Operand(type=op_kind, text=op_text, value=val))
 
