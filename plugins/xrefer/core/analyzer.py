@@ -14,6 +14,7 @@
 
 import enum
 import gzip
+import html
 import json
 import os
 import pickle
@@ -3121,12 +3122,12 @@ class XRefer:
             "file_details": {
                 "sha256": self._backend.binary_hash,
                 "file_size": f"{self._backend.size / (1024 * 1024):.2f} MB",
-                "file_type": file_type,# file_type_name
+                "file_type": html.escape(file_type),# file_type_name
             },
             "anatomical_summary": {
                 "category": self.cluster_analysis.get('binary_category', 'Uncategorized'),
-                "summary": self.cluster_analysis.get('binary_description', 'No summary available.'),
-                "report": self.cluster_analysis.get('binary_report', 'No report available.')
+                "summary": html.escape(self.cluster_analysis.get('binary_description', 'No summary available.')),
+                "report": html.escape(self.cluster_analysis.get('binary_report', 'No report available.'))
             },
             "node_data_array": node_data_array
         }
