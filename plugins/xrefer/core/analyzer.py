@@ -2497,13 +2497,7 @@ class XRefer:
             if not isinstance(ref, Reference):
                 ref = Reference(*ref)
             fn = self._backend.get_function_at(ref.address)
-            if fn is None:
-                import ida_idaapi
-                import idc
-
-                orig_name = idc.get_func_name(ida_idaapi.ea_t(ref.address))
-                log(f"ERROR? Function not found for address: {ref.address:#x} (should be {orig_name = })")
-                continue
+            assert fn is not None
             func_ea = fn.start
             self.leaf_funcs.add(func_ea)
 

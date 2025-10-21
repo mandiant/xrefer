@@ -562,7 +562,6 @@ class GhidraBackend(BackEnd):
         import ghidra.program.model.symbol as symbol_module
 
         RefType = symbol_module.RefType
-        print(f"{ghidra_ref_type = }")
         if ghidra_ref_type == RefType.UNCONDITIONAL_CALL:
             return XrefType.CALL
         if ghidra_ref_type == RefType.UNCONDITIONAL_JUMP:
