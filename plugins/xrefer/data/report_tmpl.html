@@ -21,6 +21,7 @@
     :root {
       --bg: #303030;
       --bg-raised: #1F1F1F;
+      --panel:#252525;
       --accent-1: #00CCCC;
       --accent-2: #FFA500;
       /* Layout variables */
@@ -72,7 +73,7 @@
       display: flex;
       flex-direction: column;
       gap: 20px; /* Space between sections */
-      transition: width 0.4s cubic-bezier(0.25, 0.8, 0.25, 1); /* Smooth transition for width */
+      transition: width 0.04s cubic-bezier(0.25, 0.8, 0.25, 1); /* Smooth transition for width */
     }
 
     .left-tray-scrollable-content {
@@ -108,7 +109,7 @@
         font-family: 'Exo', sans-serif;
         font-size: 1.5rem;
         font-weight: 600;
-        color: #00CCCC;
+        color: var(--accent-1);
         letter-spacing: 0.5px;
         line-height: 1.2;
     }
@@ -118,12 +119,15 @@
 
     /* Info Card Base Style */
     .info-card {
-        background-color: #252525;
+        background-color: var(--panel);
         border: 1px solid #444;
         border-radius: 6px;
-        padding: 12px;
-        display: flex;
-        flex-direction: column;
+        padding: 0;
+        display: block;
+        transition: border-color 0.3s ease;
+    }
+    .info-card:has(.accordion-toggle:checked) {
+        border-color: var(--accent-1);
     }
 
     .info-card h4 {
@@ -131,9 +135,71 @@
         margin-bottom: 12px;
         font-size: 1rem;
         font-weight: 600;
-        color: #00CCCC;
+        color: var(--accent-1);
         border-bottom: 1px solid #444;
         padding-bottom: 8px;
+    }
+
+    .accordion-toggle {
+        position: absolute;
+        opacity: 0;
+        width: 0;
+        height: 0;
+    }
+    .accordion-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 12px;
+        cursor: pointer;
+        user-select: none;
+        transition: background-color 0.2s ease;
+        border-radius: 5px;
+    }
+    .accordion-header:hover {
+        background-color: rgba(255, 255, 255, 0.05);
+    }
+
+    .accordion-header h4 {
+        margin: 0 !important;
+        border: none !important;
+        padding: 0 !important;
+    }
+    .accordion-header::after {
+        content: '›';
+        flex-shrink: 0;
+        font-size: 1.8rem;
+        font-weight: 200;
+        color: var(--accent-1);
+        opacity: 0.7;
+        margin-left: 10px;
+        transform: rotate(0deg);
+        transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1), opacity 0.3s ease;
+        line-height: 1;
+    }
+    .accordion-header:hover::after {
+        opacity: 1;
+    }
+    .accordion-toggle:checked + .accordion-header::after {
+        transform: rotate(90deg);
+    }
+    .accordion-content {
+        display: grid;
+        grid-template-rows: 0fr;
+        transition: grid-template-rows 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
+    }
+    .accordion-content-inner {
+        overflow: hidden;
+        padding: 0 12px;
+    }
+    .accordion-toggle:checked ~ .accordion-content {
+        grid-template-rows: 1fr;
+    }
+    .accordion-toggle:checked ~ .accordion-content .accordion-content-inner {
+        padding-bottom: 12px;
+    }
+    .left-tray-scrollable-content > .info-card:last-of-type {
+        margin-top: auto;
     }
 
     /* --- CORRECTED FILE DETAILS CARD STYLES --- */
@@ -186,6 +252,17 @@
       border-bottom: 1px solid #444;
       padding-bottom: 8px;
     }
+    .accordion-header .summary-header {
+        padding: 0;
+        margin: 0;
+        border: none;
+        width: 100%;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 0 !important;
+        padding-bottom: 0 !important;
+    }
     .summary-header h4 {
       margin: 0;
       /* The border is on the parent now, so remove it from the h4 */
@@ -208,10 +285,10 @@
       border-radius: 4px;
       font-size: 0.8rem;
       font-weight: 600;
-      transition: background-color 0.3s, color 0.3s;
+      transition: background-color 0.1s, color 0.1s;
     }
     .toggle-btn.active {
-      background-color: #00CCCC;
+      background-color: var(--accent-1);
       color: #000;
     }
 
@@ -235,7 +312,7 @@
     #summaryContentContainer::-webkit-scrollbar-thumb:hover { background-color: rgba(136, 136, 136, 0.7); }
 
     .call-to-action {
-        color: #00CCCC;
+        color: var(--accent-1);
         font-style: italic;
         font-weight: 600;
         background-color: rgba(0, 204, 204, 0.1);
@@ -269,7 +346,7 @@
       transition: color 0.3s ease;
     }
     .github-link:hover {
-      color: #00CCCC;
+      color: var(--accent-1);
     }
     .github-link svg {
       width: 18px;
@@ -302,7 +379,7 @@
 
       height: 100%;
       background-color: var(--bg-raised);
-      border-left: 2px solid #00CCCC;
+      border-left: 2px solid var(--accent-1);
       transform: translateX(0);
       transition: transform 0.3s ease, width 0.3s ease;
       z-index: 10;
@@ -336,7 +413,6 @@
     .tab-btn {
       flex: 1; background-color: #333; color: #ccc; border: 1px solid #555;
       padding: 8px; text-align: center; cursor: pointer; border-radius: 4px;
-      transition: background-color 0.2s, color 0.2s;
     }
     .tab-btn:hover { background-color: #444; color: #fff; }
     .tab-btn.active {
@@ -344,7 +420,7 @@
     }
 
     #rightTrayContent {
-      background-color: #252525; border: 1px solid #444;
+      background-color: var(--panel); border: 1px solid #444;
       border-radius: 6px; padding: 12px;
       overflow-x: auto;
     }
@@ -363,7 +439,6 @@
       display: block; width: 100%; margin-top: 20px; padding: 8px;
       background-color: #333333; border: 1px solid #555; color: #ffffff;
       cursor: pointer; border-radius: 4px; text-align: center;
-      transition: background-color 0.2s, color 0.2s;
       box-sizing: border-box;
     }
     .hideTrayBtn:hover { background-color: #444; border-color: #777; }
@@ -523,10 +598,9 @@
     #apiTraceFilter summary {
       padding: 8px 12px !important;
       cursor: pointer;
-      color: #00CCCC;
+      color: var(--accent-1);
       font-weight: 600;
       outline: none;
-      transition: background-color 0.2s ease;
       /* Default background is now transparent */
     }
 
@@ -569,7 +643,7 @@
 
     #diagramStatus {
       position: absolute; top: 50%; left: 50%;
-      transform: translate(-50%, -50%); color: #00CCCC;
+      transform: translate(-50%, -50%); color: var(--accent-1);
       font-size: 16px; text-align: center; display: none; z-index: 5;
     }
 
@@ -661,12 +735,11 @@
         font-size: 13px;
         font-weight: 600;
         cursor: pointer;
-        transition: background-color 0.2s, color 0.2s;
     }
 
     .control-btn:hover {
         background-color: rgba(0, 204, 204, 0.2);
-        color: #00CCCC;
+        color: var(--accent-1);
     }
 
     .control-btn-group .control-btn:first-child {
@@ -691,14 +764,14 @@
     .toggle-switch .slider {
         position: relative; width: 34px; height: 18px;
         background-color: #555; border-radius: 17px;
-        transition: background-color 0.3s;
+        transition: background-color 0.1s ease-in-out;
         cursor: pointer;
     }
     .toggle-switch .slider:before {
         content: ""; position: absolute;
         height: 12px; width: 12px; left: 3px; bottom: 3px;
         background-color: white; border-radius: 50%;
-        transition: transform 0.3s;
+        transition: transform 0.1s ease-in-out;
     }
     .toggle-switch input:checked + .slider { background-color:var(--accent-1); }
     .toggle-switch input:checked + .slider:before { transform: translateX(16px); }
@@ -751,28 +824,14 @@
     </div>
 
     <div class="left-tray-scrollable-content">
-      <!-- Metadata -->
-      <div class="info-card">
-          <h4>Metadata</h4>
-          <div class="details-list">
-              <div class="detail-item">
-                <span class="detail-label">Created</span>
-                <span class="detail-value"><!--CREATED_PLACEHOLDER--></span>
-              </div>
-              <div class="detail-item">
-                <span class="detail-label">Backend</span>
-                <span class="detail-value"><!--BACKEND_PLACEHOLDER--></span>
-              </div>
-              <div class="detail-item">
-                <span class="detail-label">Version</span>
-                <span class="detail-value"><!--XREFER_VERSION_PLACEHOLDER--></span>
-              </div>
-          </div>
-      </div>
       <!-- File Details -->
-      <div class="info-card">
+      <div class="info-card accordion-item">
+          <input type="checkbox" name="left-tray-accordion" id="acc-file-details" class="accordion-toggle">
+          <label for="acc-file-details" class="accordion-header">
           <h4>File Details</h4>
-          <!-- CORRECTED HTML STRUCTURE -->
+          </label>
+          <div class="accordion-content">
+              <div class="accordion-content-inner">
           <div class="details-list">
               <div class="detail-item">
                 <span class="detail-label">sha256</span>
@@ -785,12 +844,16 @@
               <div class="detail-item">
                 <span class="detail-label">File Type</span>
                 <span class="detail-value"><!--TYPE_PLACEHOLDER--></span>
+                      </div>
+                  </div>
               </div>
           </div>
       </div>
 
       <!-- Anatomical Summary / Report -->
-      <div class="info-card">
+      <div class="info-card accordion-item">
+          <input type="checkbox" name="left-tray-accordion" id="acc-summary" class="accordion-toggle" checked>
+          <label for="acc-summary" class="accordion-header">
           <div class="summary-header">
               <h4 id="summaryTitle">Anatomical Summary</h4>
               <div class="toggle-control">
@@ -798,16 +861,51 @@
                   <button id="reportBtn" class="toggle-btn">Report</button>
               </div>
           </div>
+          </label>
+          <div class="accordion-content">
+              <div class="accordion-content-inner">
           <div id="summaryContentContainer">
               <p id="anatomicalSummaryContent"><!--SUMMARY_PLACEHOLDER--></p>
               <p id="anatomicalReportContent" style="display: none; opacity: 0;"><!--REPORT_PLACEHOLDER--></p>
           </div>
           <p class="call-to-action">Select a node in the diagram for cluster-specific details.</p>
+              </div>
+          </div>
+      </div>
+      <!-- Metadata -->
+      <div class="info-card accordion-item">
+        <input type="checkbox" name="left-tray-accordion" id="acc-metadata" class="accordion-toggle" >
+        <label for="acc-metadata" class="accordion-header">
+          <h4>Analysis Metadata</h4>
+        </label>
+        <div class="accordion-content">
+          <div class="accordion-content-inner">
+            <div class="details-list">
+              <div class="detail-item">
+                <span class="detail-label">Created</span>
+                <span class="detail-value"><!--CREATED_PLACEHOLDER--></span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">Backend</span>
+                <span class="detail-value"><!--BACKEND_PLACEHOLDER--></span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">Version</span>
+                <span class="detail-value"><!--XREFER_VERSION_PLACEHOLDER--></span>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
-      <div class="left-tray-footer">
-          <div class="info-card">
+      <!-- About Card -->
+      <div class="info-card accordion-item">
+          <input type="checkbox" name="left-tray-accordion" id="acc-about" class="accordion-toggle" checked>
+          <label for="acc-about" class="accordion-header">
               <h4>About</h4>
+          </label>
+          <div class="accordion-content">
+              <div class="accordion-content-inner">
               <p class="disclaimer">
                   This report is not a direct analysis of the binary's code. The anatomical descriptions are interpreted from the binary's call flows, the relationships between functions, their associated artifacts, and the clusters they form. This analysis is intended for rapid, high-level triage, and its accuracy can vary based on the completeness of the extracted/available data.
               </p>
@@ -815,6 +913,7 @@
                   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16"><path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21-.15.46-.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
                   <span>XRefer Repository</span>
               </a>
+          </div>
           </div>
       </div>
     </div>
@@ -1536,7 +1635,7 @@
             $('#anatomicalSummaryContent').css('opacity', 1);
             adjustLeftTrayWidth();
           }, 10);
-        }, 400);
+        }, 40);
       });
 
       $('#reportBtn').on('click', function() {
@@ -1553,7 +1652,7 @@
             $('#anatomicalReportContent').css('opacity', 1);
             adjustLeftTrayWidth();
           }, 10);
-        }, 400);
+        }, 40);
       });
 
       adjustLeftTrayWidth();
