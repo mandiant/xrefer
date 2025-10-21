@@ -130,26 +130,27 @@ class LanguageBase(ABC):
             # 8. Fallback alias observed in some backends (e.g., Ghidra)
             "entry",
         ]
-
-        # ghidra_entry_symbol: Optional[Address] = None
+        # addr: score
+        scores = {}
+        kExists = 1
+        kExported = 2
+        kFavored = 3
 
         for point in entry_points:
-            address = self.backend.get_address_for_name(point)
-            if address is not None:
-                # if self.backend.name == "ghidra" and point == "entry":
-                #     ghidra_entry_symbol = address
-                #     continue
-                return address.value
+            if (address := self.backend.get_address_for_name(point)):
+                scores[address.value] = scores.get(address.value, 0) + kExists
+        for export in self.backend.get_exports():
+            name, addr = export
+            if addr.value in scores:
+                scores[addr.value] += kExported
+        if scores:
+            best_entry = max(scores.items(), key=lambda item: item[1])[0]
+            best_name = self.backend.get_name_at(Address(best_entry))
+            log(f"Resolved entry point at 0x{best_entry:x} ({best_name}), score {scores[best_entry]}")
+            log(f"scores: {scores}")
+            return best_entry
 
-        # if ghidra_entry_symbol is not None:
-        #     ghidra_user_entry = self._resolve_ghidra_user_entry(ghidra_entry_symbol)
-        #     if ghidra_user_entry is not None:
-        #         return ghidra_user_entry
-        #     return ghidra_entry_symbol.value
-
-        # Fallback: try to find main function through common patterns
-        fallback = self.fallback_cmain_detection(self.backend)
-        if fallback:
+        if fallback := self.fallback_cmain_detection(self.backend):
             return fallback
         exports = self.backend.get_exports()
         first_export = next(exports, None)

@@ -251,17 +251,12 @@ class RustStringParser:
                     ea_candidate = operand_address(inst, 1)
                     if ea_candidate is None:
                         continue
-                    try:
-                        ea_candidate_addr = Address(ea_candidate)
-                    except Exception:
-                        continue
+                    ea_candidate_addr = Address(ea_candidate)
 
                     operand = inst.operands[1]
                     if operand.value is not None:
-                        try:
-                            assert Address(int(operand.value)) == ea_candidate_addr
-                        except Exception:
-                            pass
+                        assert Address(int(operand.value)) == ea_candidate_addr
+
 
                     # Must be in rdata segment (matches legacy behavior)
                     if not rdata.contains(ea_candidate_addr):
@@ -663,6 +658,8 @@ class LangRust(LanguageBase):
 
                 # Search 10 instructions back for thread function pointer
                 caller_fn = self.backend.get_function_containing(_ref)
+                if caller_fn is None:
+                    continue # ghidra(sha256:a9d6789ecb90346d5cef1818b2d9d4ecbcb2f4458d739414e77607f1ac554ab6)
                 caller_bb = [bb for bb in caller_fn.basic_blocks if bb.contains(_ref)]
                 assert len(caller_bb) == 1, "There are cases where #bb>=2, but ignore for now. open issue when this is the case"
                 ins = list(self.backend.instructions(caller_bb[0].start, _ref))
@@ -753,6 +750,9 @@ class LangRust(LanguageBase):
 
     def _find_rust_main(self, main_addr: int) -> Optional[int]:
         """Find rust_main by analyzing main function."""
+        if self.backend.name == 'ghidra':
+            # not supported
+            return None
         # main_ea = main_addr
         if isinstance(main_addr, int):
             main_addr = Address(main_addr)
@@ -804,9 +804,7 @@ class LangRust(LanguageBase):
 
                     if candidate_fn is None:
                         candidate_fn = wrapper_fn
-
-                    if candidate_fn is None:
-                        continue
+                    assert candidate_fn is not None
 
                     if candidate_fn.type in (FunctionType.IMPORT, FunctionType.LIBRARY, FunctionType.THUNK, FunctionType.EXPORT, FunctionType.EXTERN):
                         continue
@@ -814,11 +812,12 @@ class LangRust(LanguageBase):
                     current_name = (candidate_fn.name or "").lower()
                     placeholder_prefixes = ("fun_", "sub_", "replace_me_", "lab_", "nullsub_", "entry", "se_func")
 
-                    if current_name and current_name != "rust_main" and not current_name.startswith(placeholder_prefixes):
-                        # Skip functions that already carry a meaningful name (e.g., fmt).
-                        continue
+                    should_rename = (
+                        current_name != "rust_main"
+                        and (not current_name or current_name.startswith(placeholder_prefixes))
+                    )
 
-                    if current_name != "rust_main":
+                    if should_rename:
                         try:
                             candidate_fn.name = "rust_main"
                         except Exception:
