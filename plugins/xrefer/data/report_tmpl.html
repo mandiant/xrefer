@@ -16,7 +16,6 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 
   <!-- <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Exo:wght@400;600;700&display=swap"> -->
-  <link href="https://fonts.googleapis.com/css2?family=Source+Code+Pro:wght@400;600;700&display=swap" rel="stylesheet">
   <style>
     :root {
       --bg: #303030;
@@ -653,6 +652,13 @@
       background-color: #4A4A3A; border: 2px solid var(--accent-1); border-radius: 8px;
       width: 220px; transition: all 0.3s; margin: 0 5px; padding: 4px; box-sizing: border-box;
     }
+    .orgchart .node.library-node {
+      background-color: oklch(0.47 0.22 28.96 / 0.10);
+      border-color: rgba(137, 207, 240, 0.6);
+      .content {
+        background-color: oklch(0.47 0.22 28.96 / 0.10);
+      }
+    }
     .orgchart .node .title {
       background-color: var(--bg-raised); color: var(--accent-2); font-weight: 600; font-size: 10pt;
       padding: 4px; height: 24px; display: flex; align-items: center; justify-content: center;
@@ -1240,6 +1246,12 @@
               oc.$chart.find('.node.selected').removeClass('selected'); $this.addClass('selected');
               var nodeData = originalNodeData.find(node => node.key == nodeId);
               if (nodeData) { updateRightTray(nodeData); }
+            });
+
+            nodeDataArray.forEach(node => {
+              if (node.isLibrary) {
+                oc.$chart.find('#' + node.key).addClass('library-node');
+              }
             });
 
             // <<< --- START OF NEWLY MOVED CODE --- >>>
