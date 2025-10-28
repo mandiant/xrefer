@@ -18,7 +18,7 @@
   <!-- <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Exo:wght@400;600;700&display=swap"> -->
   <style>
     :root {
-      --bg: #303030;
+      --bg:#2C2C2C;
       --bg-raised: #1F1F1F;
       --panel:#252525;
       --accent-1: #00CCCC;
@@ -210,7 +210,7 @@
     .detail-item {
         display: flex;
         align-items: center;
-        background-color: #2C2C2C;
+        background-color: var(--bg);
         padding: 4px 8px;
         border-radius: 4px;
         transition: background-color 0.2s ease-in-out;
@@ -360,7 +360,7 @@
       left: 430px;
       right: 400px;
       bottom: 0;
-      background-color: #2C2C2C;
+      background-color: var(--bg);
       display: flex;
       justify-content: center;
       align-items: center;
@@ -460,7 +460,7 @@
 
     /* --- ARTIFACTS & API TRACE STYLES --- */
     .description-card {
-        background-color: #2C2C2C;
+        background-color: var(--bg);
         border: 1px solid #444;
         border-radius: 4px;
         padding: 10px;
@@ -665,12 +665,12 @@
       transition: all 0.3s; border-radius: 4px;
     }
     .orgchart .node .content {
-      box-sizing: border-box; background-color: #2C2C2C; color: var(--accent-1); border: 0;
+      box-sizing: border-box; background-color: var(--bg); color: var(--accent-1); border: 0;
       margin-top: 4px; padding: 8px; font-size: 11pt; font-weight: normal; height: auto;
       white-space: normal; word-break: break-word; transition: all 0.3s; border-radius: 4px;
     }
     .orgchart .node#0 { width: auto; min-width: 220px; background-color: transparent; }
-    .orgchart .node#0 .title { height: auto; padding: 12px; font-size: 12pt; background-color: #2C2C2C; color: var(--accent-1); }
+    .orgchart .node#0 .title { height: auto; padding: 12px; font-size: 12pt; background-color: var(--bg); color: var(--accent-1); }
     .orgchart .node#0 .content { display: none; }
     .orgchart .node:hover { border-color: var(--accent-2); }
     .orgchart .node:hover .title, .orgchart .node.selected .title { background-color: var(--accent-2); color: var(--bg-raised); cursor: pointer; }
@@ -681,12 +681,12 @@
     .orgchart .node .edge.topEdge, .orgchart .node .edge.leftEdge, .orgchart .node .edge.rightEdge { display: none; }
     .orgchart .node .edge.bottomEdge {
       display: block; width: 20px; height: 20px; font-size: 16px; font-weight: bold; color: var(--accent-1);
-      border: 1px solid var(--accent-1); background-color: #2C2C2C; border-radius: 50%; box-shadow: 0 0 8px rgba(0, 204, 204, 0.7);
+      border: 1px solid var(--accent-1); background-color: var(--bg); border-radius: 50%; box-shadow: 0 0 8px rgba(0, 204, 204, 0.7);
       cursor: pointer; position: absolute; bottom: -11px; left: 50%; transform: translateX(-50%);
       cursor:pointer; transition: transform .15s, background-color .15s, color .15s; z-index:5;
     }
     .orgchart .node .edge.bottomEdge:hover {
-      background-color: var(--accent-1); color: #2c2c2c; box-shadow: 0 0 12px var(--accent-1); transform: translateX(-50%) scale(1.1);
+      background-color: var(--accent-1); color: var(--bg); box-shadow: 0 0 12px var(--accent-1); transform: translateX(-50%) scale(1.1);
     }
     .orgchart .node .edge.bottomEdge::before {
       content: "-"; position: absolute; top: 50%; left: 50%; transform: translate(-62%, -50%); line-height: 1;
