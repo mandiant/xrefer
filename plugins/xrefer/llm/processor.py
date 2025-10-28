@@ -77,10 +77,14 @@ class LLMProcessor:
 
         self.lm = dspy.LM(**lm_kwargs)
         dspy.settings.configure(lm=self.lm)
-        import mlflow
-
-        mlflow.set_experiment("XRefer")
-        mlflow.dspy.autolog()
+        try:
+            assert False
+            import mlflow
+            mlflow.set_tracking_uri('http://127.0.0.1:5000')
+            mlflow.set_experiment("XRefer")
+            mlflow.dspy.autolog()
+        except:
+            pass
 
         # Initialize DSPy modules
         self._dspy_modules = {
