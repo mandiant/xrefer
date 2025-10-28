@@ -66,21 +66,6 @@ class LLMProcessor:
 
         self.lm = dspy.LM(**lm_kwargs)
         dspy.settings.configure(lm=self.lm)
-        try:
-            assert False
-            import mlflow
-            mlflow.set_tracking_uri('http://127.0.0.1:5000')
-            mlflow.set_experiment("XRefer")
-            mlflow.dspy.autolog()
-        except:
-            pass
-
-        # Initialize DSPy modules
-        self._dspy_modules = {
-            PromptType.CATEGORIZER: CategorizerModule(),
-            PromptType.ARTIFACT_ANALYZER: ArtifactAnalyzerModule(),
-            PromptType.CLUSTER_ANALYZER: ClusterAnalyzerModule()
-        }
 
     def validate_api_key(self) -> bool:
         """Validate API key with a test call."""
