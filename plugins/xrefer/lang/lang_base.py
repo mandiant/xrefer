@@ -103,7 +103,6 @@ class LanguageBase(ABC):
             "main.main",
             # 7. rust, if we are lucky
             "main::main",
-            "_ZN4main4main17hac82363469e1a7a2E",
             # 1. Main variants (standard CLI entry points; underscores often used by older toolchains)
             "main",
             "_main",
@@ -143,6 +142,12 @@ class LanguageBase(ABC):
             name, addr = export
             if addr.value in scores:
                 scores[addr.value] += kExported
+        for value in scores:
+            try:
+                name = self.backend.get_function_at(Address(value)).name # Ghidra can have a symbol, while failing to identify a function boundary -> None.name caused AttributeError.
+                scores[value] += kExists
+            except AttributeError:
+                continue
         if scores:
             best_entry = max(scores.items(), key=lambda item: item[1])[0]
             best_name = self.backend.get_name_at(Address(best_entry))
