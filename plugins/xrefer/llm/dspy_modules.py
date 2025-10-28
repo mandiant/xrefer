@@ -359,7 +359,6 @@ class ClusterAnalyzerSignature(dspy.Signature):
     # - How clusters build upon each other's functionality
     # - Common malware patterns and techniques
     # """
-    # template_prompt: str = dspy.InputField(description="Full template instructions combined with cluster data")
     cluster_data: str = dspy.InputField(description="Raw cluster hierarchy with functions and artifacts (for reference)")
     analysis: ClusterAnalysisResponse = dspy.OutputField(description="Complete cluster analysis with per-cluster metadata and binary-level insights")
 
@@ -380,10 +379,8 @@ class ClusterAnalyzerModule(dspy.Module):
         Returns:
             ClusterAnalysisResponse Pydantic model
         """
-        # template_prompt = CLUSTER_ANALYZER_PROMPT
 
         result = self.predictor(
-            # template_prompt=template_prompt,
             cluster_data=cluster_data,
         )
         return result.analysis
