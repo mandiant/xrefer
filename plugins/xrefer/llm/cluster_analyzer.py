@@ -15,9 +15,9 @@
 from typing import TYPE_CHECKING, Any, Dict, List
 
 from xrefer.core.helpers import log
-from xrefer.llm.base import ModelConfig
+from xrefer.llm.base import ModelConfig, PromptType
 from xrefer.llm.processor import LLMProcessor
-from xrefer.llm.prompts import PromptType
+
 
 if TYPE_CHECKING:
     from xrefer.core.clusters import FunctionalCluster
@@ -47,7 +47,7 @@ class ClusterAnalyzer:
         cls._processor = None  # Force new processor with new config
 
     @classmethod
-    def analyze_clusters(cls, clusters: List["FunctionalCluster"], xrefer_obj) -> Dict[str, Any]:
+    def analyze_clusters(cls, clusters: List["FunctionalCluster"], xrefer_obj, batch_size = 30) -> Dict[str, Any]:
         """
         Analyze cluster hierarchy using LLM.
 
@@ -61,7 +61,6 @@ class ClusterAnalyzer:
         processor = cls._get_processor()
 
         cluster_count = 0
-        batch_size = 30
 
         def count_clusters(cluster):
             nonlocal cluster_count
@@ -81,19 +80,7 @@ class ClusterAnalyzer:
             cluster_data = cls.format_cluster_data(clusters, xrefer_obj, start_idx=0, end_idx=cluster_count)
             log(f"Generated cluster data ({len(cluster_data)} chars)")
             results = processor.process_items(cluster_data, prompt_type=PromptType.CLUSTER_ANALYZER, ignore_token_limit=True)
-            results = dict(results)  # Ensure it's a dict
-            # TODO: Drop dict across the codebase for better developer experience.
-
-            if not isinstance(results, dict):
-                log("[-] Error: LLM returned invalid format")
-                return {}
-
-            required_keys = {"clusters", "binary_description", "binary_category"}
-            if not all(key in results for key in required_keys):
-                log("[-] Error: Missing required keys in LLM response")
-                log(f"Found keys: {list(results.keys())}")
-                return {}
-
+            results = dict(results)  # Ensure it's a dict # TODO: Drop dict across the codebase for better developer experience.
             return results
         else:
             # Multiple batch scenario
@@ -201,8 +188,7 @@ class ClusterAnalyzer:
                                 formatted.append(f"{indent}  {label}: {', '.join(data)}")
                 # Add call flow
                 if cluster.edges:
-                    formatted.append('')
-                    formatted.append(f"{indent}Call Flow:")
+                    formatted.append(f"\n{indent}Call Flow:")
                     for source, target in cluster.edges:
                         source_label = f"{source:#x}"
                         if target in cluster.cluster_refs:
@@ -213,15 +199,13 @@ class ClusterAnalyzer:
 
                 # Add cluster references
                 if cluster.cluster_refs:
-                    formatted.append("")
-                    formatted.append(f"{indent}References to Other Clusters:")
+                    formatted.append(f"\n{indent}References to Other Clusters:")
                     for node, cluster_id in cluster.cluster_refs.items():
                         formatted.append(f"{indent}- Node {node:#x} replaced by Cluster {cluster_id}")
 
                 # Recursively add subclusters
                 if cluster.subclusters:
-                    formatted.append("")
-                    formatted.append(f"{indent}Subclusters:")
+                    formatted.append(f"\n{indent}Subclusters:")
                     for subcluster in cluster.subclusters:
                         formatted.append("\n" + format_cluster(subcluster, depth + 1))
 

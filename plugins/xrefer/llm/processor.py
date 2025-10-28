@@ -17,16 +17,14 @@ DSPy-native LLM processor with Pydantic validation.
 """
 
 import re
-import traceback
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import dspy
 
 from xrefer.core.helpers import check_internet_connectivity, log
-from xrefer.llm.base import ModelConfig
-from xrefer.llm.dspy_modules import ArtifactAnalyzerModule, CategorizerModule, ClusterAnalyzerModule
-from xrefer.llm.prompts import ArtifactAnalyzerPrompt, CategorizerPrompt, ClusterAnalyzerPrompt, PromptType
+from xrefer.llm.base import ModelConfig, PromptType
+from xrefer.llm.dspy_modules import ArtifactAnalysisResponse, ArtifactAnalyzerModule, CategorizationResponse, CategorizerModule, ClusterAnalysisResponse, ClusterAnalyzerModule
 
 
 @dataclass
@@ -44,11 +42,6 @@ class LLMProcessor:
     def __init__(self):
         self.lm: Optional[dspy.LM] = None
         self.config: Optional[ModelConfig] = None
-        self._prompts = {
-            PromptType.CATEGORIZER: CategorizerPrompt(),
-            PromptType.ARTIFACT_ANALYZER: ArtifactAnalyzerPrompt(),
-            PromptType.CLUSTER_ANALYZER: ClusterAnalyzerPrompt()
-        }
 
     def set_model_config(self, config: ModelConfig) -> None:
         """
@@ -69,10 +62,7 @@ class LLMProcessor:
         # For Gemini models, use full 65k output token capacity and force JSON mode
         # Gemini's structured output doesn't support dynamic object properties
         if 'gemini' in config.model_id.lower():
-            lm_kwargs.update({
-                "max_tokens": 65536,
-                # "response_format": {"type": "json_object"}  # Force JSON mode instead of structured output
-            })
+            lm_kwargs.update({"max_tokens": 65536})
 
         self.lm = dspy.LM(**lm_kwargs)
         dspy.settings.configure(lm=self.lm)
@@ -96,7 +86,6 @@ class LLMProcessor:
         """Validate API key with a test call."""
         if not self.lm:
             raise ValueError("Model not configured")
-
         try:
             self.lm("Say 'valid'")
             return True
@@ -116,35 +105,25 @@ class LLMProcessor:
 
         return artifacts
 
-    def _process_single(self, items: List[Any], prompt_type: PromptType, config: ProcessConfig) -> Dict[str, Any]:
+    def _process_single(self, items: List[Any], prompt_type: PromptType, config: Optional[ProcessConfig]=None) -> Dict[str, Any]:
         """
         Process items using DSPy module.
-
-        DSPy/LiteLLM handles:
-        - Rate limiting (automatic backoff on 429)
-        - Retries (exponential backoff)
-        - Token limits (validates before sending)
         """
-        prompt_template = self._prompts[prompt_type]
-        dspy_module = self._dspy_modules[prompt_type]
-
         if prompt_type == PromptType.CATEGORIZER:
-            response = CategorizerModule()(items=items, categories=config.categories, item_type=config.item_type)
-            return prompt_template.parse_response(response, categories=config.categories)
-
+            response: "CategorizationResponse" = CategorizerModule()(items=items, categories=config.categories, item_type=config.item_type)
+            return response.model_dump()
         elif prompt_type == PromptType.ARTIFACT_ANALYZER:
             artifacts = self._create_artifacts_dict(items)
-            response = ArtifactAnalyzerModule()(artifacts=artifacts)
-            return prompt_template.parse_response(response)
-
+            response: "ArtifactAnalysisResponse" = ArtifactAnalyzerModule()(artifacts=artifacts)
+            return set(response.interesting_indexes)
         elif prompt_type == PromptType.CLUSTER_ANALYZER:
-            response = ClusterAnalyzerModule()(cluster_data=items[0])
-            return prompt_template.parse_response(response)
+            response: "ClusterAnalysisResponse" = ClusterAnalyzerModule()(cluster_data=items[0])
+            return response.model_dump()
         else:
             raise ValueError(f"Unsupported prompt type: {prompt_type}")
 
 
-    def _process_parallel(self, items: List[Any], prompt_type: PromptType, batch_size: int, config: ProcessConfig) -> Dict[int, Any]:
+    def _process_parallel(self, items: List[Any], prompt_type: PromptType, batch_size: int, config: Optional[ProcessConfig]=None) -> Dict[int, Any]:
         """Process items in parallel batches."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -227,32 +206,30 @@ class LLMProcessor:
         if not check_internet_connectivity():
             raise ConnectionError("No internet connectivity")
 
-        # Create type-safe config
-        config = ProcessConfig(categories=categories or [], item_type=type)
-
         if prompt_type == PromptType.CLUSTER_ANALYZER:
+            return self._process_single([items], prompt_type)
+        config = None
+        if prompt_type == PromptType.CATEGORIZER:
+            config = ProcessConfig(categories=categories or [], item_type=type)
             return self._process_single([items], prompt_type, config)
 
         if ignore_token_limit:
             log(f"[+] Processing all {len(items)} items in single batch")
-            try:
-                results = self._process_single(items, prompt_type, config)
-                # Convert to str keys for backward compatibility
-                if prompt_type == PromptType.CATEGORIZER:
-                    return {str(k): v for k, v in results.items()}
-                return results
-            except Exception as e:
-                log(f"[x] Single batch processing failed: {e}")
-                return {}
+            results = self._process_single(items, prompt_type, config)
+            # Convert to str keys for backward compatibility
+            if prompt_type == PromptType.CATEGORIZER:
+                return {str(k): v for k, v in results.items()}
+            return results
 
         # Batched processing
         # Simple heuristic: 50 items per batch (conservative, no token counting needed)
         batch_size = 50
         log(f"[+] Processing {len(items)} items in batches of {batch_size}")
+        # NOTE: In a perfect world, dspy would support **native** batch processing (/v1/batches)
+        # https://docs.litellm.ai/docs/batches
+        # unfortunately, we live in a imperfect world...
 
-        # Use parallel for most providers (DSPy handles rate limiting)
-        # Only use sequential if explicitly needed
-        use_parallel = True  # Let DSPy handle rate limiting for all providers
+        use_parallel = True
 
         if use_parallel:
             results = self._process_parallel(items, prompt_type, batch_size, config)

@@ -13,21 +13,12 @@
 # limitations under the License.
 
 from dataclasses import dataclass
-from enum import Enum, auto
-from typing import Optional
+from enum import Enum
 
 class PromptType(Enum):
-    """
-    Enumeration of supported prompt types.
-
-    Defines the different types of prompts that can be processed
-    by the LLM system.
-    """
-
-    CATEGORIZATION = auto()
-    ARTIFACT_FILTER = auto()
-    CLUSTER_ANALYZER = auto()
-
+    CATEGORIZER = "categorizer"
+    ARTIFACT_ANALYZER = "artifact_analyzer"
+    CLUSTER_ANALYZER = "cluster_analyzer"
 
 @dataclass
 class ModelConfig:
@@ -37,10 +28,8 @@ class ModelConfig:
     Attributes:
         model_id (str): Fully qualified model identifier (e.g. "openai/gpt-4o-mini")
         api_key (str): API key for authentication
-        organization (Optional[str]): Organization ID for OpenAI
         ignore_token_limit (bool): Whether to ignore token limits
     """
     model_id: str
     api_key: str
-    organization: Optional[str] = None
     ignore_token_limit: bool = False
