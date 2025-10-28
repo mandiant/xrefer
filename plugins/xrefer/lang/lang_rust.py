@@ -392,9 +392,12 @@ class LangRust(LanguageBase):
 
         log("Rust compiled binary detected")
         self.user_xrefs = self.get_user_xrefs() or []
+        log(f"Found {len(self.user_xrefs)} Rust thread xrefs")
         self._process_strings()
+        log(f"Extracted {len(self.strings or {})} Rust strings")
         # self._ensure_rust_entry_alias()
         self.ep_annotation = self._get_ep_annotation()
+        log("Rust analysis complete")
 
     def _process_strings(self) -> None:
         """

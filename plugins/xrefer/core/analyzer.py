@@ -45,13 +45,9 @@ if TYPE_CHECKING:
 try:
     from idaapi import hide_wait_box, show_wait_box
 except ImportError:
-
     def show_wait_box(message: str, *args, **kwargs) -> None:
-        """Fallback for show_wait_box if idaapi is not available."""
-        print(f"Wait: {message}", *args, **kwargs)
-
+        print(f"Wait: {message.removeprefix('HIDECANCEL\n')}", *args, **kwargs)
     def hide_wait_box(*args, **kwargs) -> None:
-        """Fallback for hide_wait_box if idaapi is not available."""
         print("Wait box hidden", *args, **kwargs)
 
 

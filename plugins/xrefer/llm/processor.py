@@ -49,7 +49,6 @@ class LLMProcessor:
             PromptType.ARTIFACT_ANALYZER: ArtifactAnalyzerPrompt(),
             PromptType.CLUSTER_ANALYZER: ClusterAnalyzerPrompt()
         }
-        self._dspy_modules = {}
 
     def set_model_config(self, config: ModelConfig) -> None:
         """
@@ -130,17 +129,16 @@ class LLMProcessor:
         dspy_module = self._dspy_modules[prompt_type]
 
         if prompt_type == PromptType.CATEGORIZER:
-            response = dspy_module(items=items, categories=config.categories, item_type=config.item_type)
+            response = CategorizerModule()(items=items, categories=config.categories, item_type=config.item_type)
             return prompt_template.parse_response(response, categories=config.categories)
 
         elif prompt_type == PromptType.ARTIFACT_ANALYZER:
             artifacts = self._create_artifacts_dict(items)
-            response = dspy_module(artifacts=artifacts)
+            response = ArtifactAnalyzerModule()(artifacts=artifacts)
             return prompt_template.parse_response(response)
 
         elif prompt_type == PromptType.CLUSTER_ANALYZER:
-            response = dspy_module(cluster_data=items[0])
-            # return response
+            response = ClusterAnalyzerModule()(cluster_data=items[0])
             return prompt_template.parse_response(response)
         else:
             raise ValueError(f"Unsupported prompt type: {prompt_type}")
@@ -224,26 +222,17 @@ class LLMProcessor:
         """
         if not self.lm:
             raise ValueError("Model not configured")
-
         if not items:
-            return {}
-
+            raise ValueError("No items to process")
         if not check_internet_connectivity():
             raise ConnectionError("No internet connectivity")
 
         # Create type-safe config
         config = ProcessConfig(categories=categories or [], item_type=type)
 
-        # Cluster analysis: always process all at once
         if prompt_type == PromptType.CLUSTER_ANALYZER:
-            try:
-                return self._process_single([items], prompt_type, config)
-            except Exception as e:
-                log(f"[x] Cluster analysis failed: {e}")
-                traceback.print_exc()
-                return {}
+            return self._process_single([items], prompt_type, config)
 
-        # Single batch mode
         if ignore_token_limit:
             log(f"[+] Processing all {len(items)} items in single batch")
             try:
