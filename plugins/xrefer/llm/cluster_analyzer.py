@@ -21,6 +21,7 @@ from xrefer.llm.prompts import PromptType
 
 if TYPE_CHECKING:
     from xrefer.core.clusters import FunctionalCluster
+    from xrefer.core.analyzer import XRefer
 
 
 class ClusterAnalyzer:
@@ -60,7 +61,7 @@ class ClusterAnalyzer:
         processor = cls._get_processor()
 
         cluster_count = 0
-        batch_size = 10
+        batch_size = 30
 
         def count_clusters(cluster):
             nonlocal cluster_count
@@ -112,11 +113,6 @@ class ClusterAnalyzer:
                 results = processor.process_items(cluster_data, prompt_type=PromptType.CLUSTER_ANALYZER, ignore_token_limit=True)
                 results = dict(results)  # Ensure it's a dict
 
-
-                # if not isinstance(results, dict) or not results:
-                #     log("[-] Error: LLM returned erroneous response, please re-start cluster analysis")
-                #     break
-
                 # Extract clusters from partial result
                 partial_clusters = results.get("clusters", {})
                 # Merge cluster analyses
@@ -148,7 +144,7 @@ class ClusterAnalyzer:
 
 
     @staticmethod
-    def format_cluster_data(clusters: List["FunctionalCluster"], xrefer_obj, start_idx: int = 0, end_idx: int = None) -> str:
+    def format_cluster_data(clusters: List["FunctionalCluster"], xrefer_obj: 'XRefer', start_idx: int = 0, end_idx: int = None) -> str:
         """
         Format cluster hierarchy for LLM analysis.
 
@@ -177,73 +173,59 @@ class ClusterAnalyzer:
 
             def format_cluster(cluster: "FunctionalCluster", depth: int = 0) -> str:
                 indent = "  " * depth
-
-                formatted = f"{indent}Cluster {cluster.id}:\n"
-                formatted += f"{indent}Type: {'Primary' if cluster.parent_cluster_id is None else f'Subcluster of {cluster.parent_cluster_id}'}\n"
-                formatted += f"{indent}Root: 0x{cluster.root_node:x}\n\n"
-
-                # Add nodes and their artifacts
-                formatted += f"{indent}Functions:\n"
+                formatted = [f"{indent}Cluster {cluster.id}:",
+                             f"{indent}Type: {'Primary' if cluster.parent_cluster_id is None else f'Subcluster of {cluster.parent_cluster_id}'}",
+                             f"{indent}Root: {cluster.root_node:#x}",
+                             '',
+                             f"{indent}Functions:"]
                 for node in cluster.nodes:
                     if node not in cluster.cluster_refs:
-                        formatted += f"{indent}- Function 0x{node:x}:\n"
-                        try:
-                            # Get APIs
-                            apis = xrefer_obj.get_apis_for_function(node)
-                            if apis:
-                                formatted += f"{indent}  APIs:\n"
-                                for api in apis:
-                                    formatted += f"{indent}    {api}\n"
-                                    # Get top 10 calls
-                                    calls = xrefer_obj.get_direct_calls(api, node, colorized=False)
-                                    if calls:
-                                        sorted_calls = sorted(calls, key=lambda x: x[1], reverse=True)[:10]
-                                        for call_str, count in sorted_calls:
-                                            formatted += f"{indent}      Call: {call_str} (called {count} times)\n"
+                        formatted.append(f"{indent}- Function {node:#x}:")
+                        # Get APIs
+                        if apis := xrefer_obj.get_apis_for_function(node):
+                            formatted.append(f"{indent}  APIs:")
+                            for api in apis:
+                                formatted.append(f"{indent}    API: {api}")
+                                # Get top 10 calls
+                                if calls := xrefer_obj.get_direct_calls(api, node, colorized=False):
+                                    sorted_calls = sorted(calls, key=lambda x: x[1], reverse=True)[:10]
+                                    for call_str, count in sorted_calls:
+                                        formatted.append(f"{indent}      Call: {call_str} (called {count} times)")
 
-                            # Get libraries
-                            libs = xrefer_obj.get_libs_for_function(node)
-                            if libs:
-                                formatted += f"{indent}  Libraries: {', '.join(libs)}\n"
-
-                            # Get strings
-                            strings = xrefer_obj.get_strings_for_function(node)
-                            if strings:
-                                formatted += f"{indent}  Strings: {', '.join(strings)}\n"
-
-                            # Get CAPA matches
-                            capa = xrefer_obj.get_capa_for_function(node)
-                            if capa:
-                                formatted += f"{indent}  CAPA: {', '.join(capa)}\n"
-
-                        except Exception as e:
-                            log(f"[-] Error getting artifacts for function 0x{node:x}: {str(e)}")
-                            continue
-
+                        for label, data in [
+                            ('Libraries', xrefer_obj.get_libs_for_function(node)),
+                            ('Strings', xrefer_obj.get_strings_for_function(node)),
+                            ('CAPA', xrefer_obj.get_capa_for_function(node)),
+                        ]:
+                            if data:
+                                formatted.append(f"{indent}  {label}: {', '.join(data)}")
                 # Add call flow
                 if cluster.edges:
-                    formatted += f"\n{indent}Call Flow:\n"
+                    formatted.append('')
+                    formatted.append(f"{indent}Call Flow:")
                     for source, target in cluster.edges:
-                        source_label = f"0x{source:x}"
+                        source_label = f"{source:#x}"
                         if target in cluster.cluster_refs:
                             target_label = f"Cluster {cluster.cluster_refs[target]}"
                         else:
-                            target_label = f"0x{target:x}"
-                        formatted += f"{indent}- {source_label} -> {target_label}\n"
+                            target_label = f"{target:#x}"
+                        formatted.append(f"{indent}- {source_label} -> {target_label}")
 
                 # Add cluster references
                 if cluster.cluster_refs:
-                    formatted += f"\n{indent}References to Other Clusters:\n"
+                    formatted.append("")
+                    formatted.append(f"{indent}References to Other Clusters:")
                     for node, cluster_id in cluster.cluster_refs.items():
-                        formatted += f"{indent}- Node 0x{node:x} replaced by Cluster {cluster_id}\n"
+                        formatted.append(f"{indent}- Node {node:#x} replaced by Cluster {cluster_id}")
 
                 # Recursively add subclusters
                 if cluster.subclusters:
-                    formatted += f"\n{indent}Subclusters:\n"
+                    formatted.append("")
+                    formatted.append(f"{indent}Subclusters:")
                     for subcluster in cluster.subclusters:
-                        formatted += "\n" + format_cluster(subcluster, depth + 1)
+                        formatted.append("\n" + format_cluster(subcluster, depth + 1))
 
-                return formatted
+                return "\n".join(formatted)
 
             # Start building the formatted output
             # If we are analyzing a subset, add a note clarifying that the LLM must analyze all clusters
@@ -261,10 +243,7 @@ class ClusterAnalyzer:
                     f"for the entire binary. All clusters are provided below for context. "
                 )
 
-            formatted = '''Binary Analysis Clusters
-=====================
-
-Structure is organized hierarchically with primary clusters and their subclusters.
+            formatted = '''Structure is organized hierarchically with primary clusters and their subclusters.
 Each cluster shows its functions, artifacts (APIs, strings, etc.), and call flows.
 References to subclusters indicate where complex behavior is encapsulated.
 

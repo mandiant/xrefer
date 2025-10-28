@@ -37,7 +37,6 @@ def get_language_object() -> LanguageBase:
     from .lang_default import LangDefault
 
     lang_classes = language_classes()
-    log(f"Found language modules: {', '.join(cls.__name__ for cls in lang_classes)}")
 
     for lang_class in lang_classes:
         lang_obj = lang_class()
@@ -47,5 +46,6 @@ def get_language_object() -> LanguageBase:
             return lang_obj
 
     default_lang = LangDefault()
+    log("No language match found, using LangDefault.")
     default_lang.initialize()
     return default_lang

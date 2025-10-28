@@ -15,6 +15,7 @@
 """DSPy modules with structured inputs and Pydantic outputs."""
 
 from typing import Any, Dict, List
+import enum
 
 import dspy
 from pydantic import BaseModel, Field
@@ -156,13 +157,50 @@ class ClusterAnalysis(BaseModel):
             }
         }
 
+class BinaryCategory(enum.Enum):
+    DOWNLOADER = "Downloader"
+    POINT_OF_SALE = "Point-of-Sale Malware"
+    RANSOMWARE = "Ransomware"
+    UPLOADER = "Uploader"
+    REMOTE_CONTROL_AND_ADMINISTRATION_TOOL = "Remote Control and Administration Tool"
+    BACKDOOR = "Backdoor"
+    FILE_INFECTOR = "File Infector"
+    DROPPER = "Dropper"
+    INSTALLER = "Installer"
+    LAUNCHER = "Launcher"
+    CONTROLLER = "Controller"
+    BUILDER = "Builder"
+    DISRUPTION_TOOL = "Disruption Tool"
+    CREDENTIAL_STEALER = "Credential Stealer"
+    PRIVILEGE_ESCALATION_TOOL = "Privilege Escalation Tool"
+    REMOTE_EXPLOITATION_TOOL = "Remote Exploitation Tool"
+    EXPLOIT = "Exploit"
+    TUNNELER = "Tunneler"
+    LATERAL_MOVEMENT_TOOL = "Lateral Movement Tool"
+    RECONNAISSANCE_TOOL = "Reconnaissance Tool"
+    DATA_MINER = "Data Miner"
+    KEYLOGGER = "Keylogger"
+    SNIFFER = "Sniffer"
+    ARCHIVER = "Archiver"
+    SCREEN_CAPTURE_TOOL = "Screen Capture Tool"
+    DECODER = "Decoder"
+    DECRYPTER = "Decrypter"
+    BOOTKIT = "Bootkit"
+    FRAMEWORK = "Framework"
+    ROOTKIT = "Rootkit"
+    CRYPTOCURRENCY_MINER = "Cryptocurrency Miner"
+    SPAMBOT = "Spambot"
+    ATM_MALWARE = "ATM Malware"
+    UTILITY = "Utility"
+    UNDETERMINED = "Undetermined"
+
 
 class ClusterAnalysisResponse(BaseModel):
     """Response model for cluster analysis."""
 
     clusters: Dict[str, ClusterAnalysis] = Field(..., description="Mapping of cluster_id to ClusterAnalysis")
     binary_description: str = Field(..., description="Overall description of the binary's functionality")
-    binary_category: str = Field(..., description="Classification of the binary (e.g., malware, utility, service)")
+    binary_category: BinaryCategory = Field(..., description="Classification of the binary")
     binary_report: str = Field(default="", description="Detailed analysis report for the binary")
 
     class Config:

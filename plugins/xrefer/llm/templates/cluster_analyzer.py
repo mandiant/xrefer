@@ -12,13 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-CLUSTER_ANALYZER_PROMPT = """You are a malware analyst examining a binary.
+_prompt = """You are a malware analyst examining a binary.
 You will analyze clusters of functions containing suspicious behaviors.
 Each cluster shows functions, their artifacts (APIs and their corresponding calls (if available), strings, library names, CAPA static analysis tool results etc.), and call relationships.
 
 Here's the cluster data formatted hierarchically:
 
+<cluster_data>
 {cluster_data}
+</cluster_data>
 
 Please analyze each cluster (starting with the deepest subclusters and working up) and provide:
 1. Label: A short name indicating the cluster's functionality.
@@ -40,7 +42,8 @@ After analyzing all clusters, please provide:
     d. This report should NOT mention APIs or syscalls by name while describing functionality.
     e. This report should include any relevant and unique IoCs (Indicatos of Compromise) such as file paths, URLs, domains, IPs/ports, commands executed, registry keys/values and COM objects.
     f. This report should explicitly include any persistence mechanisms, if discovered.
-
+"""
+_category = """
 Downloader:	A program whose sole purpose is to download (and perhaps launch) a file from a specified address, and which does not provide any additional functionality or support any other interactive commands.
 Point-of-Sale Malware:	A program whose primary purpose is to steal financial transaction data at the point of sale (POS). Examples include malware that extracts credit card data from the memory of a POS system and malware inserted into a POS web application that steals payment information.
 Ransomware:	A program whose primary purpose is to perform some malicious action (such as encrypting data), with the goal of extracting payment from the victim in order to avoid or undo the malicious action.
@@ -82,6 +85,14 @@ ATM Malware:	A program whose primary purpose is to manipulate ATM machines to il
 Utility:	A program that has a specialized purpose that does not fit into any other defined category (such as keylogger, sniffer, or credential theft). Examples may include tools designed to overwrite or clear log files, encode or decode files, etc.
 Undetermined: A program which doesn't fall in any of the above categories, OR appears to be benign.
 
+Focus on:
+- Technical behaviors revealed by artifacts
+- How functions work together within each cluster
+- How clusters build upon each other's functionality
+- Common malware patterns and techniques
+"""
+
+formatting = """
 Format your response as a JSON object that includes the cluster analyses (with cluster IDs as keys) under a "clusters" parent key, along with the binary description and category. Is it IMPORTANT that when referring to other clusters in relationships, use formatting like cluster.id.xxxx such that if you're refering to cluster 1 it would read as cluster.id.0001. Following is an example of the expected JSON object:
 {
     "clusters": {
@@ -105,13 +116,9 @@ Format your response as a JSON object that includes the cluster analyses (with c
     "binary_report": "The malware is a Backdoor that can connect to it's C2 (command and control) server over a custom protocol. The malware has the capability to..."
 }
 
-Focus on:
-- Technical behaviors revealed by artifacts
-- How functions work together within each cluster
-- How clusters build upon each other's functionality
-- Common malware patterns and techniques
-
 Ensure descriptions are clear and precise. Use technical terms where appropriate. Return only the JSON and do not include any explanatory text. Do NOT wrap the JSON in code fences or formatting.
 All the required keys should be present in all respective JSON values. Even if a cluster does not have relevant data for a particular field, you should still include the key. For example: "relationships": "None".
 Do not use backslashes, string quotes or new lines in the binary_report.
 """
+
+CLUSTER_ANALYZER_PROMPT = _prompt+_category # + formatting
