@@ -1618,7 +1618,8 @@ class XRefer:
                 api_key = self.settings["api_key"]
                 if not model_id:
                     raise ValueError("LLM model identifier is empty")
-
+                if not api_key:
+                    raise ValueError("API key for LLM model is empty")
                 log(f"Setting LLM model to: {model_id}")
                 config_1 = ModelConfig(model_id=model_id, api_key=api_key, ignore_token_limit=True)
                 config_2 = ModelConfig(model_id=model_id, api_key=api_key)
@@ -2689,10 +2690,8 @@ class XRefer:
 
             if len(path_buffer[0]) < max_limit:
                 for cross_ref in self._backend.get_xrefs_to(target):
-                    fn = self._backend.get_function_at(cross_ref.source)
-                    if fn:
+                    if fn := self._backend.get_function_at(cross_ref.source):
                         refs.add(fn.start)
-
             if refs:
                 current_path = path_buffer.pop(0)
                 for ref in refs:

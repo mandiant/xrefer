@@ -435,7 +435,7 @@ class BNBackend(BackEnd):
 
     def _add_user_xref_impl(self, source: Address, target: Address) -> None:
         """Add user-defined cross reference in Binary Ninja."""
-        self._bv.add_user_code_ref(int(source), int(target))
+        self._bv.add_user_data_ref(int(source), int(target))
 
     def _set_comment_impl(self, address: Address, comment: str) -> None:
         """Set comment at address in Binary Ninja."""
