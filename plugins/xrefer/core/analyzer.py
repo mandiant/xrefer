@@ -26,12 +26,11 @@ from dataclasses import dataclass
 from operator import itemgetter
 from pathlib import Path
 from time import time
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union, Literal
 
 from xrefer.backend import Address, BackEnd, FunctionType, XrefType, get_current_backend
 from xrefer.core.clusters import ClusterManager, FunctionalCluster
 from xrefer.core.helpers import enrich_string_data_core, find_cluster_analysis, log, log_elapsed_time
-# from xrefer.core.report_sanitizer import escape_plain_text, json_dumps_for_script, render_markdown_to_safe_html
 from xrefer.core.settings import XReferSettingsManager
 from xrefer.lang import get_language_object
 from xrefer.llm import ArtifactAnalyzer, ClusterAnalyzer, CATEGORIES, Categorizer
@@ -75,6 +74,9 @@ class Reference:
         """Get human-readable type name."""
         return self.entity_type.name.lower()
 
+AnalysisMode = Literal["light", "full"]
+""" Light: Disables Language Model categorization & xref propagation.  """
+
 
 class XRefer:
     """
@@ -89,7 +91,15 @@ class XRefer:
     INDIRECT_XREFS = 1
     COMBINED_XREFS = 2
 
-    def __init__(self, ep: Optional[int] = None, backend: Optional[BackEnd] = None, auto_analyze: bool = True) -> None:
+    def __init__(
+        self,
+        ep: Optional[int] = None,
+        backend: Optional[BackEnd] = None,
+        auto_analyze: bool = True,
+        *,
+        mode: Optional[AnalysisMode] = 'full',
+        html_report: bool = False,
+    ) -> None:
         """
         Initialize the XRefer object.
 
@@ -185,8 +195,9 @@ class XRefer:
             self._processed_orphan_thunks: Set[int] = set()
             self.clusters = None
             self.cluster_analysis = None
+            self.mode = mode
+            self.html_report = html_report
             self.configure_llm_and_lookups()
-
             # Run analysis if requested
             if auto_analyze:
                 self.load_analysis()
@@ -448,7 +459,7 @@ class XRefer:
             if not artifacts:
                 log("No artifacts found for analysis")
                 return
-
+            log(f"Total artifacts for analysis: {len(artifacts)}")
             # Get interesting artifacts
             interesting_artifacts = ArtifactAnalyzer.find_interesting_artifacts(artifacts)
 
@@ -1234,7 +1245,8 @@ class XRefer:
             log("Running cluster analysis...")
             self.analyze_clusters(entities_to_cluster)
             self.save_analysis()
-            self.generate_html_report()
+            if self.html_report:
+                self.generate_html_report()
 
         except Exception as e:
             import traceback
@@ -1484,7 +1496,7 @@ class XRefer:
             return
         else:
             try:
-                self.run_full_analysis()
+                self.analyze(self.mode)
                 self.save_analysis()
             except Exception as err:
                 log(f"[-] Error running full analysis: {err}")
@@ -2459,7 +2471,7 @@ class XRefer:
                 sorted_xref_table[key]["color_tags"] = self.get_color_tags(func_ea, key)
                 sorted_xref_table[key]["heading"] = []
 
-    def run_full_analysis(self) -> None:
+    def analyze(self, mode: Optional[AnalysisMode] = None) -> None:
         """
         Perform the full analysis, loading configuration and categories, sifting references, and generating context tables.
         """
@@ -2525,13 +2537,15 @@ class XRefer:
             #     IPython.embed()
                 assert self.current_analysis_ep != 0x401000
                 # assert self.current_analysis_ep == 0x4694E0
-
+            if self._backend.name == 'ghidra':
+                print(f"{self.lang.entry_point = :#x}")
+                assert self._backend.get_function_at(self.lang.entry_point).name != '__security_init_cookie'
         if self.current_analysis_ep is None:
             raise AssertionError("Analysis entry point could not be determined")
-
         self._backend.set_function_comment(Address(self.lang.entry_point), self.lang.ep_annotation)
         self.process_exclusions()
-        self.run_secondary_analysis()
+        if mode == "full":
+            self.run_secondary_analysis()
 
     def run_secondary_analysis(self) -> None:
         """
