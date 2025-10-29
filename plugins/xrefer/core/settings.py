@@ -14,7 +14,7 @@
 
 import json
 import os
-from time import time
+import time
 from typing import Any, Dict, List
 
 from xrefer.core.helpers import log
@@ -121,6 +121,7 @@ class XReferSettingsManager:
         default_settings = self.get_default_settings()
 
         if not os.path.exists(self.settings_file):
+            log("Settings file not found, using defaults")
             return default_settings
 
         try:
