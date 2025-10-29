@@ -312,7 +312,7 @@ class XRefer:
 
         log("Sifting library references...")
 
-        if self.llm_lookups:
+        if self.llm_lookups and self.mode == 'full':
             lib_list = [x[1] for x in self.lang.lib_refs]
             _, self.categories["lib_categories"] = Categorizer.categorize(lib_list, self.categories["libs"], type="lib")
 
@@ -665,7 +665,7 @@ class XRefer:
         """
         log("Getting imports...")
         entries = list(self._backend.get_imports())
-        if self.llm_lookups:
+        if self.llm_lookups and self.mode == 'full':
             api_list = [x[1] for x in entries]
             _, self.categories["api_categories"] = Categorizer.categorize(api_list, self.categories["apis"])
         for ea, name, module_name in entries:
@@ -2544,8 +2544,7 @@ class XRefer:
             raise AssertionError("Analysis entry point could not be determined")
         self._backend.set_function_comment(Address(self.lang.entry_point), self.lang.ep_annotation)
         self.process_exclusions()
-        if mode == "full":
-            self.run_secondary_analysis()
+        self.run_secondary_analysis()
 
     def run_secondary_analysis(self) -> None:
         """
@@ -2560,16 +2559,16 @@ class XRefer:
             raise AssertionError(f"No call paths were generated for entry point 0x{self.current_analysis_ep:x}")
         if not any(ep_paths.values()):
             raise AssertionError(f"Call path generation produced only empty targets for entry point 0x{self.current_analysis_ep:x}")
-        iters = 1
-
-        while self.propagate_xref_nodes(iters):
-            iters += 1
-
-        self.fix_thunk_xrefs()
+        if self.mode=='full':
+            iters = 1
+            while self.propagate_xref_nodes(iters):
+                iters += 1
+            self.fix_thunk_xrefs()
         self.populate_xref_addrs()
         self.cluster_all_non_excluded()
-        log("Populating function context tables...")
-        self._populate_function_context_tables()
+        if self.mode == 'full':
+            log("Populating function context tables...")
+            self._populate_function_context_tables()
 
     def run_standalone_secondary_analysis(self) -> None:
         """
