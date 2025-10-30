@@ -28,6 +28,7 @@ from pathlib import Path
 from time import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union, Literal
 
+import xrefer
 from xrefer.backend import Address, BackEnd, FunctionType, XrefType, get_current_backend
 from xrefer.core.clusters import ClusterManager, FunctionalCluster
 from xrefer.core.helpers import enrich_string_data_core, find_cluster_analysis, log, log_elapsed_time
@@ -1171,7 +1172,10 @@ class XRefer:
                 populate_library_flag(self.clusters)
             except Exception as e:
                 import traceback
-                traceback.print_exc()
+                # Don't print traceback for known rate limit errors
+                import litellm
+                if not isinstance(e, litellm.exceptions.RateLimitError):
+                    traceback.print_exc()
                 log(f"[-] Error analyzing clusters: {str(e)}")
                 # Restore previous state
                 self.clusters = current_clusters
@@ -3123,9 +3127,10 @@ class XRefer:
         file_type = "TODO: wowtype"
         report_data = {
             "metadata": {
-                "date": datetime.datetime.now(datetime.UTC).isoformat(timespec='hours'),
-                "xrefer-version": 'TODO: define it in __init__.py',
+                "date": datetime.datetime.now(datetime.UTC).isoformat(timespec='minutes'),
+                "xrefer-version": xrefer.__version__,
                 "backend": self._backend.name,
+                "llm": self.settings["llm_model_id"],
             },
             "file_details": {
                 "sha256": self._backend.binary_hash,
@@ -3157,6 +3162,7 @@ class XRefer:
             ('<!--CREATED_PLACEHOLDER-->', report_data["metadata"]["date"]),
             ('<!--BACKEND_PLACEHOLDER-->', report_data["metadata"]["backend"]),
             ('<!--XREFER_VERSION_PLACEHOLDER-->', report_data["metadata"]["xrefer-version"]),
+            ('<!--XREFER_MODEL_PLACEHOLDER-->', report_data["metadata"]["llm"]),
             ('<!--SHA256_PLACEHOLDER-->', report_data["file_details"]["sha256"]),
             # ('<!--MD5_PLACEHOLDER-->', report_data["file_details"]["md5"]),
             ('<!--SIZE_PLACEHOLDER-->', report_data["file_details"]["file_size"]),

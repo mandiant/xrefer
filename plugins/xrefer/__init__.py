@@ -57,6 +57,7 @@ import asciinet
 # -- 3) Restore original Popen so everything behaves normally
 subprocess.Popen = _original_popen
 
+__version__ = "2.2025-10-30"
 
 from . import core, lang, llm, loaders
-__all__ = ["core", "lang", "llm", "loaders"]
+__all__ = ["core", "lang", "llm", "loaders", "__version__"]
