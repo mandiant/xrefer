@@ -346,6 +346,11 @@ def cli():
             elif args.backend == "binaryninja":
                 _analyze_binaryninja(file_path, args.auto_analysis, args.save, args.force)
             elif args.backend == "ghidra":
+                print("""
+[🐉] Here be dragons (literally).
+>   The Ghidra backend may contain more bugs than other backends like IDA Pro or Binary Ninja.
+>   If you encounter issues, please report them at https://github.com/mandiant/xrefer/issues
+""", file=sys.stderr)
                 _analyze_ghidra(file_path, args.auto_analysis, args.save, args.force)
             else:
                 print(f"[x] Error: Unknown backend: {args.backend}")
