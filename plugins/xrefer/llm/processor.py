@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import dspy
+import litellm
+import httpx
 
 from xrefer.core.helpers import check_internet_connectivity, log
 from xrefer.llm.base import ModelConfig, PromptType
@@ -94,18 +96,36 @@ class LLMProcessor:
         """
         Process items using DSPy module.
         """
-        if prompt_type == PromptType.CATEGORIZER:
-            response: "CategorizationResponse" = CategorizerModule()(items=items, categories=config.categories, item_type=config.item_type)
-            return response.model_dump()
-        elif prompt_type == PromptType.ARTIFACT_ANALYZER:
-            artifacts = self._create_artifacts_dict(items)
-            response: "ArtifactAnalysisResponse" = ArtifactAnalyzerModule()(artifacts=artifacts)
-            return set(response.interesting_indexes)
-        elif prompt_type == PromptType.CLUSTER_ANALYZER:
-            response: "ClusterAnalysisResponse" = ClusterAnalyzerModule()(cluster_data=items[0])
-            return response.model_dump()
-        else:
-            raise ValueError(f"Unsupported prompt type: {prompt_type}")
+        try:
+            if prompt_type == PromptType.CATEGORIZER:
+                response: "CategorizationResponse" = CategorizerModule()(items=items, categories=config.categories, item_type=config.item_type)
+                return response.model_dump()
+            elif prompt_type == PromptType.ARTIFACT_ANALYZER:
+                artifacts = self._create_artifacts_dict(items)
+                response: "ArtifactAnalysisResponse" = ArtifactAnalyzerModule()(artifacts=artifacts)
+                return set(response.interesting_indexes)
+            elif prompt_type == PromptType.CLUSTER_ANALYZER:
+                response: "ClusterAnalysisResponse" = ClusterAnalyzerModule()(cluster_data=items[0])
+                return response.model_dump()
+            else:
+                raise ValueError(f"Unsupported prompt type: {prompt_type}")
+        except (litellm.exceptions.RateLimitError, httpx.HTTPStatusError) as e:
+            log(f'''{e.__class__.__name__} was raised during LLM processing:
+
+You can:
+  a. Wait a few minutes and retry
+  b. Check API quota/billing
+  c. Use a cheaper model
+''')
+            # Return empty result instead of raising - let caller handle gracefully
+            if prompt_type == PromptType.CATEGORIZER:
+                return {}
+            elif prompt_type == PromptType.ARTIFACT_ANALYZER:
+                return set()
+            elif prompt_type == PromptType.CLUSTER_ANALYZER:
+                return {}
+            else:
+                raise ValueError(f"Unsupported prompt type: {prompt_type}")
 
 
     def _process_parallel(self, items: List[Any], prompt_type: PromptType, batch_size: int, config: Optional[ProcessConfig]=None) -> Dict[int, Any]:
