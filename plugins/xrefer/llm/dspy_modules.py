@@ -322,6 +322,7 @@ class ClusterAnalyzerSignature(dspy.Signature):
     7. Generate a comprehensive analysis report
 
     This report should be objective, should not assume anything, only state facts and use technical terminology where applicable.
+    Is it IMPORTANT that when referring to other clusters in relationships, use formatting like cluster.id.xxxx such that if you're refering to cluster 1 it would read as cluster.id.0001.
 
     Focus on:
     - Technical behaviors revealed by artifacts
