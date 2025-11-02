@@ -13,9 +13,6 @@ from typing import Any, Literal
 
 BACKEND = Literal["ida", "binaryninja", "ghidra"]
 
-sys.stdout.reconfigure(line_buffering=True)
-sys.stderr.reconfigure(line_buffering=True)
-
 _prjdir = os.environ.get("PROJECT") or os.path.join(os.path.dirname(__file__), "..", "plugins")
 if _prjdir is None:
     raise OSError("set PROJECT to the plugins dir")
@@ -64,7 +61,6 @@ def cleanup_previous_analysis(file_path: Path, backend: str, force: bool = False
         candidates = [
             file_path.parent / f"{file_path.name}_ghidra",
             file_path.parent / f"{file_path.stem}.rep",
-            file_path.with_suffix(".xrefer"),
         ]
 
         for path in candidates:
@@ -87,7 +83,7 @@ def cleanup_previous_analysis(file_path: Path, backend: str, force: bool = False
                 print(f"[+] Removing previous artifact: {artifact_file}")
                 artifact_file.unlink()
         # Remove .xrefer output files
-        xrefer_file = file_path.with_suffix(".xrefer")
+        xrefer_file = Path(f"{file_path}.xrefer")
         if xrefer_file.exists():
             print(f"[+] Removing previous XRefer output: {xrefer_file}")
             xrefer_file.unlink()
@@ -137,7 +133,7 @@ def setup_ghidra_backend():
     return {"pyghidra": pyghidra, "backend_module": backend_module, "BackendManager": BackendManager}
 
 
-def analysis_ida(filepath: Path, modules: dict[str, Any] | None = None):
+def analysis_ida(filepath: Path, modules: dict[str, Any] | None = None, *, xrefer_kwargs: dict[str, Any] | None = None):
     """Run XRefer analysis with IDA Pro backend."""
     import idapro
 
@@ -145,8 +141,12 @@ def analysis_ida(filepath: Path, modules: dict[str, Any] | None = None):
 
     from xrefer.core.analyzer import XRefer
 
+    params: dict[str, Any] = {"auto_analyze": True}
+    if xrefer_kwargs:
+        params.update(xrefer_kwargs)
+
     try:
-        xrefer_obj = XRefer(auto_analyze=True)  # This automatically calls load_analysis()
+        xrefer_obj = XRefer(**params)  # This automatically calls load_analysis() when auto_analyze=True
         print(f"[+] XRefer analysis complete, results saved to {xrefer_obj.settings['paths']['analysis']}")
         return xrefer_obj
     except Exception as e:
@@ -155,7 +155,7 @@ def analysis_ida(filepath: Path, modules: dict[str, Any] | None = None):
         raise
 
 
-def analysis_binaryninja(bv, modules: dict[str, Any] | None = None):
+def analysis_binaryninja(bv, modules: dict[str, Any] | None = None, *, xrefer_kwargs: dict[str, Any] | None = None):
     """Run XRefer analysis with Binary Ninja backend."""
     backend_module = modules["backend_module"]
     BackendManager = modules["BackendManager"]
@@ -166,12 +166,16 @@ def analysis_binaryninja(bv, modules: dict[str, Any] | None = None):
     backend_module.Backend = backend
     from xrefer.core.analyzer import XRefer
 
-    xrefer_obj = XRefer(auto_analyze=True)  # This automatically calls load_analysis()
+    params: dict[str, Any] = {"auto_analyze": True}
+    if xrefer_kwargs:
+        params.update(xrefer_kwargs)
+
+    xrefer_obj = XRefer(**params)  # This automatically calls load_analysis() when auto_analyze=True
     print(f"[+] XRefer analysis complete, results saved to {xrefer_obj.settings['paths']['analysis']}")
     return xrefer_obj
 
 
-def analysis_ghidra(_filepath: Path, modules: dict[str, Any] | None = None):
+def analysis_ghidra(_filepath: Path, modules: dict[str, Any] | None = None, *, xrefer_kwargs: dict[str, Any] | None = None):
     """Run XRefer analysis with Ghidra backend."""
     backend_module = modules["backend_module"]
     BackendManager = modules["BackendManager"]
@@ -183,12 +187,23 @@ def analysis_ghidra(_filepath: Path, modules: dict[str, Any] | None = None):
     backend_module.Backend = backend
     from xrefer.core.analyzer import XRefer
 
-    xrefer_obj = XRefer(auto_analyze=True)  # This automatically calls load_analysis()
+    params: dict[str, Any] = {"auto_analyze": True}
+    if xrefer_kwargs:
+        params.update(xrefer_kwargs)
+
+    xrefer_obj = XRefer(**params)  # This automatically calls load_analysis() when auto_analyze=True
     print(f"[+] XRefer analysis complete, results saved to {xrefer_obj.settings['paths']['analysis']}")
     return xrefer_obj
 
 
-def _analyze_ida(file_path: Path, auto_analysis: bool = True, save_changes: bool = False, force_analysis: bool = False) -> None:
+def _analyze_ida(
+    file_path: Path,
+    auto_analysis: bool = True,
+    save_changes: bool = False,
+    force_analysis: bool = False,
+    *,
+    xrefer_kwargs: dict[str, Any] | None = None,
+) -> None:
     """Analyze with IDA Pro backend."""
     modules = setup_ida_backend()
     idapro = modules["idapro"]
@@ -203,12 +218,19 @@ def _analyze_ida(file_path: Path, auto_analysis: bool = True, save_changes: bool
 
     try:
         idapro.open_database(str(file_path), run_auto_analysis=auto_analysis)
-        analysis_ida(file_path, modules=modules)
+        analysis_ida(file_path, modules=modules, xrefer_kwargs=xrefer_kwargs)
     finally:
         idapro.close_database(save=save_changes)
 
 
-def _analyze_binaryninja(file_path: Path, auto_analysis: bool = True, save_changes: bool = False, force_analysis: bool = False) -> None:
+def _analyze_binaryninja(
+    file_path: Path,
+    auto_analysis: bool = True,
+    save_changes: bool = False,
+    force_analysis: bool = False,
+    *,
+    xrefer_kwargs: dict[str, Any] | None = None,
+) -> None:
     """Analyze with Binary Ninja backend."""
     import binaryninja
 
@@ -238,7 +260,7 @@ def _analyze_binaryninja(file_path: Path, auto_analysis: bool = True, save_chang
         if save_changes:
             bv.save_auto_snapshot()
 
-        analysis_binaryninja(bv, modules=modules)
+        analysis_binaryninja(bv, modules=modules, xrefer_kwargs=xrefer_kwargs)
 
         if save_changes:
             bv.save_auto_snapshot()
@@ -259,7 +281,14 @@ def configure_fast_ghidra_analysis(program, auto_analysis: bool) -> None:
     configure_fast_analysis(program)
 
 
-def _analyze_ghidra(file_path: Path, auto_analysis: bool = True, save_changes: bool = False, force_analysis: bool = False) -> None:
+def _analyze_ghidra(
+    file_path: Path,
+    auto_analysis: bool = True,
+    save_changes: bool = False,
+    force_analysis: bool = False,
+    *,
+    xrefer_kwargs: dict[str, Any] | None = None,
+) -> None:
     """Analyze with Ghidra backend."""
     modules = setup_ghidra_backend()
     pyghidra = modules["pyghidra"]
@@ -282,7 +311,7 @@ def _analyze_ghidra(file_path: Path, auto_analysis: bool = True, save_changes: b
 
         ghidra_backend = backend_manager.create_backend("ghidra", program=flat_api.getCurrentProgram())
         backend_manager.set_active_backend(ghidra_backend)
-        analysis_ghidra(file_path, modules=modules)
+        analysis_ghidra(file_path, modules=modules, xrefer_kwargs=xrefer_kwargs)
         if save_changes:
             print("[+] Saving Ghidra project...")
             try:
@@ -306,6 +335,9 @@ def cli():
     parser.add_argument("--backend", choices=available_backends, required=True, help=f"Analysis backend to use (available: {', '.join(available_backends)})")
     parser.add_argument("--save", action="store_true", help="Save changes to database/project")
     parser.add_argument("--auto-analysis", action="store_true", help="Run auto analysis (default: False)")
+    parser.add_argument("--mode", choices=["light", "full"], default="full", help="Select analyzer mode (default: full)")
+    parser.add_argument("--no-html-report", dest="html_report", action="store_false", help="Disable HTML report generation")
+    parser.set_defaults(html_report=True)
     parser.add_argument("--force", action="store_true", help="Remove previous artifacts and re-analyze")
     parser.add_argument("-L", "--logfile", help="Output log file path")
 
@@ -333,25 +365,33 @@ def cli():
         sys.stdout = log_file_handle
         sys.stderr = log_file_handle
 
+    xrefer_kwargs = {
+        "auto_analyze": args.auto_analysis,
+        "mode": args.mode,
+        "html_report": args.html_report,
+    }
+
     try:
         print(f"[+] Starting XRefer analysis with {args.backend} backend")
         print(f"[+] File: {file_path}")
         print(f"[+] Auto-analysis: {args.auto_analysis}")
+        print(f"[+] Analyzer mode: {args.mode}")
+        print(f"[+] HTML report: {args.html_report}")
         print(f"[+] Save changes: {args.save}")
         print(f"[+] Force re-analysis: {args.force}")
 
         try:
             if args.backend == "ida":
-                _analyze_ida(file_path, args.auto_analysis, args.save, args.force)
+                _analyze_ida(file_path, args.auto_analysis, args.save, args.force, xrefer_kwargs=xrefer_kwargs)
             elif args.backend == "binaryninja":
-                _analyze_binaryninja(file_path, args.auto_analysis, args.save, args.force)
+                _analyze_binaryninja(file_path, args.auto_analysis, args.save, args.force, xrefer_kwargs=xrefer_kwargs)
             elif args.backend == "ghidra":
                 print("""
 [🐉] Here be dragons (literally).
 >   The Ghidra backend may contain more bugs than other backends like IDA Pro or Binary Ninja.
 >   If you encounter issues, please report them at https://github.com/mandiant/xrefer/issues
 """, file=sys.stderr)
-                _analyze_ghidra(file_path, args.auto_analysis, args.save, args.force)
+                _analyze_ghidra(file_path, args.auto_analysis, args.save, args.force, xrefer_kwargs=xrefer_kwargs)
             else:
                 print(f"[x] Error: Unknown backend: {args.backend}")
                 sys.exit(1)
