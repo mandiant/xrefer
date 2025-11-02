@@ -322,7 +322,16 @@ def _analyze_ghidra(
                 flat_api.saveProgram(program)
             except Exception as save_error:
                 print(f"[!] Save failed: {save_error}")
-                # Continue without failing the analysis
+
+def parse_entry_point(value: str) -> int:
+    """Parse entry point argument accepting decimal or hex strings."""
+    try:
+        ep = int(value, 0)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"Invalid entry point address: {value}") from exc
+    if ep < 0:
+        raise argparse.ArgumentTypeError("Entry point must be non-negative")
+    return ep
 
 
 def cli():
@@ -339,6 +348,7 @@ def cli():
     parser.add_argument("--no-html-report", dest="html_report", action="store_false", help="Disable HTML report generation")
     parser.set_defaults(html_report=True)
     parser.add_argument("--force", action="store_true", help="Remove previous artifacts and re-analyze")
+    parser.add_argument("--entry-point", type=parse_entry_point, help="Override entry point address (decimal or hex like 0x401000)")
     parser.add_argument("-L", "--logfile", help="Output log file path")
 
     args = parser.parse_args()
@@ -370,6 +380,8 @@ def cli():
         "mode": args.mode,
         "html_report": args.html_report,
     }
+    if args.entry_point is not None:
+        xrefer_kwargs["ep"] = args.entry_point
 
     try:
         print(f"[+] Starting XRefer analysis with {args.backend} backend")
@@ -379,6 +391,8 @@ def cli():
         print(f"[+] HTML report: {args.html_report}")
         print(f"[+] Save changes: {args.save}")
         print(f"[+] Force re-analysis: {args.force}")
+        if args.entry_point is not None:
+            print(f"[+] Entry point override: {args.entry_point:#x}")
 
         try:
             if args.backend == "ida":

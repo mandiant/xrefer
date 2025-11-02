@@ -99,7 +99,7 @@ class XRefer:
         auto_analyze: bool = True,
         *,
         mode: Optional[AnalysisMode] = 'full',
-        html_report: bool = False,
+        html_report: bool = True,
     ) -> None:
         """
         Initialize the XRefer object.
@@ -1501,6 +1501,19 @@ class XRefer:
             try:
                 self.analyze(self.mode)
                 self.save_analysis()
+            except AssertionError as err:
+                hide_wait_box()
+                message = str(err)
+                if "No call paths were generated for entry point" in message:
+                    ep_value = self.current_analysis_ep
+                    log(
+                        "\n"
+                        f"[!] XRefer stopped: no call paths could be generated for entry point {ep_value:#x}. \n"
+                        "[!] The entry point does not lead to any cross-references. \n"
+                        "[!] Please specify a different entry point and rerun the analysis. (CLI: `--entry-point <address>`)\n\n"
+                    )
+                else:
+                    log(f"[-] Analysis aborted: {message}")
             except Exception as err:
                 log(f"[-] Error running full analysis: {err}")
                 import traceback
