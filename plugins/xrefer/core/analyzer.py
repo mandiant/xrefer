@@ -578,7 +578,6 @@ class XRefer:
             for block in func.basic_blocks:
                 # Iterate over the instructions in the basic block
                 for addr in self._backend.instructions(block.start, block.end):
-                    # print(f"{idc.func_contains(addr, addr)}, create_xref_mapping, \t{addr = :#x}")
                     for ref in self._backend.get_xrefs_from(Address(addr)):
                         # Check if the reference points within the same function
                         if Address(ref.target) in func:
@@ -2535,15 +2534,6 @@ class XRefer:
         if not self.current_analysis_ep:
             self.current_analysis_ep = self.lang.entry_point
             assert self.current_analysis_ep is not None
-            if self._backend.binary_hash == 'c6b727d7cff517577db838db18ad17b46334d3c91c2e50893634e56cdc19e41f':
-            #     print(f"{self.lang = }")
-            #     import IPython
-            #     IPython.embed()
-                assert self.current_analysis_ep != 0x401000
-                # assert self.current_analysis_ep == 0x4694E0
-            if self._backend.name == 'ghidra':
-                print(f"{self.lang.entry_point = :#x}")
-                assert self._backend.get_function_at(self.lang.entry_point).name != '__security_init_cookie'
         if self.current_analysis_ep is None:
             raise AssertionError("Analysis entry point could not be determined")
         self._backend.set_function_comment(Address(self.lang.entry_point), self.lang.ep_annotation)
@@ -3122,8 +3112,6 @@ class XRefer:
             # Single root cluster, no need for the dummy node
             process_cluster(top_level_clusters[0])
 
-
-        # magic.from_buffer(self._backend.read_bytes(0, 2048))
         file_type = "TODO: wowtype"
         report_data = {
             "metadata": {

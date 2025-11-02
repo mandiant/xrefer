@@ -292,7 +292,7 @@ class RustStringParser:
                         s, len_s = filter_null_string(s, len_candidate)
                         if len_s == len_candidate:
                             strings[ea_candidate] = RustStringInfo(s, len_candidate, [ea_xref])
-                    except:
+                    except UnicodeDecodeError:
                         continue
         return strings
 

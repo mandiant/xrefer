@@ -442,12 +442,14 @@ class IDABackend(BackEnd):
                     op_kind = OperandType.MEMORY
                 else:
                     op_kind = OperandType.OTHER
-            except Exception:
+            except Exception as e:
+                from logging import getLogger
+                logger = getLogger(__name__)
+                logger.exception(f"Failed to parse operand at {ea:#x} operand {i}: {e}")
                 op_kind = OperandType.OTHER
                 op_value = None
 
             operands.append(Operand(type=op_kind, text=op_text, value=op_value))
-            # print(f"{Address(ea)}: {mnem}|\tOperand[{i}]: {operands[-1]}")
 
         ins = Instruction(
             address=Address(ea),

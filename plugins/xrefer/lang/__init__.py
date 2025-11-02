@@ -44,6 +44,8 @@ def get_language_object() -> LanguageBase:
             log(f"{lang_class.__name__} matches current binary, initializing...")
             lang_obj.initialize()
             return lang_obj
+        else:
+            print(f"{lang_class.__name__} does not match current binary.")
 
     default_lang = LangDefault()
     log("No language match found, using LangDefault.")
