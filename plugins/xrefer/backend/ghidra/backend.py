@@ -84,7 +84,6 @@ class GhidraFunction(Function):
     def type(self) -> FunctionType:
         """Get function classification."""
         if self._function_type is None:
-            # Check if it's a thunk
             if self._func.isThunk():
                 self._function_type = FunctionType.THUNK
             elif self._func.isExternal():
@@ -103,7 +102,6 @@ class GhidraFunction(Function):
 
     def contains(self, address: Address) -> bool:
         """Check if the address is within the function."""
-        # Use current program's address factory
         program = self._get_program()
         addr_factory = program.getAddressFactory()
         addr_value = address.value if isinstance(address, Address) else int(address)
@@ -113,7 +111,6 @@ class GhidraFunction(Function):
     @property
     def basic_blocks(self) -> Iterator[BasicBlock]:
         """Iterate over basic blocks in the function."""
-        # Get basic blocks using program model
         from ghidra.program.model.block import BasicBlockModel
 
         program = self._get_program()
@@ -230,14 +227,11 @@ class GhidraSection(Section):
         if section_name.startswith("EXTERNAL"):
             return SectionType.EXTERN
 
-        # Check permissions to determine section type
         if self._section.isExecute():
             return SectionType.CODE
         elif not self._section.isInitialized() and self._section.isRead():
-            # Uninitialized readable section is typically BSS
             return SectionType.BSS
         elif self._section.isWrite() or self._section.isRead():
-            # Writable or readable sections are data
             return SectionType.DATA
         else:
             return SectionType.UNKNOWN
@@ -269,8 +263,6 @@ class GhidraBackend(BackEnd):
         super().__init__()
         self._program = program
         self._addr_factory = None
-
-        # Set up address factory if program is provided
         if program is not None:
             self._addr_factory = program.getAddressFactory()
 
@@ -284,7 +276,6 @@ class GhidraBackend(BackEnd):
     def __getstate__(self):
         """Custom pickle state - exclude unpicklable program object."""
         state = self.__dict__.copy()
-        # Remove the unpicklable program reference
         state["_program"] = None
         state["_addr_factory"] = None
         return state
@@ -402,7 +393,6 @@ class GhidraBackend(BackEnd):
             enc = StringEncType.UTF16 if ("unicode" in dt_name or "wide" in dt_name) else StringEncType.ASCII
             yield GhidraString(addr, value, len(value), enc)
 
-        # 2) Scan readable, initialized, non-executable blocks for raw ASCII/UTF-16LE strings
         memory = program.getMemory()
         for block in memory.getBlocks():
             if not block.isInitialized() or block.isVolatile() or block.isExecute() or not block.isRead():
@@ -583,14 +573,6 @@ class GhidraBackend(BackEnd):
         # Use program's address factory instead of gl.resolve()
         addr_value = address.value if isinstance(address, Address) else int(address)
         ghidra_addr = self._addr_factory.getAddress(f"{addr_value:x}")
-
-        # # Use FlatProgramAPI for simplified byte reading
-        # from ghidra.program.flatapi import FlatProgramAPI
-
-        # flat_api = FlatProgramAPI(program)
-        # buffer = flat_api.getBytes(ghidra_addr, size)
-        # return bytes(buffer)
-        """ v2 """
         # Guard against invalid or non-readable regions and partial reads.
         try:
             memory = program.getMemory()
@@ -672,7 +654,7 @@ class GhidraBackend(BackEnd):
 
         # Detect executable format for module normalization
         try:
-            fmt = (program.getExecutableFormat() or "").upper()
+            fmt = self.filetype()
             is_elf = "ELF" in fmt
         except Exception:
             is_elf = False
@@ -694,7 +676,6 @@ class GhidraBackend(BackEnd):
             if not function_name:
                 function_name = symbol.getName() or ""
 
-            # Collect references and classify
             refs = symbol.getReferences()
             if not refs:
                 continue
