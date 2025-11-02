@@ -235,10 +235,8 @@ class RustStringParser:
 
             # Process instructions for string references
             for bb in fn.basic_blocks:
-                for ins in self.backend.instructions(bb.start, bb.end):  # TODO: This is ugly. Fix design in backend/.
-                    curr_addr = ins.value
-
-                    inst = self.backend.disassemble(curr_addr)
+                for ins in self.backend.instructions(bb.start, bb.end):
+                    inst = self.backend.disassemble(ins)
                     # Only care about lea/mov instructions
                     if inst.mnemonic not in ("lea", "mov"):
                         continue
@@ -262,21 +260,19 @@ class RustStringParser:
                     if not rdata.contains(ea_candidate_addr):
                         continue
 
-                    ea_xref = curr_addr
                     # Handle case where string already exists
                     if ea_candidate in strings:
-                        self._update_existing_string(strings[ea_candidate], ea_xref)
+                        self._update_existing_string(strings[ea_candidate], ins.value)
                         continue
 
                     # Look ahead for length in next instructions
                     len_found = False
                     len_candidate = 0
-
+                    curr_addr = ins.value
                     for cnt, j in enumerate(self.backend.instructions(curr_addr + 1, curr_addr + 20)):  # TODO: Look at next 20 bytes max (design issue. 2 ins -> 20 bytes heuristics. )
                         # just 2 ins
                         if cnt >= 2:
                             break
-                        j = j.value
                         inst2 = self.backend.disassemble(j)
                         if inst2.mnemonic == "mov":
                             if inst2.operands and inst2.operands[1].value and inst2.operands[1].type == OperandType.IMMEDIATE:
@@ -291,7 +287,7 @@ class RustStringParser:
                         s = self.backend.read_bytes(ea_candidate_addr, len_candidate).decode("utf-8")
                         s, len_s = filter_null_string(s, len_candidate)
                         if len_s == len_candidate:
-                            strings[ea_candidate] = RustStringInfo(s, len_candidate, [ea_xref])
+                            strings[ea_candidate] = RustStringInfo(s, len_candidate, [ins.value])
                     except UnicodeDecodeError:
                         continue
         return strings
