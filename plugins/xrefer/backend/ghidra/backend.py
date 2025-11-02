@@ -311,7 +311,6 @@ class GhidraBackend(BackEnd):
         """Get the actual program object."""
         self._ensure_program_loaded()
 
-        # Set up address factory if not already done
         if self._addr_factory is None and self._program:
             self._addr_factory = self._program.getAddressFactory()
 
@@ -797,6 +796,11 @@ class GhidraBackend(BackEnd):
         if sha256:
             return sha256
         raise BackendError("Failed to compute binary hash")
+
+    def filetype(self) -> str:
+        program = self._get_actual_program()
+        format_name = program.getExecutableFormat()
+        return format_name
 
     def _get_disassembly_impl(self, address: Address) -> Instruction:
         """Disassemble a single instruction at `address` using Ghidra APIs."""

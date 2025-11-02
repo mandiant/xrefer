@@ -263,6 +263,10 @@ class IDABackend(BackEnd):
     def _binary_hash_impl(self):
         return ida_nalt.retrieve_input_file_sha256().hex()
 
+    def filetype(self) -> str:
+        """Get the file type of the binary (e.g., 'PE', 'ELF', 'Mach-O')."""
+        return idaapi.get_file_type_name()
+
     #
     # Function Analysis
     #

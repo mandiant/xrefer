@@ -423,6 +423,9 @@ class BNBackend(BackEnd):
         all_bytes = raw_bv.read(0, raw_bv.length)
         return hashlib.sha256(all_bytes).hexdigest()
 
+    def filetype(self) -> str:
+        return self._bv.view_type
+
     def instructions(self, start: Address, end: Address) -> Iterator[Address]:
         """Iterate over instruction addresses in the specified range."""
         current = int(start)

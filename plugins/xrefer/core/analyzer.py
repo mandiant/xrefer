@@ -3125,25 +3125,32 @@ class XRefer:
             # Single root cluster, no need for the dummy node
             process_cluster(top_level_clusters[0])
 
-        file_type = "TODO: wowtype"
+        def pretty_filesize(size_in_bytes: int) -> str:
+            """Convert file size in bytes to a human-readable string."""
+            for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+                if size_in_bytes < 1024:
+                    return f"{size_in_bytes:.2f} {unit}"
+                size_in_bytes /= 1024
+            return f"{size_in_bytes:.2f} PB"
+
         report_data = {
             "metadata": {
-                "date": datetime.datetime.now(datetime.UTC).isoformat(timespec='minutes'),
+                "date": datetime.datetime.now(datetime.UTC).isoformat(timespec="minutes"),
                 "xrefer-version": xrefer.__version__,
                 "backend": self._backend.name,
                 "llm": self.settings["llm_model_id"],
             },
             "file_details": {
                 "sha256": self._backend.binary_hash,
-                "file_size": f"{self._backend.size / (1024 * 1024):.2f} MB",
-                "file_type": html.escape(file_type),# file_type_name
+                "file_size": pretty_filesize(self._backend.size),
+                "file_type": html.escape(self._backend.filetype()),
             },
             "anatomical_summary": {
-                "category": self.cluster_analysis.get('binary_category', 'Uncategorized'),
-                "summary": html.escape(self.cluster_analysis.get('binary_description', 'No summary available.')),
-                "report": html.escape(self.cluster_analysis.get('binary_report', 'No report available.'))
+                "category": self.cluster_analysis.get("binary_category", "Uncategorized"),
+                "summary": html.escape(self.cluster_analysis.get("binary_description", "No summary available.")),
+                "report": html.escape(self.cluster_analysis.get("binary_report", "No report available.")),
             },
-            "node_data_array": node_data_array
+            "node_data_array": node_data_array,
         }
         return report_data
 

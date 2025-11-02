@@ -433,6 +433,11 @@ class BackEnd(ABC):
         """
         raise NotImplementedError("Backend must implement _binary_hash_impl() to provide binary hash.")
 
+    @abstractmethod
+    def filetype(self) -> str:
+        """Get the file type of the binary (e.g., 'PE', 'ELF', 'Mach-O')."""
+        ...
+
     def is_valid_address(self, address: Address) -> bool:
         """
         Check if address is valid within any segment.
