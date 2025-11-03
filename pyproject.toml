@@ -5,7 +5,7 @@ authors = [
   {name = "binjo" },
   {name = "rand-tech" },
 ]
-version = "2.2025-10-30"
+version = "2.0.0.20251030"
 description = "FLARE Team's Binary Navigator"
 requires-python = ">=3.11"
 dependencies = [

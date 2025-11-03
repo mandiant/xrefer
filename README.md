@@ -55,3 +55,32 @@ Contributions, bug reports, and feature requests are welcome. Please open an iss
 ## Important Privacy Notice
 
 XRefer's LLM-based features, when enabled, send portions of analyzed data (e.g., APIs, strings, library references, and function relationships) to external servers, such as Google's Gemini API or other configured LLM endpoints. These external services process the information to generate natural language descriptions and insights. If you are analyzing sensitive binaries or prefer not to share data outside your local environment, you can disable all LLM features in the settings, preventing any external communication. Please consult Google Gemini's [Terms of Service](https://cloud.google.com/gemini/docs/discover/data-governance)  before use.
+
+## CLI Installation
+
+1. Clone the repository and enter it:
+   ```bash
+   git clone https://github.com/mandiant/xrefer && cd xrefer
+   ```
+2. Install the package (creates `.venv` and syncs dependencies):
+   ```bash
+   uv sync
+   ```
+3. Add any required reverse-engineering backends (IDA Pro, Binary Ninja, Ghidra).  
+  Reference: [IDA](https://docs.hex-rays.com/user-guide/idalib), [Binary Ninja](https://docs.hex-rays.com/user-guide/idalib), [Ghidra](https://pypi.org/project/pyghidra/).
+4. Run analyses from the packaged CLI:
+   ```bash
+   uv run xrefer --backend ghidra /path/to/binary
+   ```
+
+## Development
+
+1. Setup a development environment:
+   ```bash
+   uv sync --group dev
+   ```
+1. Clone the test-samples
+   ```
+   git submodule update --init --recursive
+   ```
+
