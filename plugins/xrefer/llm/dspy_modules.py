@@ -315,14 +315,17 @@ class ClusterAnalyzerSignature(dspy.Signature):
     Analyze each cluster (starting with the deepest subclusters and working up) and:
     1. Provide a descriptive label for each cluster
     2. Explain what each cluster does based on its functions and artifacts
+       - Description: Short summary of what the cluster appears to do. Do NOT mention function addresses or names.
+       - The description should not just be reflective of the cluster's own functionality, but also of the functionality of ALL of it's subclusters or referenced clusters.
+       - Is it IMPORTANT that when referring to other clusters in relationships, use formatting like cluster.id.xxxx such that if you're refering to cluster 1 it would read as cluster.id.0001.
     3. Describe how clusters relate to each other
+       - Relationships: How it interacts with referenced clusters (if applicable). Defer mentioning specific cluster IDs (cluster.id.xxxx) to this instead of Description. Do NOT mention function addresses or names.
     4. Suggest a function naming prefix for renaming
     5. Identify if the cluster is likely library/runtime code
     6. Provide an overall binary description and category
     7. Generate a comprehensive analysis report
 
     This report should be objective, should not assume anything, only state facts and use technical terminology where applicable.
-    Is it IMPORTANT that when referring to other clusters in relationships, use formatting like cluster.id.xxxx such that if you're refering to cluster 1 it would read as cluster.id.0001.
 
     Focus on:
     - Technical behaviors revealed by artifacts
