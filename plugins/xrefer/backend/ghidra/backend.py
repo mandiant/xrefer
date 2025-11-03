@@ -524,11 +524,9 @@ class GhidraBackend(BackEnd):
                 continue
 
             from_ghidra = ref.getFromAddress()
-            from_bits = from_ghidra.getAddressSpace().getSize()
-            from_mask = (1 << from_bits) - 1 if from_bits else 0xFFFFFFFFFFFFFFFF
-            var_from = Address(int(from_ghidra.getOffset() & from_mask))
+            var_from = Address(int(from_ghidra.toString(), 16))
 
-            var_to = Address(int(to_addr.getOffset()))
+            var_to = Address(int(to_addr.toString(), 16))
 
             yield GhidraXref(var_from, var_to, xref_type)
 
@@ -832,13 +830,13 @@ class GhidraBackend(BackEnd):
                 if has_addr:
                     for o in objs:
                         if isinstance(o, GAddress):
-                            val = Address(int(o.getOffset()))
+                            val = Address(int(o.toString(), 16))
                             break
             elif op_kind == OperandType.IMMEDIATE:
                 if has_addr:
                     for o in objs:
                         if isinstance(o, GAddress):
-                            val = Address(int(o.getOffset()))
+                            val = Address(int(o.toString(), 16))
                             break
                 elif has_scalar:
                     for o in objs:
@@ -862,9 +860,10 @@ class GhidraBackend(BackEnd):
                             continue
                         if memory and not memory.contains(to_addr):
                             continue
-                        offset = to_addr.getOffset()
-                        if offset < 0 and hasattr(to_addr, "getUnsignedOffset"):
-                            offset = to_addr.getUnsignedOffset()
+                        offset = Address(int(to_addr.toString(), 16))
+                        # offset = to_addr.getUnsignedOffset()
+                        # if offset < 0 and hasattr(to_addr, "getUnsignedOffset"):
+                        #     offset = to_addr.getUnsignedOffset()
                         if offset is None or offset < 0:
                             continue
                         try:
