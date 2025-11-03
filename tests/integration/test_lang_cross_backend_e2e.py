@@ -52,25 +52,7 @@ def _active_backend(be):
 @contextmanager
 def _binaryninja_backend(path: str):
     import binaryninja as bn
-
-    bv = None
-    try:
-        bv = bn.open_view(path)
-    except Exception:
-        pass
-    if bv is None and hasattr(bn, "BinaryViewType") and hasattr(bn.BinaryViewType, "get_view_of_file"):
-        try:
-            bv = bn.BinaryViewType.get_view_of_file(path)
-        except Exception:
-            pass
-    if bv is None and hasattr(bn, "load"):
-        try:
-            bv = bn.load(path)
-        except Exception:
-            pass
-    if bv is None:
-        raise RuntimeError("Binary Ninja could not open view via known APIs")
-
+    bv = bn.load(path)
     bv.update_analysis_and_wait()
     from xrefer.backend.binaryninja.backend import BNBackend
 
@@ -86,10 +68,10 @@ def _binaryninja_backend(path: str):
 
 @contextmanager
 def _ghidra_backend(path: str):
-    from pyghidra import open_program
+    import pyghidra
     from xrefer.backend.ghidra.backend import GhidraBackend
 
-    program_ctx = open_program(path, analyze=False)
+    program_ctx = pyghidra.open_program(path, analyze=False)
     flat_api = program_ctx.__enter__()
     program = flat_api.getCurrentProgram()
     backend = GhidraBackend(program=program)
