@@ -639,6 +639,25 @@ class XRefer:
         """
         return {"libs": set(), "imports": set(), "strings": set(), "capa": set(), "api_trace": set(), "libs_ea": {}, "imports_ea": {}, "strings_ea": {}, "capa_ea": {}, "api_trace_ea": {}}
 
+    def ensure_global_xrefs_entry(self, func_ea: int) -> Dict[int, Dict[str, Union[Set[int], Dict[int, Set[int]]]]]:
+        """
+        Ensure a global_xrefs entry exists for the given function address.
+
+        Args:
+            func_ea (int): Function address.
+
+        Returns:
+            Dict[int, Dict[str, Union[Set[int], Dict[int, Set[int]]]]]: The initialized global_xrefs entry.
+        """
+        return self.global_xrefs.setdefault(
+            func_ea,
+            {
+                self.DIRECT_XREFS: self.init_global_xrefs_template(),
+                self.INDIRECT_XREFS: self.init_global_xrefs_template(),
+                self.COMBINED_XREFS: set(),
+            },
+        )
+
     def set_and_get_entity_index(self, entity: Tuple[str, str, EntityType]) -> int:
         """
         Get the index of an entity, adding it to the list if not already present.
@@ -1003,15 +1022,19 @@ class XRefer:
             for path in path_group:
                 child_func_ea = None
                 for func_ea in reversed(path):
+                    parent_xref_entry = self.ensure_global_xrefs_entry(func_ea)
                     for xref_type in "libs", "imports", "strings", "capa", "api_trace":
                         for xref_cat in self.DIRECT_XREFS, self.INDIRECT_XREFS:
-                            self.global_xrefs[func_ea][self.COMBINED_XREFS].update(self.global_xrefs[func_ea][xref_cat][xref_type])
+                            parent_xref_entry[self.COMBINED_XREFS].update(parent_xref_entry[xref_cat][xref_type])
+                            if child_func_ea is None:
+                                continue
+                            child_xref_entry = self.ensure_global_xrefs_entry(child_func_ea)
                             try:
-                                for xref in self.global_xrefs[child_func_ea][xref_cat][xref_type]:
+                                for xref in child_xref_entry[xref_cat][xref_type]:
                                     try:
-                                        self.global_xrefs[func_ea][self.INDIRECT_XREFS][self.entity_suffix_map[xref_type]][xref].add(child_func_ea)
+                                        parent_xref_entry[self.INDIRECT_XREFS][self.entity_suffix_map[xref_type]][xref].add(child_func_ea)
                                     except KeyError:
-                                        self.global_xrefs[func_ea][self.INDIRECT_XREFS][self.entity_suffix_map[xref_type]][xref] = {child_func_ea}
+                                        parent_xref_entry[self.INDIRECT_XREFS][self.entity_suffix_map[xref_type]][xref] = {child_func_ea}
                             except KeyError:
                                 pass
 
@@ -1455,26 +1478,53 @@ class XRefer:
         start_time: float = time()
         analysis_file_path = self.settings["paths"]["analysis"]
 
+        cache_loaded = False
+        master_struct = None
+
         if os.path.exists(analysis_file_path):
             log("Loading existing analysis from: %s" % analysis_file_path)
-            with gzip.open(analysis_file_path, "rb") as infile:
-                master_struct = pickle.load(infile)
-                self.image_base = master_struct["image_base"]
-                self.lang = master_struct["lang"]
-                self.global_xrefs = master_struct["global_xrefs"]
-                self.string_index_cache = master_struct["string_index_cache"]
-                self.caller_xrefs_cache = master_struct["caller_xrefs_cache"]
-                self.paths = master_struct["paths"]
-                self.table_data = master_struct["table_data"]
-                self.entities = master_struct["entities"]
-                self.reverse_entity_lookup_index = master_struct["reverse_entity_lookup_index"]
-                self.entity_xrefs = master_struct["entity_xrefs"]
-                self.graph_cache = master_struct["graph_cache"]
-                self.leaf_funcs = master_struct["leaf_funcs"]
-                self.api_trace_data = master_struct.get("api_trace_data", {})
-                self.interesting_artifacts = master_struct.get("interesting_artifacts", set())
-                self.clusters = master_struct.get("clusters", [])
-                self.cluster_analysis = master_struct.get("cluster_analysis", {})
+            try:
+                with gzip.open(analysis_file_path, "rb") as infile:
+                    try:
+                        first_obj = pickle.load(infile)
+                    except ModuleNotFoundError as err:
+                        log(f"Cached analysis requires missing backend modules ({err}); running fresh analysis.")
+                    else:
+                        if isinstance(first_obj, dict) and first_obj.get("__xrefer_metadata__"):
+                            saved_backend = first_obj.get("backend")
+                            if saved_backend and saved_backend != self._backend.name:
+                                log(f"Cached analysis saved for backend '{saved_backend}' cannot be used with current backend '{self._backend.name}'; skipping cache.")
+                            else:
+                                try:
+                                    master_struct = pickle.load(infile)
+                                    cache_loaded = True
+                                except ModuleNotFoundError as err:
+                                    log(f"Cached analysis payload requires missing backend modules ({err}); running fresh analysis.")
+                                except Exception as err:
+                                    log(f"Failed to load cached analysis payload: {err}; running fresh analysis.")
+                        else:
+                            master_struct = first_obj
+                            cache_loaded = True
+            except (OSError, EOFError, pickle.PickleError) as err:
+                log(f"Failed to read cached analysis: {err}; running fresh analysis.")
+
+        if cache_loaded and master_struct is not None:
+            self.image_base = master_struct["image_base"]
+            self.lang = master_struct["lang"]
+            self.global_xrefs = master_struct["global_xrefs"]
+            self.string_index_cache = master_struct["string_index_cache"]
+            self.caller_xrefs_cache = master_struct["caller_xrefs_cache"]
+            self.paths = master_struct["paths"]
+            self.table_data = master_struct["table_data"]
+            self.entities = master_struct["entities"]
+            self.reverse_entity_lookup_index = master_struct["reverse_entity_lookup_index"]
+            self.entity_xrefs = master_struct["entity_xrefs"]
+            self.graph_cache = master_struct["graph_cache"]
+            self.leaf_funcs = master_struct["leaf_funcs"]
+            self.api_trace_data = master_struct.get("api_trace_data", {})
+            self.interesting_artifacts = master_struct.get("interesting_artifacts", set())
+            self.clusters = master_struct.get("clusters", [])
+            self.cluster_analysis = master_struct.get("cluster_analysis", {})
 
             self.sync_image_base(False)
             self.process_exclusions()
@@ -1569,7 +1619,13 @@ class XRefer:
                 "clusters": self.clusters,
                 "cluster_analysis": self.cluster_analysis,
             }
-            pickle.dump(master_struct, outfile)
+            metadata = {
+                "__xrefer_metadata__": True,
+                "version": 2,
+                "backend": self._backend.name,
+            }
+            pickle.dump(metadata, outfile, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(master_struct, outfile, protocol=pickle.HIGHEST_PROTOCOL)
 
     def load_categories(self) -> None:
         """
