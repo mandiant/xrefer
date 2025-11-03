@@ -334,7 +334,7 @@ def cli():
     parser.add_argument("--backend", choices=available_backends, required=True, help=f"Analysis backend to use (available: {', '.join(available_backends)})")
     parser.add_argument("--save", action="store_true", help="Save changes to database/project")
     parser.add_argument("--auto-analysis", action="store_true", help="Run auto analysis (default: True)", default=True)
-    parser.add_argument("--mode", choices=["light", "full"], default="full", help="Select analyzer mode (default: full)")
+    parser.add_argument("--mode", choices=["light", "full"], default="light", help="Select analyzer mode (default: full)")
     parser.add_argument("--no-html-report", dest="html_report", action="store_false", help="Disable HTML report generation")
     parser.set_defaults(html_report=True)
     parser.add_argument("--force", action="store_true", help="Remove previous artifacts and re-analyze")
