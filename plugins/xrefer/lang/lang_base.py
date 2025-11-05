@@ -137,21 +137,21 @@ class LanguageBase(ABC):
 
         for point in entry_points:
             if (address := self.backend.get_address_for_name(point)):
-                scores[address.value] = scores.get(address.value, 0) + kExists
+                scores[address] = scores.get(address, 0) + kExists
         for export in self.backend.get_exports():
             name, addr = export
-            if addr.value in scores:
-                scores[addr.value] += kExported
+            if addr in scores:
+                scores[addr] += kExported
         for value in scores:
             try:
-                name = self.backend.get_function_at(Address(value)).name # Ghidra can have a symbol, while failing to identify a function boundary -> None.name caused AttributeError.
+                name = self.backend.get_function_at(value).name # Ghidra can have a symbol, while failing to identify a function boundary -> None.name caused AttributeError.
                 scores[value] += kExists
             except AttributeError:
                 continue
         if scores:
             best_entry = max(scores.items(), key=lambda item: item[1])[0]
             best_name = self.backend.get_name_at(Address(best_entry))
-            log(f"Resolved entry point at 0x{best_entry:x} ({best_name}), score {scores[best_entry]}")
+            log(f"Resolved entry point at {best_entry} ({best_name}), score {scores[best_entry]}")
             log(f"scores: {scores}")
             return best_entry
 

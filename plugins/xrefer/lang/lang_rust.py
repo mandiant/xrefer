@@ -17,7 +17,6 @@ import typing
 from collections import deque
 from dataclasses import dataclass
 from typing import Deque, Dict, List, Optional, Tuple
-
 from tabulate import tabulate
 from xrefer.backend.base import Instruction
 from xrefer.backend import Address, FunctionType, OperandType, Section, SectionType, XrefType
@@ -235,7 +234,7 @@ class RustStringParser:
 
             # Process instructions for string references
             for bb in fn.basic_blocks:
-                for ins in self.backend.instructions(bb.start, bb.end):
+                for ins in self.backend.instructions(bb.start, bb.end):  # TODO: This is ugly. Fix design in backend/.
                     inst = self.backend.disassemble(ins)
                     # Only care about lea/mov instructions
                     if inst.mnemonic not in ("lea", "mov"):
@@ -255,7 +254,6 @@ class RustStringParser:
                     if operand.value is not None:
                         assert Address(int(operand.value)) == ea_candidate_addr
 
-
                     # Must be in rdata segment (matches legacy behavior)
                     if not rdata.contains(ea_candidate_addr):
                         continue
@@ -269,6 +267,7 @@ class RustStringParser:
                     len_found = False
                     len_candidate = 0
                     curr_addr = ins.value
+
                     for cnt, j in enumerate(self.backend.instructions(curr_addr + 1, curr_addr + 20)):  # TODO: Look at next 20 bytes max (design issue. 2 ins -> 20 bytes heuristics. )
                         # just 2 ins
                         if cnt >= 2:
@@ -658,7 +657,7 @@ class LangRust(LanguageBase):
                 # Search 10 instructions back for thread function pointer
                 caller_fn = self.backend.get_function_containing(_ref)
                 if caller_fn is None:
-                    continue # ghidra(sha256:a9d6789ecb90346d5cef1818b2d9d4ecbcb2f4458d739414e77607f1ac554ab6)
+                    continue  # ghidra(sha256:a9d6789ecb90346d5cef1818b2d9d4ecbcb2f4458d739414e77607f1ac554ab6)
                 caller_bb = [bb for bb in caller_fn.basic_blocks if bb.contains(_ref)]
                 assert len(caller_bb) == 1, "There are cases where #bb>=2, but ignore for now. open issue when this is the case"
                 ins = list(self.backend.instructions(caller_bb[0].start, _ref))
@@ -716,7 +715,6 @@ class LangRust(LanguageBase):
         if not self.lang_match():
             return super().get_entry_point()
 
-        base_entry = super().get_entry_point()
 
         # Try explicit rust_main first
         rust_main = self.backend.get_address_for_name("rust_main")
@@ -726,41 +724,32 @@ class LangRust(LanguageBase):
         # Try main/_main and analyze for rust_main pattern (after super() has
         # already triggered Ghidra's entry rename heuristics).
         for main_name in ("main", "_main"):
-            main_ea = self.backend.get_address_for_name(main_name)
-            if main_ea:
-                candidate = self._find_rust_main(main_ea)
-                if candidate:
+            if main_ea := self.backend.get_address_for_name(main_name):
+                if candidate := self._find_rust_main(main_ea):
                     return candidate
 
+        base_entry = super().get_entry_point()
         if base_entry:
-            candidate = self._find_rust_main(base_entry)
-            if candidate:
-                return candidate
+            # Trigger Rust rename heuristics even if we keep the base entry.
+            return self._find_rust_main(Address(base_entry)) or base_entry
 
         # Fallback: probe CRT init pattern directly if we still have nothing.
         fallback_main = LanguageBase.fallback_cmain_detection(self.backend)
         if fallback_main:
-            candidate = self._find_rust_main(fallback_main)
-            if candidate:
-                return candidate
+            candidate = self._find_rust_main(Address(fallback_main))
+            return candidate or fallback_main
 
-        # Last resort: hand back the base entry (keeps parity with other backends).
-        return base_entry
+        # Last resort: nothing matched.
+        return None
 
-    def _find_rust_main(self, main_addr: int) -> Optional[int]:
+    def _find_rust_main(self, main_addr: Address) -> Optional[int]:
         """Find rust_main by analyzing main function."""
-        if self.backend.name == 'ghidra':
-            # not supported
+        if self.backend.name == "ghidra":
             return None
-        # main_ea = main_addr
-        if isinstance(main_addr, int):
-            main_addr = Address(main_addr)
         fn = self.backend.get_function_at(main_addr)
         assert fn is not None, f"Should only be called with valid function address ({main_addr = })"
         # TODO: In ghidra, this value is wrong cause the `main` isn't automatically set (i.e. we need to manually set `main` from `__scrt_common_main_seh`)
 
-
-        # is_64 = not is_32bit()  # Use different variable name
         block_ranges = sorted(
             ((bb.start, bb.end) for bb in fn.basic_blocks),
             key=lambda pair: pair[0].value,
@@ -809,19 +798,17 @@ class LangRust(LanguageBase):
                         continue
 
                     current_name = (candidate_fn.name or "").lower()
-                    placeholder_prefixes = ("fun_", "sub_", "replace_me_", "lab_", "nullsub_", "entry", "se_func")
+                    placeholder_prefixes = ("fun_", "sub_",  "lab_", "nullsub_", "entry", "se_func")
 
-                    should_rename = (
-                        current_name != "rust_main"
-                        and (not current_name or current_name.startswith(placeholder_prefixes))
-                    )
+                    should_rename = current_name != "rust_main" and (not current_name or current_name.startswith(placeholder_prefixes))
 
-                    if should_rename:
-                        try:
-                            candidate_fn.name = "rust_main"
-                        except Exception:
-                            pass
-                    return candidate_fn.start.value
+                    if not should_rename:
+                        continue
+                    try:
+                        candidate_fn.name = "rust_main"
+                    except Exception:
+                        pass
+                    return fn.start.value
         return None
 
     def _extract_rust_closure_address(self, instruction_window: Deque[Address], fallback_target: Optional[int]) -> Optional[int]:
@@ -886,7 +873,9 @@ class LangRust(LanguageBase):
                 continue
 
             # # only rename default function labels
-            if not any(fn.name.startswith(x) for x in ("sub_", "FUN_")):  # TODO: limit the logic depending on the backend. In practice, no one manually names a function like FUN_addr, so just ignore for now.
+            if not any(
+                fn.name.startswith(x) for x in ("sub_", "FUN_")
+            ):  # TODO: limit the logic depending on the backend. In practice, no one manually names a function like FUN_addr, so just ignore for now.
                 # TODO: expose property in backend/ to detect if auto-named
                 log(f"Renaming skipped: {fn.name}")
             if fn.type in (FunctionType.IMPORT, FunctionType.LIBRARY, FunctionType.THUNK, FunctionType.EXPORT, FunctionType.EXTERN):
