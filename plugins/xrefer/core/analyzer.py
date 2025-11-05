@@ -3258,7 +3258,5 @@ class XRefer:
             with open(save_path, 'w', encoding='utf-8') as f:
                 f.write(_html)
             log(f"Report saved to: {save_path}")
-            import webbrowser
-            webbrowser.open(f'file://{os.path.realpath(save_path)}')
         except Exception as e:
             log(f"Failed to write or open report: {e}")
