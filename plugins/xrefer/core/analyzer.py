@@ -1192,6 +1192,22 @@ class XRefer:
                             populate_library_flag(cluster.subclusters)
 
                 populate_library_flag(self.clusters)
+
+                total_clusters = 0
+                non_library_clusters = 0
+
+                def tally_clusters(cluster_list: List["FunctionalCluster"]) -> None:
+                    nonlocal total_clusters, non_library_clusters
+                    for cluster in cluster_list:
+                        total_clusters += 1
+                        if not getattr(cluster, "is_library", False):
+                            non_library_clusters += 1
+                        if cluster.subclusters:
+                            tally_clusters(cluster.subclusters)
+
+                tally_clusters(self.clusters)
+                if total_clusters:
+                    log(f"Non-library clusters: {non_library_clusters}/{total_clusters}")
             except Exception as e:
                 import traceback
                 # Don't print traceback for known rate limit errors
