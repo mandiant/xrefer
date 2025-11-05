@@ -248,8 +248,8 @@ class XReferView(idaapi.simplecustviewer_t):
 
             # Initial content population
             if not self.func_ea:
-                idaapi.jumpto(self.xrefer_obj.current_analysis_ep)
-                self.update(ea=self.xrefer_obj.current_analysis_ep)
+                idaapi.jumpto(int(self.xrefer_obj.current_analysis_ep))
+                self.update(ea=int(self.xrefer_obj.current_analysis_ep))
             else:
                 self.update(ea=self.func_ea)
 
@@ -633,7 +633,7 @@ class XReferView(idaapi.simplecustviewer_t):
             addr: int = get_addr_from_text(word)
             # Set a flag to indicate double-click navigation
             self._from_double_click = True
-            idaapi.jumpto(addr)
+            idaapi.jumpto(int(addr))
             self.update(True, ea=addr)
             # Reset the flag after update
             self._from_double_click = False
@@ -1118,7 +1118,7 @@ class XReferView(idaapi.simplecustviewer_t):
                     pass
 
             if old_name:
-                idaapi.jumpto(addr)
+                idaapi.jumpto(int(addr))
                 new_name: str = idaapi.ask_str(old_name, 0, "Enter new function name:")
                 if new_name:
                     if idaapi.set_name(xref_to_func_ea, new_name):
