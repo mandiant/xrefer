@@ -1419,10 +1419,6 @@ python-flirt==0.9.7 \
     --hash=sha256:e90b107c714bacc16f33ee5a808d236bca88e48bf1b5ecc089f37d3d3ddb7f18 \
     --hash=sha256:fb90793d32502f43e2f7ea028e5cb996fe96c3f638d833f6cb54bc6fc49678f9
     # via viv-utils
-python-magic==0.4.27 \
-    --hash=sha256:c1ba14b08e4a5f5c31a302b7721239695b2f0f058d125bd5ce1ee36b9d9d3c3b \
-    --hash=sha256:c212960ad306f700aa0d01e5d7a325d20548ff97eb9920dcd29513174f0294d3
-    # via xrefer
 python-statemachine==2.5.0 \
     --hash=sha256:0ed53846802c17037fcb2a92323f4bc0c833290fa9d17a3587c50886c1541e62 \
     --hash=sha256:ae88cd22e47930b92b983a2176e61d811e571b69897be2568ec812c2885fb93a
