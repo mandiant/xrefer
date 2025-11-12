@@ -69,15 +69,17 @@ XRefer's LLM-based features, when enabled, send portions of analyzed data (e.g.,
    Reference: [IDA](https://docs.hex-rays.com/user-guide/idalib), [Binary Ninja](https://docs.binary.ninja/dev/batch.html#install-the-api), [Ghidra](https://pypi.org/project/pyghidra/).
    e.g. for IDA:
    ```bash
-   uv --group ida
+   # set `IDADIR`
+   uv sync --group ida
    ```
    for ghidra:
    ```bash
-   uv --group ghidra
+   # set `GHIDRA_INSTALL_DIR`
+   uv sync --group ghidra
    ```
    if you want multiple backends, add them all.
    ```
-   uv --group ida --group ghidra
+   uv sync --group ida --group ghidra
    ```
 4. Run analyses from the packaged CLI:
    ```bash
