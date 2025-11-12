@@ -12,11 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from . import base, processor
 from .artifact_analyzer import ArtifactAnalyzer
 from .cluster_analyzer import ClusterAnalyzer
 from .categorizer import Categorizer, CATEGORIES
-from . import  base, processor
-
 
 __all__ = [
     "base",
@@ -24,5 +23,5 @@ __all__ = [
     "ArtifactAnalyzer",
     "ClusterAnalyzer",
     "Categorizer",
-    "CATEGORIES"
+    "CATEGORIES",
 ]

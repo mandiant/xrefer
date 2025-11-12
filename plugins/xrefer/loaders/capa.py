@@ -41,7 +41,7 @@ def load_capa_json(capa_json_path: str) -> Dict[int, List[Dict[str, Any]]]:
     """
 
     if not os.path.exists(capa_json_path) or not os.path.isfile(capa_json_path):
-        log(f"CAPA JSON file not found: {capa_json_path}")
+        log(f"[-] CAPA JSON file not found: {capa_json_path}")
         return {}
     try:
         doc = get_doc_json_file(capa_json_path)
