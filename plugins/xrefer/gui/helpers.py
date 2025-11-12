@@ -298,7 +298,7 @@ class CollapseIndicator(QtWidgets.QWidget):
         self.reposition()
 
 
-from xrefer.core.helpers import convert_int_to_hex, create_table_from_rows, enrich_string_data_core, find_cluster_analysis, get_visible_width, sort_clusters, word_wrap_text
+from xrefer.core.helpers import convert_int_to_hex, create_table_from_rows, enrich_string_data_core, find_cluster_analysis, get_visible_width, sort_clusters, word_wrap_text, set_log_function
 
 
 def enrich_string_data(str_indexes: List[int], entity_list: List[str], lookup: bool = True, max_threads: int = 50) -> List[Tuple[str, str, int, str, dict, list]]:
@@ -430,6 +430,7 @@ def log(string: str) -> None:
     print(f"[XRefer] {string}")
     idaapi.replace_wait_box(f"HIDECANCEL\n{string}")
 
+    set_log_function(log)
 
 def log_elapsed_time(msg: str, start_time: float) -> None:
     """

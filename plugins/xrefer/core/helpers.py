@@ -689,6 +689,18 @@ def sort_clusters(clusters, paths):
     return sorted_primary + sorted_secondary
 
 
+
+_log_func = None
+
+def set_log_function(func) -> None:
+    """Set a custom log implementation used by core helpers.
+
+    GUI or environment-specific frontends (e.g. IDA plugin) can call this
+    at initialization to route all `log` calls through their own handler.
+    """
+    global _log_func
+    _log_func = func
+
 def log(string: str) -> None:
     """
     Log message with XRefer prefix.
@@ -699,7 +711,10 @@ def log(string: str) -> None:
     Args:
         string (str): Message to log
     """
-    print(f"[XRefer] {string}")
+    if _log_func is not None:
+        _log_func(string)
+    else:
+        print(f"[XRefer] {string}")
 
 
 def log_elapsed_time(msg: str, start_time: float) -> None:
