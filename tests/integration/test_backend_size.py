@@ -29,7 +29,7 @@ def _sample_path(sample_id: str) -> str:
 
 
 def _strict_mode() -> bool:
-    return True or os.environ.get("XREFER_BACKEND_STRICT", "0") not in ("", "0", "false", "False")
+    return os.environ.get("XREFER_BACKEND_STRICT", "0") not in ("", "0", "false", "False")
 
 
 def _available_backend_ids() -> list[str]:

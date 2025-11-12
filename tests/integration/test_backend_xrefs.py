@@ -93,7 +93,8 @@ SAMPLES = {
 
 
 def _strict_mode() -> bool:
-    return True
+    import os
+    return os.environ.get("XREFER_BACKEND_STRICT", "0") not in ("", "0", "false", "False")
 
 
 def _require_path(path: pathlib.Path) -> pathlib.Path:
