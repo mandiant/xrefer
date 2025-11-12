@@ -36,7 +36,7 @@ class IDABackendFactory(BackendFactory):
 
     def is_available(self) -> bool:
         """Check if IDA Pro is available."""
-        return importlib.util.find_spec("idapro") is not None
+        return importlib.util.find_spec("idaapi") is not None
 
     def create_backend(self, **kwargs) -> BackEnd:
         """Create IDA backend instance."""
