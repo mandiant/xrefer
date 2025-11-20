@@ -18,23 +18,47 @@ from typing import Any, Dict, List
 import enum
 
 import dspy
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer, model_validator
+
+
+class CategoryAssignment(BaseModel):
+    """Single categorization mapping entry.
+
+    Representing assignments as a list of explicit objects keeps the JSON
+    schema valid for Gemini (which rejects objects with no properties) while we
+    serialize back to the legacy mapping shape for the rest of the codebase.
+    """
+
+    item_index: int = Field(..., description="Original index of the item in the input list")
+    category_index: int = Field(..., description="0-based index of the assigned category")
 
 class CategorizationResponse(BaseModel):
     """Response model for API/Library categorization."""
 
-    category_assignments: Dict[str, int] = Field(..., description="Mapping of item index (as string) to category index (0-based)")
+    category_assignments: List[CategoryAssignment] = Field(..., description="List of item/category mappings; use item_index and category_index fields")
 
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "category_assignments": {
-                    "0": 0,
-                    "1": 2,
-                    "2": 5
-                }
-            }
+    @model_validator(mode="before")
+    def _coerce_legacy_mapping(cls, value: Dict[str, Any]) -> Dict[str, Any]:
+        """Allow existing dict-shaped payloads (backward compatibility)."""
+        assignments = value.get("category_assignments") if isinstance(value, dict) else None
+        if isinstance(assignments, dict):
+            value["category_assignments"] = [
+                {"item_index": int(idx), "category_index": cat_idx}
+                for idx, cat_idx in assignments.items()
+            ]
+        return value
+
+    @model_serializer(mode="wrap")
+    def _serialize_as_mapping(self, handler):
+        """Return the legacy mapping shape when dumping."""
+        data = handler(self)
+        mapping = {
+            str(entry["item_index"]): entry["category_index"]
+            for entry in data.get("category_assignments", [])
         }
+        data["category_assignments"] = mapping
+        return data
+
 
 class CategorizerSignature(dspy.Signature):
     """
@@ -173,13 +197,6 @@ class ArtifactAnalysisResponse(BaseModel):
 
     interesting_indexes: List[int] = Field(..., description="List of artifact indices identified as interesting from a security perspective")
 
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "interesting_indexes": [0, 3, 7, 12]
-            }
-        }
-
 
 class ArtifactAnalyzerSignature(dspy.Signature):
     """
@@ -225,20 +242,20 @@ class ClusterAnalysis(BaseModel):
 
     label: str = Field(..., description="Short, descriptive label for the cluster")
     description: str = Field(..., description="Detailed description of cluster functionality. Do NOT mention function addresses or names. The description should not just be reflective of the cluster's own functionality, but also of the functionality of ALL of it's subclusters or referenced clusters.")
-    relationships: str = Field(..., description="How this cluster relates to other clusters")
-    function_prefix: str = Field(..., description="Suggested prefix for renaming functions in this cluster")
+    relationships: str = Field(..., description="How this cluster relates to other clusters. Always follow the format cluster.id.xxxx when referring to other clusters (Machine friendly IDs). ")
+    function_prefix: str = Field(..., description="Suggested prefix for renaming functions in this cluster. Concise, descriptive, and ideally one word.")
     library_or_runtime: int = Field(default=0, description="1 if cluster is likely library/runtime code, 0 if application code")
 
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "label": "Network Communication",
-                "description": "Handles HTTP requests and socket operations",
-                "relationships": "Called by authentication cluster, uses crypto cluster",
-                "function_prefix": "net_",
-                "library_or_runtime": 0
-            }
-        }
+
+class ClusterAnalysisItem(ClusterAnalysis):
+    """Cluster analysis paired with its identifier.
+
+    Gemini requires object properties to be explicit; representing clusters as a
+    list of typed items avoids empty-property maps while the serializer preserves
+    the legacy dict-of-clusters shape for downstream code.
+    """
+
+    cluster_id: str = Field(..., description="Cluster identifier as 'cluster_1'")
 
 class BinaryCategory(enum.Enum):
     DOWNLOADER = "Downloader"
@@ -281,28 +298,32 @@ class BinaryCategory(enum.Enum):
 class ClusterAnalysisResponse(BaseModel):
     """Response model for cluster analysis."""
 
-    clusters: Dict[str, ClusterAnalysis] = Field(..., description="Mapping of cluster_id to ClusterAnalysis")
+    clusters: List[ClusterAnalysisItem] = Field(..., description="List of cluster analyses with their identifiers")
     binary_description: str = Field(..., description="Overall description of the binary's functionality")
     binary_category: BinaryCategory = Field(..., description="Classification of the binary")
     binary_report: str = Field(default="", description="Detailed analysis report for the binary")
 
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "clusters": {
-                    "cluster_1": {
-                        "label": "Initialization",
-                        "description": "Sets up application state",
-                        "relationships": "Called first, initializes all other clusters",
-                        "function_prefix": "init_",
-                        "library_or_runtime": 0
-                    }
-                },
-                "binary_description": "Network monitoring tool with logging capabilities",
-                "binary_category": "Utility",
-                "binary_report": "Detailed analysis shows..."
-            }
-        }
+    @model_validator(mode="before")
+    def _coerce_legacy_clusters(cls, value: Dict[str, Any]) -> Dict[str, Any]:
+        clusters = value.get("clusters") if isinstance(value, dict) else None
+        if isinstance(clusters, dict):
+            value["clusters"] = [
+                {"cluster_id": cid, **cdata}
+                for cid, cdata in clusters.items()
+            ]
+        return value
+
+    @model_serializer(mode="wrap")
+    def _serialize_with_cluster_map(self, handler):
+        data = handler(self)
+        cluster_map = {}
+        for entry in data.get("clusters", []):
+            entry = dict(entry)
+            cluster_id = str(entry.pop("cluster_id"))
+            cluster_map[cluster_id] = entry
+        data["clusters"] = cluster_map
+        return data
+
 
 class ClusterAnalyzerSignature(dspy.Signature):
     """
