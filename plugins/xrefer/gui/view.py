@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+import enum
 import re
 import traceback
 import weakref
@@ -1727,6 +1728,8 @@ class XReferView(idaapi.simplecustviewer_t):
 
         # Add binary information with proper alignment
         binary_cat = cluster_analysis.get("binary_category", "Unknown")
+        if isinstance(binary_cat, enum.Enum):
+            binary_cat = binary_cat.name
 
         # Choose between description or report based on toggle
         if self.state_machine.cluster_manager.is_showing_report():
@@ -2194,6 +2197,9 @@ class XReferView(idaapi.simplecustviewer_t):
 
         # Print binary analysis with enhanced formatting
         binary_cat = cluster_analysis.get("binary_category", "Unknown")
+        # if it's enum
+        if isinstance(binary_cat, enum.Enum):
+            binary_cat = str(binary_cat.name)
 
         # Choose between description or report based on toggle
         if self.state_machine.cluster_manager.is_showing_report():
