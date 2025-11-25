@@ -638,8 +638,9 @@ class LangRust(LanguageBase):
         if not createthread_addr:
             return result
         first_ref = next(iter(self.backend.get_xrefs_to(createthread_addr)), None)
-        if not first_ref:
-            return result
+        if not first_ref: return result  # This gives us the `CreateThread` from imported ones
+        first_ref = next(iter(self.backend.get_xrefs_to(first_ref.source)), None)
+        if not first_ref: return result
 
         # Get the function containing the CreateThread call
         wrapper_func = self.backend.get_function_at(first_ref.source)
@@ -689,7 +690,6 @@ class LangRust(LanguageBase):
                             continue
 
                         result.append((ref.value, thread_func))
-                        break
         return result
 
     def _extract_thread_object_base(self, inst) -> Optional[int]:
