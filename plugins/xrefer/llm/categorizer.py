@@ -90,7 +90,8 @@ class Categorizer:
             return categorized_items, categories
 
         # Process uncategorized items
-        index_results = processor.process_items(items=uncategorized, prompt_type=PromptType.CATEGORIZER, categories=categories, type=type)
+        index_results = processor.process_items(items=uncategorized, prompt_type=PromptType.CATEGORIZER, categories=categories, type=_type)
+        index_results = index_results['category_assignments']
 
         # Convert index-based results back to item mappings
         named_results = {}
