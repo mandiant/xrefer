@@ -134,14 +134,9 @@ def analysis_ida(filepath: Path, modules: dict[str, Any] | None = None, *, xrefe
     if xrefer_kwargs:
         params.update(xrefer_kwargs)
 
-    try:
-        xrefer_obj = XRefer(**params)  # This automatically calls load_analysis() when auto_analyze=True
-        print(f"[+] XRefer analysis complete, results saved to {xrefer_obj.settings['paths']['analysis']}")
-        return xrefer_obj
-    except Exception as e:
-        print(f"[x] Analysis failed: {e}")
-        traceback.print_exc()
-        raise
+    xrefer_obj = XRefer(**params)  # This automatically calls load_analysis() when auto_analyze=True
+    print(f"[+] XRefer analysis complete, results saved to {xrefer_obj.settings['paths']['analysis']}")
+    return xrefer_obj
 
 
 def analysis_binaryninja(bv, modules: dict[str, Any] | None = None, *, xrefer_kwargs: dict[str, Any] | None = None):
@@ -407,6 +402,8 @@ def cli():
             print("\n[!] Analysis interrupted by user")
             sys.exit(1)
         except Exception as e:
+            if isinstance(e, EnvironmentError):
+                sys.exit(1)
             print(f"\n[x] Analysis failed: {e}")
             traceback.print_exc()
             sys.exit(1)
