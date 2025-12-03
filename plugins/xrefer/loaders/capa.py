@@ -41,7 +41,7 @@ def load_capa_json(capa_json_path: str) -> Dict[int, List[Dict[str, Any]]]:
     """
 
     if not os.path.exists(capa_json_path) or not os.path.isfile(capa_json_path):
-        log(f"CAPA JSON file not found: {capa_json_path}")
+        log(f"[-] CAPA JSON file not found: {capa_json_path}")
         return {}
     try:
         doc = get_doc_json_file(capa_json_path)
@@ -52,12 +52,12 @@ def load_capa_json(capa_json_path: str) -> Dict[int, List[Dict[str, Any]]]:
     # Get image bases and calculate relocation delta if needed
     capa_base = doc.meta.analysis.base_address.value
 
-    # ida_base = idaapi.get_imagebase()
-    ida_base = get_current_backend().image_base
-    relocation_delta = ida_base - capa_base if capa_base != ida_base else 0
+    backend = get_current_backend()
+    backend_base = backend.image_base
+    relocation_delta = backend_base - capa_base if capa_base != backend_base else 0
 
     if relocation_delta:
-        log(f"Detected image base mismatch: CAPA base=0x{capa_base:x}, IDA base=0x{ida_base:x}")
+        log(f"Detected image base mismatch: CAPA base=0x{capa_base:x}, backend({backend.name}) base=0x{backend_base:x}")
         log(f"Applying relocation delta: 0x{relocation_delta:x}")
 
     rmatches = get_rule_matches_dict(doc)
@@ -109,15 +109,16 @@ def to_locations(addresses: Set[frz.Address]) -> Set[int]:
         Set[int]: Set of converted location addresses
     """
     locs = set()
+    backend = get_current_backend()
     for addr in addresses:
         if addr.type == frz.AddressType.ABSOLUTE:
             v = addr.value
         elif addr.type == frz.AddressType.RELATIVE:
             v = addr.value
         elif addr.type == frz.AddressType.FILE:
-            import idaapi
-
-            v = idaapi.get_fileregion_ea(addr.value)
+            v = backend.resolve_file_offset(addr.value)
+            if v is None:
+                continue
         elif addr.type in (frz.AddressType.DN_TOKEN, frz.AddressType.DN_TOKEN_OFFSET, frz.AddressType.NO_ADDRESS):
             continue
         locs.add(v)

@@ -1,20 +1,57 @@
 import logging
 from collections.abc import Iterator
 
-from ..base import Address, BackEnd, BackendError, BasicBlock, Function, FunctionType, InvalidAddressError, Section, SectionType, String, StringEncType, Xref, XrefType
+from ..base import Address, BackEnd, BackendError, BasicBlock, Function, FunctionType, Instruction, InvalidAddressError, Operand, OperandType, Section, SectionType, String, StringEncType, Xref, XrefType
 
-# Global reference to getCurrentProgram function - will be set by use_backend.py
-getCurrentProgram = None
 
+def configure_fast_analysis(program) -> None:
+    """Disables time-consuming analyzers while keeping essential analyzers enabled.
+    This should be called before running analyzeAll() on a program.
+
+    note:
+    - Decompiler analyzers: +4.29s overhead (17x slower)
+    - Demanglers: +0.14s overhead
+    - Stack analyzer: +0.01s overhead
+
+    Args:
+        program: Ghidra Program object
+    """
+    from ghidra.program.model.listing import Program as GhidraProgram
+
+    logger = logging.getLogger(__name__)
+    logger.info("Configuring optimized Ghidra analysis...")
+
+    options = program.getOptions(GhidraProgram.ANALYSIS_PROPERTIES)
+
+    disabled_analyzers = [
+        "Decompiler Parameter ID",
+        "Decompiler Switch Analysis",
+    ]
+
+    for analyzer in disabled_analyzers:
+        options.setBoolean(analyzer, False)
+        logger.info(f"Disabled analyzer: {analyzer}")
+
+    essential = ["Subroutine References", "ASCII Strings", "Scalar Operand References"]
+    for analyzer in essential:
+        options.setBoolean(analyzer, True)
+        logger.debug(f"Enabled analyzer: {analyzer}")
 
 class GhidraFunction(Function):
-    def __init__(self, ghidra_func) -> None:
+    def __init__(self, ghidra_func, backend) -> None:
         """Initialize with Ghidra function object."""
         if ghidra_func is None:
             raise ValueError("Ghidra function cannot be None")
+        if backend is None:
+            raise ValueError("Backend cannot be None")
         self._func = ghidra_func
+        self._backend = backend
         self._name: str | None = None
         self._function_type: FunctionType | None = None
+
+    def _get_program(self):
+        """Get program object from backend."""
+        return self._backend._get_actual_program()
 
     @property
     def start(self) -> Address:
@@ -37,7 +74,8 @@ class GhidraFunction(Function):
         if not value:
             raise ValueError("Function name cannot be empty")
         try:
-            self._func.setName(value, None)
+            from ghidra.program.model.symbol import SourceType
+            self._func.setName(value, SourceType.USER_DEFINED)
             self._name = value
         except Exception as e:
             raise BackendError(f"Failed to set function name: {e}") from e
@@ -46,7 +84,6 @@ class GhidraFunction(Function):
     def type(self) -> FunctionType:
         """Get function classification."""
         if self._function_type is None:
-            # Check if it's a thunk
             if self._func.isThunk():
                 self._function_type = FunctionType.THUNK
             elif self._func.isExternal():
@@ -65,8 +102,7 @@ class GhidraFunction(Function):
 
     def contains(self, address: Address) -> bool:
         """Check if the address is within the function."""
-        # Use current program's address factory
-        program = getCurrentProgram()
+        program = self._get_program()
         addr_factory = program.getAddressFactory()
         addr_value = address.value if isinstance(address, Address) else int(address)
         ghidra_addr = addr_factory.getAddress(f"{addr_value:x}")
@@ -75,21 +111,19 @@ class GhidraFunction(Function):
     @property
     def basic_blocks(self) -> Iterator[BasicBlock]:
         """Iterate over basic blocks in the function."""
-        # Get basic blocks using program model
         from ghidra.program.model.block import BasicBlockModel
 
-        program = getCurrentProgram()
+        program = self._get_program()
         block_model = BasicBlockModel(program)
         blocks = block_model.getCodeBlocksContaining(self._func.getBody(), None)
 
         while blocks.hasNext():
             block = blocks.next()
-            yield BasicBlock(Address(block.getMinAddress().getOffset()),
-                           Address(block.getMaxAddress().getOffset() + 1))
+            yield BasicBlock(Address(block.getMinAddress().getOffset()), Address(block.getMaxAddress().getOffset() + 1))
 
     def _is_export(self) -> bool:
         """Return True if the function is exported from the binary."""
-        program = getCurrentProgram()
+        program = self._get_program()
         symbol_table = program.getSymbolTable()
         ghidra_addr = self._func.getEntryPoint()
         symbols = symbol_table.getSymbols(ghidra_addr)
@@ -193,14 +227,11 @@ class GhidraSection(Section):
         if section_name.startswith("EXTERNAL"):
             return SectionType.EXTERN
 
-        # Check permissions to determine section type
         if self._section.isExecute():
             return SectionType.CODE
         elif not self._section.isInitialized() and self._section.isRead():
-            # Uninitialized readable section is typically BSS
             return SectionType.BSS
         elif self._section.isWrite() or self._section.isRead():
-            # Writable or readable sections are data
             return SectionType.DATA
         else:
             return SectionType.UNKNOWN
@@ -223,20 +254,65 @@ class GhidraSection(Section):
 class GhidraBackend(BackEnd):
     """Ghidra backend implementation."""
 
-    def __init__(self) -> None:
-        """Initialize Ghidra backend."""
+    def __init__(self, program=None) -> None:
+        """Initialize Ghidra backend.
+
+        Args:
+            program: Optional Ghidra program object.
+        """
         super().__init__()
-        self._program = None
+        self._program = program
         self._addr_factory = None
+        if program is not None:
+            self._addr_factory = program.getAddressFactory()
+
+    @property
+    def program(self):
+        """Get the current Ghidra program."""
+        if self._program is None:
+            self._ensure_program_loaded()
+        return self._program
+
+    def __getstate__(self):
+        """Custom pickle state - exclude unpicklable program object."""
+        state = self.__dict__.copy()
+        state["_program"] = None
+        state["_addr_factory"] = None
+        return state
+
+    def __setstate__(self, state):
+        """Custom unpickle state - restore without program object."""
+        self.__dict__.update(state)
+        # Program will need to be re-set after unpickling
+
+    @program.setter
+    def program(self, program) -> None:
+        """Set the current Ghidra program."""
+        if program is None:
+            raise ValueError("Program cannot be None")
+        self._program = program
+        self._addr_factory = program.getAddressFactory()
 
     def _ensure_program_loaded(self):
         """Ensure program is loaded and cached."""
         if self._program is None:
-            self._program = getCurrentProgram()
-            if self._program is None:
-                raise BackendError("No program is currently loaded in Ghidra")
-            # Cache address factory for performance
+            raise BackendError("No program is currently loaded in Ghidra")
+
+    def _get_actual_program(self):
+        """Get the actual program object."""
+        self._ensure_program_loaded()
+
+        if self._addr_factory is None and self._program:
             self._addr_factory = self._program.getAddressFactory()
+
+        return self._program
+
+    def _is_executable_address(self, ghidra_addr) -> bool:
+        """Return True if address is in an executable memory block."""
+        program = self._get_actual_program()
+        mem = program.getMemory()
+        block = mem.getBlock(ghidra_addr)
+        return bool(block and block.isExecute())
 
     @property
     def name(self) -> str:
@@ -247,98 +323,158 @@ class GhidraBackend(BackEnd):
     def image_base(self) -> Address:
         """Get image base address where binary is loaded."""
         try:
-            self._ensure_program_loaded()
-            return Address(self._program.getImageBase().getOffset())
+            program = self._get_actual_program()
+            return Address(program.getImageBase().getOffset())
         except Exception as e:
             raise BackendError(f"Failed to get image base: {e}")
 
+    @property
+    def size(self) -> int:
+        """Get total size of the binary in bytes."""
+        program = self._get_actual_program()
+        memory = program.getMemory()
+        file_bytes_list = memory.getAllFileBytes()
+
+        if file_bytes_list:
+            max_size = 0
+            for file_bytes in file_bytes_list:
+                original_size = file_bytes.getSize()
+                offset = file_bytes.getFileOffset()
+                max_size = max(max_size, int(original_size + offset))
+
+            if max_size > 0:
+                return max_size
+
     def functions(self) -> Iterator[Function]:
         """Iterate over all functions in the binary."""
-        self._ensure_program_loaded()
-        function_manager = self._program.getFunctionManager()
+        program = self._get_actual_program()
+        function_manager = program.getFunctionManager()
         for func in function_manager.getFunctions(True):
-            if func is not None:
-                yield GhidraFunction(func)
+            if func is None:
+                continue
+            # Match IDA semantics more closely: include all non-external
+            # functions discovered by Ghidra (including thunks and small
+            # helper stubs). External functions map to imports and are not
+            # yielded as code functions in IDA either.
+            if func.isExternal():
+                continue
+            yield GhidraFunction(func, self)
 
     def get_function_at(self, address: Address) -> Function | None:
         """Get function containing the specified address."""
-        self._ensure_program_loaded()
+        program = self._get_actual_program()
         # Use cached address factory for performance
         addr_value = address.value if isinstance(address, Address) else int(address)
         ghidra_addr = self._addr_factory.getAddress(f"{addr_value:x}")
-        function_manager = self._program.getFunctionManager()
+        function_manager = program.getFunctionManager()
         ghidra_func = function_manager.getFunctionContaining(ghidra_addr)
         if ghidra_func:
-            return GhidraFunction(ghidra_func)
+            # Normalize: ignore EXTERNAL functions only
+            if ghidra_func.isExternal():
+                return None
+            return GhidraFunction(ghidra_func, self)
         return None
 
     def strings(self, min_length: int = String.MIN_LENGTH) -> Iterator[String]:
         """Iterate over all strings in the binary."""
-        self._ensure_program_loaded()
-        listing = self._program.getListing()
+        program = self._get_actual_program()
+        listing = program.getListing()
 
         data_iter = listing.getDefinedData(True)
         while data_iter.hasNext():
             data = data_iter.next()
-            data_type = data.getDataType()
+            if not data.hasStringValue():
+                continue
+            value = data.getValue()
+            if not (value and isinstance(value, str) and len(value) >= min_length):
+                continue
+            addr = Address(data.getAddress().getOffset())
+            dt_name = data.getDataType().getName().lower()
+            enc = StringEncType.UTF16 if ("unicode" in dt_name or "wide" in dt_name) else StringEncType.ASCII
+            yield GhidraString(addr, value, len(value), enc)
 
-            # Check if it's a string type (call hasStringValue on data, not data_type)
-            if data.hasStringValue():
-                value = data.getValue()
-                if value and isinstance(value, str) and len(value) >= min_length:
-                    addr = Address(data.getAddress().getOffset())
-                    # Determine encoding
-                    if "unicode" in data_type.getName().lower() or "wide" in data_type.getName().lower():
-                        encoding = StringEncType.UTF16
-                    else:
-                        encoding = StringEncType.ASCII
-
-                    yield GhidraString(addr, value, len(value), encoding)
-
-        # Search for additional undefined strings
-        memory = self._program.getMemory()
+        memory = program.getMemory()
         for block in memory.getBlocks():
-            if block.isInitialized() and not block.isVolatile():
-                yield from self._search_strings_in_block(block, min_length)
+            if not block.isInitialized() or block.isVolatile() or block.isExecute() or not block.isRead():
+                continue
+            yield from self._scan_block_for_strings(block, min_length)
 
-    def _search_strings_in_block(self, block, min_length: int) -> Iterator[String]:
-        """Search for strings in a memory block."""
+    def _scan_block_for_strings(self, block, min_length: int) -> Iterator[String]:
+        """Detect ASCII and UTF-16LE strings directly from block bytes."""
+        start_off = int(block.getStart().getOffset())
+        end_off = int(block.getEnd().getOffset())
+        size = end_off - start_off + 1
 
-        start = block.getStart()
-        end = block.getEnd()
+        try:
+            from ghidra.program.flatapi import FlatProgramAPI
+            flat = FlatProgramAPI(self._get_actual_program())
+            raw = flat.getBytes(block.getStart(), size)
+            buf = bytes(raw)
+        except Exception:
+            # Fallback to small-chunk reads via read_bytes
+            chunk = self.read_bytes(Address(start_off), size)
+            if not chunk:
+                return
+            buf = chunk
 
-        current = start
-        while current.compareTo(end) < 0:
-            try:
-                listing = self._program.getListing()
-                data = listing.getDataAt(current)
-                if data and data.hasStringValue():
-                    str_data = data.getValue()
-                else:
-                    str_data = None
-                if str_data and len(str_data) >= min_length:
-                    yield GhidraString(Address(current.getOffset()), str(str_data), len(str_data), StringEncType.ASCII)
-                    current = current.add(len(str_data))
-                else:
-                    current = current.add(1)
-            except Exception:
-                # Skip on any error and continue scanning
-                current = current.add(1)
+        def is_printable(b: int) -> bool:
+            return 32 <= b <= 126
+
+        visited = set()
+
+        # ASCII scan
+        i = 0
+        while i < len(buf):
+            if is_printable(buf[i]):
+                j = i
+                while j < len(buf) and is_printable(buf[j]):
+                    j += 1
+                if j - i >= min_length:
+                    ea = start_off + i
+                    if ea not in visited:
+                        s = buf[i:j].decode('ascii', errors='ignore')
+                        yield GhidraString(Address(ea), s, len(s), StringEncType.ASCII)
+                        visited.add(ea)
+                i = j + 1
+            else:
+                i += 1
+
+        # UTF-16LE scan (simple pattern: printable ASCII with null bytes)
+        i = 0
+        while i+1 < len(buf):
+            # require little-endian wide char: printable, then 0x00
+            if is_printable(buf[i]) and buf[i+1] == 0:
+                j = i
+                run = 0
+                chars = []
+                while j+1 < len(buf) and is_printable(buf[j]) and buf[j+1] == 0:
+                    chars.append(chr(buf[j]))
+                    run += 1
+                    j += 2
+                if run >= min_length:
+                    ea = start_off + i
+                    if ea not in visited:
+                        s = ''.join(chars)
+                        yield GhidraString(Address(ea), s, len(s), StringEncType.UTF16)
+                        visited.add(ea)
+                i = j + 2
+            else:
+                i += 2
 
     def get_name_at(self, address: Address) -> str:
         """Get symbol name at the specified address."""
-        self._ensure_program_loaded()
+        program = self._get_actual_program()
         # Use program's address factory instead of gl.resolve()
         addr_value = address.value if isinstance(address, Address) else int(address)
         ghidra_addr = self._addr_factory.getAddress(f"{addr_value:x}")
-        symbol_table = self._program.getSymbolTable()
+        symbol_table = program.getSymbolTable()
         symbol = symbol_table.getPrimarySymbol(ghidra_addr)
         return symbol.getName() if symbol else ""
 
     def get_address_for_name(self, name: str) -> Address | None:
         """Get address for the specified symbol name."""
-        self._ensure_program_loaded()
-        symbol_table = self._program.getSymbolTable()
+        program = self._get_actual_program()
+        symbol_table = program.getSymbolTable()
         symbols = symbol_table.getSymbols(name)
         if symbols and symbols.hasNext():
             symbol = symbols.next()
@@ -347,9 +483,9 @@ class GhidraBackend(BackEnd):
 
     def get_xrefs_to(self, address: Address) -> Iterator[Xref]:
         """Get all references TO the specified address."""
-        self._ensure_program_loaded()
+        program = self._get_actual_program()
         # Use program's reference manager
-        ref_manager = self._program.getReferenceManager()
+        ref_manager = program.getReferenceManager()
         addr_value = address.value if isinstance(address, Address) else int(address)
         ghidra_addr = self._addr_factory.getAddress(f"{addr_value:x}")
 
@@ -360,42 +496,67 @@ class GhidraBackend(BackEnd):
 
     def get_xrefs_from(self, address: Address) -> Iterator[Xref]:
         """Get all references FROM the specified address."""
-        self._ensure_program_loaded()
-        # Use program's reference manager
-        ref_manager = self._program.getReferenceManager()
+        program = self._get_actual_program()
+        ref_manager = program.getReferenceManager()
         addr_value = address.value if isinstance(address, Address) else int(address)
         ghidra_addr = self._addr_factory.getAddress(f"{addr_value:x}")
 
         raw_refs = ref_manager.getReferencesFrom(ghidra_addr)
+        memory = program.getMemory()
         stack_refs_skipped = 0
         for ref in raw_refs:
             xref_type = self._convert_ref_type(ref.getReferenceType())
 
-            # Skip stack references as they use a different address space and can have negative offsets
             to_addr = ref.getToAddress()
+            if to_addr is None:
+                continue
+
+            # Skip stack references as they use a different address space
             if to_addr.isStackAddress():
                 stack_refs_skipped += 1
                 continue
 
-            yield GhidraXref(Address(ref.getFromAddress().getOffset()), Address(to_addr.getOffset()), xref_type)
+            # Only keep references that resolve to a valid memory block
+            if not to_addr.isMemoryAddress():
+                continue
 
-        # Log summary instead of individual skips
+            if memory.getBlock(to_addr) is None:
+                continue
+
+            from_ghidra = ref.getFromAddress()
+            var_from = Address(int(from_ghidra.toString(), 16))
+
+            var_to = Address(int(to_addr.toString(), 16))
+
+            yield GhidraXref(var_from, var_to, xref_type)
+
         if stack_refs_skipped > 0:
             logger = logging.getLogger(__name__)
-            logger.debug(f"Skipped {stack_refs_skipped} stack references from {address}")
+            logger.debug(f"Skipped {stack_refs_skipped} stack references from %s", address)
+
+    def _resolve_file_offset_impl(self, file_offset: int) -> Address | None:
+        """Translate a file offset to an Address within the current program."""
+        program = self._get_actual_program()
+        memory = program.getMemory()
+        addresses = memory.locateAddressesForFileOffset(file_offset)
+
+        for addr in addresses:
+            return Address(addr.getOffset())
+        return None
 
     def _convert_ref_type(self, ghidra_ref_type) -> XrefType:
         """Convert Ghidra reference type to XrefType."""
         import ghidra.program.model.symbol as symbol_module
 
         RefType = symbol_module.RefType
-
         if ghidra_ref_type == RefType.UNCONDITIONAL_CALL:
             return XrefType.CALL
         if ghidra_ref_type == RefType.UNCONDITIONAL_JUMP:
             return XrefType.JUMP
         if ghidra_ref_type == RefType.CONDITIONAL_JUMP:
             return XrefType.BRANCH_TRUE
+        if ghidra_ref_type == RefType.PARAM:
+            return XrefType.DATA_READ
         if ghidra_ref_type in (RefType.DATA, RefType.READ):
             return XrefType.DATA_READ
         if ghidra_ref_type == RefType.WRITE:
@@ -406,22 +567,44 @@ class GhidraBackend(BackEnd):
 
     def read_bytes(self, address: Address, size: int) -> bytes | None:
         """Read raw bytes from the specified address."""
-        self._ensure_program_loaded()
+        program = self._get_actual_program()
         # Use program's address factory instead of gl.resolve()
         addr_value = address.value if isinstance(address, Address) else int(address)
         ghidra_addr = self._addr_factory.getAddress(f"{addr_value:x}")
+        # Guard against invalid or non-readable regions and partial reads.
+        try:
+            memory = program.getMemory()
+            block = memory.getBlock(ghidra_addr)
+            if block is None or not block.isRead():
+                return None
 
-        # Use FlatProgramAPI for simplified byte reading
-        from ghidra.program.flatapi import FlatProgramAPI
+            # Compute how many bytes remain in this block from the start address.
+            remaining = int(block.getEnd().getOffset() - ghidra_addr.getOffset() + 1)
+            if remaining <= 0:
+                return None
 
-        flat_api = FlatProgramAPI(self._program)
-        buffer = flat_api.getBytes(ghidra_addr, size)
-        return bytes(buffer)
+            # For consistent semantics with IDA/Binary Ninja backends, only
+            # return data if the full requested size is available.
+            if remaining < size:
+                return None
+
+            from ghidra.program.flatapi import FlatProgramAPI
+            flat_api = FlatProgramAPI(program)
+            buffer = flat_api.getBytes(ghidra_addr, size)
+            return bytes(buffer) if buffer is not None else None
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to read bytes from {address}: {e}")
+            # Match other backends: on any memory access issue, return None
+            # instead of raising, so higher-level scanners can skip gracefully.
+            return None
+
 
     def instructions(self, start: Address, end: Address) -> Iterator[Address]:
         """Iterate over instruction addresses in the specified range."""
-        self._ensure_program_loaded()
-        listing = self._program.getListing()
+        program = self._get_actual_program()
+        listing = program.getListing()
         start_value = start.value if isinstance(start, Address) else int(start)
         end_value = end.value if isinstance(end, Address) else int(end)
         start_addr = self._addr_factory.getAddress(f"{start_value:x}")
@@ -437,46 +620,95 @@ class GhidraBackend(BackEnd):
 
     def _get_sections_impl(self) -> Iterator[Section]:
         """Iterate over all memory sections."""
-        self._ensure_program_loaded()
-        memory = self._program.getMemory()
+        program = self._get_actual_program()
+        memory = program.getMemory()
         for block in memory.getBlocks():
             yield GhidraSection(block)
 
     def get_section_by_name(self, name: str) -> Section | None:
         """Get section by name."""
-        self._ensure_program_loaded()
-        memory = self._program.getMemory()
+        program = self._get_actual_program()
+        memory = program.getMemory()
         block = memory.getBlock(name)
         if block:
             return GhidraSection(block)
         return None
 
     def _get_raw_imports(self) -> Iterator[tuple[Address, str, str]]:
-        """Get raw import data from backend."""
-        self._ensure_program_loaded()
-        import ghidra.program.model.symbol
+        """Get raw import data from backend.
 
-        symbol_table: ghidra.program.model.symbol.SymbolTable = self._program.getSymbolTable()
-        em: ghidra.program.model.symbol.ExternalManager = self._program.getExternalManager()
+        For ELF binaries, external references often appear as THUNK references
+        (e.g., PLT stubs). To better match IDA/Binary Ninja behavior, we accept
+        both data-like references (DATA/READ/DATA_IND) and THUNK references,
+        preferring data-like when available.
+        """
+        program = self._get_actual_program()
+        import ghidra.program.model.symbol as symbol_module
+
+        symbol_table: symbol_module.SymbolTable = program.getSymbolTable()
+        em: symbol_module.ExternalManager = program.getExternalManager()
+
+        seen_addrs: set[int] = set()
+
+        # Detect executable format for module normalization
+        try:
+            fmt = self.filetype()
+            is_elf = "ELF" in fmt
+        except Exception:
+            is_elf = False
 
         for symbol in symbol_table.getExternalSymbols():
-            symbol: ghidra.program.model.symbol.Symbol
-            # Get the external location using the external manager
-            external_loc: ghidra.program.model.symbol.ExternalLocation = em.getExternalLocation(symbol)
-            function_name = external_loc.getLabel() or ""
-            library_name = external_loc.getLibraryName() or ""
-            # Find references to this external symbol
+            # Resolve external location for name/library if available
+            external_loc: symbol_module.ExternalLocation = em.getExternalLocation(symbol)
+
+            function_name = ""
+            library_name = ""
+            if external_loc is not None:
+                function_name = external_loc.getLabel() or ""
+                library_name = external_loc.getLibraryName() or ""
+                # Normalize EXTERNAL library placeholder to empty so we can apply ELF default
+                lib_str = library_name.strip()
+                if lib_str.upper().startswith("<EXTERNAL>") or lib_str.lower() == "unknown":
+                    library_name = ""
+
+            if not function_name:
+                function_name = symbol.getName() or ""
+
             refs = symbol.getReferences()
-            if refs:
-                for ref in refs:
-                    if ref.referenceType.toString() == "DATA":
-                        addr = Address(ref.getFromAddress().getOffset())
-                        yield (addr, function_name, library_name)
+            if not refs:
+                continue
+
+            RefType = symbol_module.RefType
+            data_like: list = []
+            thunk_like: list = []
+            for ref in refs:
+                rtype = ref.getReferenceType()
+                # Prefer data-like references that point to IAT/GOT entries
+                if rtype in (RefType.DATA, RefType.READ, RefType.DATA_IND):
+                    data_like.append(ref)
+                elif rtype == RefType.THUNK or str(rtype) == "THUNK":
+                    thunk_like.append(ref)
+
+            # Prefer data-like references (IAT/GOT) for stability; fallback to thunk/code
+            chosen = data_like[0] if data_like else (thunk_like[0] if thunk_like else None)
+            if not chosen:
+                continue
+
+            from_addr = chosen.getFromAddress()
+            addr_int = from_addr.getOffset()
+
+            if addr_int in seen_addrs:
+                continue
+            seen_addrs.add(addr_int)
+
+            # Normalize module for ELF when missing
+            module_out = library_name or ("GLIBC" if is_elf else "unknown")
+            yield (Address(addr_int), function_name, module_out)
 
     def get_exports(self) -> Iterator[tuple[str, Address]]:
         """Get all exported symbols from the binary."""
-        self._ensure_program_loaded()
-        symbol_table = self._program.getSymbolTable()
+        program = self._get_actual_program()
+        symbol_table = program.getSymbolTable()
 
         # Iterate through all symbols and find exports
         for symbol in symbol_table.getAllSymbols(True):
@@ -487,14 +719,14 @@ class GhidraBackend(BackEnd):
 
     def _add_user_xref_impl(self, source: Address, target: Address) -> None:
         """Backend-specific implementation for adding user cross-references."""
-        self._ensure_program_loaded()
+        program = self._get_actual_program()
         # Import locally to avoid module-level dependency issues
         import ghidra.program.model.symbol as symbol_module
 
         RefType = symbol_module.RefType
         SourceType = symbol_module.SourceType
 
-        ref_manager = self._program.getReferenceManager()
+        ref_manager = program.getReferenceManager()
         source_addr = self._addr_factory.getAddress(f"{source.value:x}")
         target_addr = self._addr_factory.getAddress(f"{target.value:x}")
 
@@ -502,8 +734,8 @@ class GhidraBackend(BackEnd):
 
     def _set_comment_impl(self, address: Address, comment: str) -> None:
         """Backend-specific implementation for setting comments."""
-        self._ensure_program_loaded()
-        listing = self._program.getListing()
+        program = self._get_actual_program()
+        listing = program.getListing()
         ghidra_addr = self._addr_factory.getAddress(f"{address.value:x}")
         # Use numeric constant instead of importing the class
         EOL_COMMENT = 0
@@ -511,13 +743,13 @@ class GhidraBackend(BackEnd):
 
     def _set_function_comment_impl(self, address: Address, comment: str) -> None:
         """Backend-specific implementation for setting function comments."""
-        self._ensure_program_loaded()
+        program = self._get_actual_program()
         # Use cached address factory
         ghidra_addr = self._addr_factory.getAddress(f"{address.value:x}")
-        function_manager = self._program.getFunctionManager()
+        function_manager = program.getFunctionManager()
         func = function_manager.getFunctionContaining(ghidra_addr)
         if func:
-            listing = self._program.getListing()
+            listing = program.getListing()
             # Use numeric constant instead of importing the class
             PLATE_COMMENT = 1
             listing.setComment(func.getEntryPoint(), PLATE_COMMENT, comment)
@@ -526,20 +758,127 @@ class GhidraBackend(BackEnd):
 
     def _path_impl(self) -> str:
         """Backend-specific implementation for getting binary path."""
-        self._ensure_program_loaded()
         try:
-            executable_path = self._program.getExecutablePath()
+            program = self._get_actual_program()
+            executable_path = program.getExecutablePath()
             if executable_path:
                 return executable_path
             # Fallback to program name
-            return self._program.getName()
+            return program.getName()
         except Exception as e:
             raise BackendError(f"Failed to get binary path: {e}")
 
     def _binary_hash_impl(self) -> str:
         """Compute SHA256 hash of the binary file."""
-        self._ensure_program_loaded()
-        sha256 = self._program.getExecutableSHA256()
+        program = self._get_actual_program()
+        sha256 = program.getExecutableSHA256()
         if sha256:
             return sha256
         raise BackendError("Failed to compute binary hash")
+
+    def filetype(self) -> str:
+        program = self._get_actual_program()
+        format_name = program.getExecutableFormat()
+        return format_name
+
+    def _get_disassembly_impl(self, address: Address) -> Instruction:
+        """Disassemble a single instruction at `address` using Ghidra APIs."""
+        program = self._get_actual_program()
+        listing = program.getListing()
+
+        ea = int(address)
+        gh_addr = self._addr_factory.getAddress(f"{ea:x}")
+
+        inst = listing.getInstructionAt(gh_addr)
+        if inst is None:
+            raise BackendError(f"No instruction at address 0x{ea:x}")
+
+        text = inst.toString()
+        mnem = inst.getMnemonicString().lower()
+
+        # Import Java classes for operand inspection
+        from ghidra.program.model.scalar import Scalar as GScalar
+        from ghidra.program.model.address import Address as GAddress
+        from ghidra.program.model.lang import Register as GRegister
+
+        operands: list[Operand] = []
+        num_ops = inst.getNumOperands()
+        # Pre-fetch references for value recovery (e.g., RIP-relative immediates)
+        memory = program.getMemory()
+        inst_refs = list(inst.getReferencesFrom())
+        for i in range(num_ops):
+            op_text = inst.getDefaultOperandRepresentation(i)
+            objs = inst.getOpObjects(i)
+
+            is_mem = ("[" in op_text and "]" in op_text)
+            has_reg = any(isinstance(o, GRegister) for o in objs)
+            has_addr = any(isinstance(o, GAddress) for o in objs)
+            has_scalar = any(isinstance(o, GScalar) for o in objs)
+
+            if is_mem:
+                op_kind = OperandType.MEMORY
+            elif has_reg and not (has_addr or has_scalar):
+                op_kind = OperandType.REGISTER
+            elif has_addr or has_scalar:
+                op_kind = OperandType.IMMEDIATE
+            else:
+                op_kind = OperandType.OTHER
+
+            val = None
+            if op_kind == OperandType.MEMORY:
+                # Only treat embedded absolute addresses as values for memory operands
+                if has_addr:
+                    for o in objs:
+                        if isinstance(o, GAddress):
+                            val = Address(int(o.toString(), 16))
+                            break
+            elif op_kind == OperandType.IMMEDIATE:
+                if has_addr:
+                    for o in objs:
+                        if isinstance(o, GAddress):
+                            val = Address(int(o.toString(), 16))
+                            break
+                elif has_scalar:
+                    for o in objs:
+                        if isinstance(o, GScalar):
+                            # Keep only non-negative immediates as Address values
+                            uv = int(o.getValue())
+                            if uv is not None and uv >= 0:
+                                val = Address(uv)
+                            break
+
+            # Use instruction references to recover operand target addresses
+            # when operand objects do not expose a GAddress (e.g., LEA with
+            # RIP-relative immediate shown as Scalar).
+            if val is None and inst_refs:
+                for ref in inst_refs:
+                    if ref.getOperandIndex() == i:
+                        to_addr = ref.getToAddress()
+                        if to_addr is None:
+                            continue
+                        if to_addr.isStackAddress() or not to_addr.isMemoryAddress():
+                            continue
+                        if memory and not memory.contains(to_addr):
+                            continue
+                        offset = Address(int(to_addr.toString(), 16))
+                        # offset = to_addr.getUnsignedOffset()
+                        # if offset < 0 and hasattr(to_addr, "getUnsignedOffset"):
+                        #     offset = to_addr.getUnsignedOffset()
+                        if offset is None or offset < 0:
+                            continue
+                        try:
+                            val = Address(int(offset))
+
+                        except ValueError:
+                            continue
+                        break
+
+            operands.append(Operand(type=op_kind, text=op_text, value=val))
+
+        ins = Instruction(
+            address=Address(ea),
+            mnemonic=mnem,
+            operands=tuple(operands),
+            text=text
+        )
+        return ins

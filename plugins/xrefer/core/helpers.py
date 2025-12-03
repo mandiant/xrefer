@@ -156,8 +156,8 @@ def enrich_string_data_core(str_indexes: List[int], entity_list: List[str], look
                 return {"UNCATEGORIZED": {"path": "", "matched_lines": {}}}
             repositories = {}
             for hit in hits:
-                repo_name = hit["repo"]["raw"]
-                path = hit["path"]["raw"]
+                repo_name = hit["repo"]
+                path = hit["path"]
                 snippet = hit["content"]["snippet"]
                 matched_lines = parse_snippet(snippet)
                 repositories[repo_name] = {"path": f"{repo_name}/{path}", "matched_lines": matched_lines}
@@ -333,13 +333,11 @@ def filter_null_string(s: str, size: int) -> Tuple[str, int]:
     Returns:
         Tuple[str, int]: Filtered string and its actual length
     """
-    ss, i = "", 0
-    while i < size:
-        if s[i] == "\x00":
-            break
-        ss += s[i]
-        i += 1
-    return ss, i
+    limit = min(size, len(s))
+    for i, ch in enumerate(s[:limit]):
+        if ch == "\x00":
+            return s[:i], i
+    return s[:limit], limit
 
 
 def longest_line_length(s: Optional[str]) -> int:
@@ -691,6 +689,18 @@ def sort_clusters(clusters, paths):
     return sorted_primary + sorted_secondary
 
 
+
+_log_func = None
+
+def set_log_function(func) -> None:
+    """Set a custom log implementation used by core helpers.
+
+    GUI or environment-specific frontends (e.g. IDA plugin) can call this
+    at initialization to route all `log` calls through their own handler.
+    """
+    global _log_func
+    _log_func = func
+
 def log(string: str) -> None:
     """
     Log message with XRefer prefix.
@@ -701,7 +711,10 @@ def log(string: str) -> None:
     Args:
         string (str): Message to log
     """
-    print(f"[XRefer] {string}")
+    if _log_func is not None:
+        _log_func(string)
+    else:
+        print(f"[XRefer] {string}")
 
 
 def log_elapsed_time(msg: str, start_time: float) -> None:

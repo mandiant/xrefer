@@ -113,6 +113,18 @@ class VMRayTraceParser(BaseTraceParser):
 
         return param_dict
 
+    def _format_call_str(self, call_str_base: str, return_str: str) -> str:
+        """Format call string; use IDA-style colors when available, else plain text."""
+        try:
+            import ida_lines
+            from xrefer.gui.helpers import colorize_api_call
+
+            colored_call = colorize_api_call(call_str_base)
+            colored_ret = ida_lines.COLSTR(str(return_str), ida_lines.SCOLOR_DSTR)
+            return f"{colored_call} \x01{ida_lines.SCOLOR_DEMNAME}=\x02{ida_lines.SCOLOR_DEMNAME} {colored_ret}"
+        except Exception as e:
+            return f"{call_str_base} = {return_str}"
+
     def _correlate_memory_regions(self, summary_json: dict, flog_root: ET.Element) -> Dict[str, Dict]:
         """
         Correlates file paths/hashes from summary_v2.json with memory_mapped_file regions in flog.xml.
@@ -307,7 +319,7 @@ class VMRayTraceParser(BaseTraceParser):
                 call_str_base = f"({', '.join(args_str)})"
                 # TODO(rand0m): This is formatting. Should be in gui/. Refactoring the entire code is needed. No time for this now.  There was a colorize_api_call function in the original code.
                 return_str = str(return_value or "0")
-                call_str = f"{call_str_base} = {return_str}"
+                call_str = self._format_call_str(call_str_base, return_str)
 
                 full_name = self.get_standard_api_name(api_name, known_imports)
                 formatted_args = self.format_arg_list(in_params)

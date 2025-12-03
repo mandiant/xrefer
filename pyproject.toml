@@ -1,0 +1,169 @@
+[project]
+name = "xrefer"
+authors = [
+  {name = "m-umairx"},
+  {name = "binjo" },
+  {name = "rand-tech" },
+]
+version = "2.0.0.20251030"
+description = "FLARE Team's Binary Navigator"
+requires-python = ">=3.11"
+dependencies = [
+    "asciinet>=0.3.1",
+    "beautifulsoup4>=4.13.4",
+    "dspy>=3.0.3",
+    "flare-capa",
+    "networkx>=3.5",
+    "pydantic>=2.11.7",
+    "pydantic-settings>=2.10.1",
+    "python-statemachine>=2.5.0",
+    "requests>=2.32.4",
+    "tabulate>=0.9.0",
+]
+
+[dependency-groups]
+dev = [
+    "coverage>=7.9.2",
+    "isort>=6.0.1",
+    "line-profiler>=4.2.0",
+    "memory-profiler>=0.61.0",
+    "pre-commit>=4.2.0",
+    "pysnooper>=1.2.3",
+    "pytest>=8.4.1",
+    "pytest-cov>=6.2.1",
+    "ruff>=0.12.2",
+    "vulture>=2.14",
+]
+ida = [
+    "idapro",
+]
+binaryninja = []
+ghidra = [
+    "ghidra-stubs>=11.4",
+    "pyghidra>=2.2.0",
+]
+
+[tool.uv]
+override-dependencies = [
+    "msgpack>=1.1.1", # flare-capa->vivisect pins the msgpack version which leads to build errors. Overwrite it since it is not critical.
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-dir]
+"" = "plugins"
+
+[tool.setuptools.packages.find]
+where = ["plugins"]
+
+[project.urls]
+source = "https://github.com/mandiant/xrefer"
+repository = "https://github.com/mandiant/xrefer"
+
+[project.scripts]
+xrefer = "xrefer.cli:main"
+
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--cov=plugins.xrefer",
+    "--cov-report=term-missing",
+    "--cov-report=html:tests/htmlcov",
+    "--no-cov-on-fail",
+]
+testpaths = ["tests"]
+pythonpath = ["plugins"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+    "backend_ida: marks tests requiring IDA Pro backend",
+    "backend_binaryninja: marks tests requiring Binary Ninja backend",
+    "backend_ghidra: marks tests requiring Ghidra backend",
+    "requires_binary: marks tests that need a sample binary",
+    "requires_ida: marks tests requiring IDA Pro environment",
+    "requires_binaryninja: marks tests requiring Binary Ninja environment",
+    "requires_ghidra: marks tests requiring Ghidra environment",
+    "json_serialization: marks tests for JSON serialization functionality",
+    "workspace_isolation: marks tests requiring isolated workspace",
+]
+filterwarnings = [
+    "error",
+    "ignore::UserWarning",
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 200
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "B",    # flake8-bugbear
+    "S",    # flake8-bandit (security)
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific
+]
+fixable = ["ALL"]
+ignore = [
+    "S101",   # Use of assert detected (pytest uses asserts)
+    "S102",   # Use of exec detected (used in tests)
+    "S110",   # try-except-pass detected (legitimate in error handling)
+    "S112",   # try-except-continue detected (legitimate in error handling)
+    "S301",   # pickle usage (legitimate for serialization)
+    "S108",   # Hardcoded temporary file path (legitimate for temp directories)
+    "S314",   # XML parsing (legitimate usage)
+    "S605",   # Starting a process with a shell (legitimate for kill command)
+    "S603",   # subprocess call: check for execution of untrusted input
+    "S607",   # Starting a process with a partial executable path
+    "E402",   # Module level import not at top of file (needed for plugin loading)
+    "E722",   # Bare except (legitimate in some error handling contexts)
+    "E741",   # Ambiguous variable name (common in short loops)
+    "B007",   # Loop control variable not used within loop body (legitimate pattern)
+    "B008",   # Do not perform function calls in argument defaults
+    "B023",   # Function definition does not bind loop variable (legitimate pattern)
+    "B904",   # Within except clause, raise exceptions with raise ... from err (style preference)
+    "SIM102", # Use single if statement (sometimes nested is clearer)
+    "SIM105", # Use contextlib.suppress (style preference)
+    "SIM108", # Use ternary operator (style preference)
+    "SIM110", # Use any() instead of for loop (style preference)
+    "SIM113", # Use enumerate() for index variable (style preference)
+    "SIM115", # Use context manager for opening files (not always applicable)
+    "SIM118", # Use key in dict instead of key in dict.keys() (style preference)
+    "UP031",  # Use format specifiers instead of percent format (style preference)
+    "UP038",  # Use isinstance with tuple (style preference)
+    "RUF005", # Use list unpacking instead of + (style preference)
+    "RUF013", # PEP 484 prohibits implicit Optional (style preference)
+    "RUF022", # __all__ is not sorted (style preference)
+    "C401",   # Use set comprehension (style preference)
+    "C405",   # Use set literal (style preference)
+    "SIM103", # Return the condition directly (style preference)
+    "F811",   # Redefinition of unused variable (common in imports)
+    "F821",   # Undefined name (legitimate when using dynamic imports)
+    "F841",   # Local variable assigned but never used (common in development)
+    "B012",   # Return inside finally block (legitimate in some contexts)
+    "RUF002", # Docstring contains ambiguous unicode (style preference)
+    "RUF012", # Mutable class attributes should be annotated with ClassVar (style preference)
+    "E501",   # Line too long
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/unit/*" = ["PLC0415", "BLE001","F841", "SIM105", "B007"]  # Allow imports outside top-level in unit tests/Allow unused variables in unit tests
+"tests/e2e/*" = ["F841", "B007"]  # Allow unused variables in E2E tests
+
+[tool.isort]
+line_length = 200
+
+[tool.coverage.run]
+parallel = true

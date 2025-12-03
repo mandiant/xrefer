@@ -12,24 +12,21 @@ More can be read about XRefer in the accompanying [blog post](https://cloud.goog
 ## Installation
 
 1. **Clone the Repository:**
-  ```
-  git clone https://github.com/mandiant/xrefer.git
-  ```
-
+   ```
+   git clone https://github.com/mandiant/xrefer.git
+   ```
 2. **Install the Plugin:**
-- Inside the cloned repository, a `plugins` directory contains the plugin code.
-- Copy the contents of `plugins/` into your IDA Pro `plugins` directory:
-```
-cp -r xrefer/plugins/* /path/to/IDA/plugins/
-```
-
-3. **Install Dependencies:**
-From the main directory of the cloned repository:
-  ```
-  pip install -r requirements.txt
-  ```
-
-_Note: The `asciinet` dependency requires Java to be installed. OpenJDK or any JRE should work. Ensure `java` is accessible on your system's PATH._
+  - Inside the cloned repository, a `plugins` directory contains the plugin code.
+  - Copy the contents of `plugins/` into your IDA Pro `plugins` directory:
+    ```
+    cp -r xrefer/plugins/* /path/to/IDA/plugins/
+    ```
+3. **Install Dependencies:**  
+   From the main directory of the cloned repository:
+   ```
+   pip install -r requirements-ida.txt
+   ```
+   _Note: The `asciinet` dependency requires Java to be installed. OpenJDK or any JRE should work. Ensure `java` is accessible on your system's PATH._
 
 ## Usage
 
@@ -55,3 +52,75 @@ Contributions, bug reports, and feature requests are welcome. Please open an iss
 ## Important Privacy Notice
 
 XRefer's LLM-based features, when enabled, send portions of analyzed data (e.g., APIs, strings, library references, and function relationships) to external servers, such as Google's Gemini API or other configured LLM endpoints. These external services process the information to generate natural language descriptions and insights. If you are analyzing sensitive binaries or prefer not to share data outside your local environment, you can disable all LLM features in the settings, preventing any external communication. Please consult Google Gemini's [Terms of Service](https://cloud.google.com/gemini/docs/discover/data-governance)  before use.
+
+## CLI Installation
+
+1. Clone the repository and enter it:
+   ```bash
+   git clone https://github.com/mandiant/xrefer && cd xrefer
+   ```
+2. Install the package (creates `.venv` and syncs dependencies):
+   If you have not yet installed `uv`, check out the [installation instructions](https://docs.astral.sh/uv/#installation).
+   After installing `uv`, run:
+   ```bash
+   uv sync
+   ```
+3. Add any required reverse-engineering backends (IDA Pro, Binary Ninja, Ghidra).  
+   Reference: [IDA](https://docs.hex-rays.com/user-guide/idalib), [Binary Ninja](https://docs.binary.ninja/dev/batch.html#install-the-api), [Ghidra](https://pypi.org/project/pyghidra/).
+   e.g. for IDA:
+   ```bash
+   # set `IDADIR`
+   uv sync --group ida
+   ```
+   for ghidra:
+   ```bash
+   # set `GHIDRA_INSTALL_DIR`
+   uv sync --group ghidra
+   ```
+   if you want multiple backends, add them all.
+   ```
+   uv sync --group ida --group ghidra
+   ```
+4. Run analyses from the packaged CLI:
+   ```bash
+   uv run xrefer --backend ghidra /path/to/binary
+   ```
+   For reference on CLI options, run:
+   ```bash
+    ❯ uv run xrefer --help
+    usage: xrefer [-h] --backend {ida,binaryninja,ghidra} [--save] [--auto-analysis] [--mode {light,full}] [--no-html-report] [--force]
+                  [--entry-point ENTRY_POINT] [-L LOGFILE]
+                  file
+
+    Unified XRefer CLI for multiple backends
+
+    positional arguments:
+      file                  Path to the file to analyze
+
+    options:
+      -h, --help            show this help message and exit
+      --backend {ida,binaryninja,ghidra}
+                            Analysis backend to use (available: ida, binaryninja, ghidra)
+      --save                Save changes to database/project
+      --auto-analysis       Run auto analysis (default: True)
+      --mode {light,full}   Select analyzer mode (default: full)
+      --no-html-report      Disable HTML report generation
+      --force               Remove previous artifacts and re-analyze
+      --entry-point ENTRY_POINT
+                            Override entry point address (decimal or hex like 0x401000)
+      -L, --logfile LOGFILE
+                            Output log file path
+    ```
+
+
+## Development
+
+1. Setup a development environment:
+   ```bash
+   uv sync --group dev
+   ```
+1. Clone the test-samples
+   ```
+   git submodule update --init --recursive
+   ```
+

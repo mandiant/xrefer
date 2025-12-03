@@ -14,10 +14,9 @@
 
 import json
 import os
-from time import time
+import time
 from typing import Any, Dict, List
 
-from xrefer import backend
 from xrefer.core.helpers import log
 
 PathType = str
@@ -49,16 +48,22 @@ class XReferSettingsManager:
 
         # IDB-specific settings - paths that can be customized per IDB
         self.idb_specific_paths = {"analysis", "capa", "trace", "xrefs"}
-        self.current_idb = backend.sample_path()
+        self._current_idb = None  # Lazy
+
+    @property
+    def current_idb(self) -> str:
+        if self._current_idb is None:
+            from ..backend import sample_path
+            self._current_idb = sample_path()
+        return self._current_idb
 
     def get_default_settings(self) -> Dict[str, Any]:
         """Get default settings dictionary with added display options."""
         settings = {
             "llm_lookups": True,
             "git_lookups": False,
-            "suppress_notifications": False,
-            "llm_origin": "google",
-            "llm_model": "gemini-1.5-pro",
+            "suppress_notifications": True,
+            "llm_model_id": "gemini/gemini-2.5-pro",
             "api_key": "",
             "enable_exclusions": True,
             "display_options": {"auto_size_graphs": True, "hide_llm_disclaimer": False, "show_help_banner": True, "default_panel_width": 779},
@@ -116,6 +121,7 @@ class XReferSettingsManager:
         default_settings = self.get_default_settings()
 
         if not os.path.exists(self.settings_file):
+            log("Settings file not found, using defaults")
             return default_settings
 
         try:
@@ -125,6 +131,24 @@ class XReferSettingsManager:
 
                 # Ensure all expected keys exist by updating with defaults
                 self.migrate_settings(settings, default_settings)
+
+                # Migrate legacy LLM settings if necessary
+                if "llm_model_id" not in settings:
+                    origin = settings.get("llm_origin")
+                    model = settings.get("llm_model")
+                    if origin and model:
+                        combined = f"{origin}/{model}" if "/" not in model else model
+                        settings["llm_model_id"] = combined
+                    else:
+                        settings["llm_model_id"] = default_settings["llm_model_id"]
+
+                settings["llm_model_id"] = settings["llm_model_id"].strip()
+                if settings["llm_model_id"].startswith("/" ):
+                    settings["llm_model_id"] = default_settings["llm_model_id"]
+
+                # Remove deprecated keys to avoid confusion
+                settings.pop("llm_origin", None)
+                settings.pop("llm_model", None)
 
                 # Initialize idb_specific_paths if not present
                 if "idb_specific_paths" not in settings:

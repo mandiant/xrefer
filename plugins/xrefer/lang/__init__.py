@@ -13,18 +13,41 @@
 # limitations under the License.
 
 
-from . import lang_base, lang_default, lang_registry
+"""Public interface for language analyzers."""
+
+from functools import lru_cache
+from xrefer.core.helpers import log
 from .lang_base import LanguageBase
-from .lang_registry import get_language_object
 
-# from .ida import rust
+__all__ = ("LanguageBase", "get_language_object", "language_classes")
 
 
-__all__ = [
-    "lang_base",
-    "lang_default",
-    "lang_registry",
-    "get_language_object",
-    "LanguageBase",
-    # "rust",
-]
+@lru_cache(maxsize=1)
+def language_classes() -> tuple[type[LanguageBase], ...]:
+    """Lazy list of registered language analyzers."""
+
+    from .lang_rust import LangRust
+
+    return (LangRust,)
+
+
+def get_language_object() -> LanguageBase:
+    """Return the language implementation that matches the active backend."""
+
+    from .lang_default import LangDefault
+
+    lang_classes = language_classes()
+
+    for lang_class in lang_classes:
+        lang_obj = lang_class()
+        if lang_obj.lang_match():
+            log(f"{lang_class.__name__} matches current binary, initializing...")
+            lang_obj.initialize()
+            return lang_obj
+        else:
+            print(f"{lang_class.__name__} does not match current binary.")
+
+    default_lang = LangDefault()
+    log("No language match found, using LangDefault.")
+    default_lang.initialize()
+    return default_lang

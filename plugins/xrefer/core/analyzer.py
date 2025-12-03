@@ -14,27 +14,28 @@
 
 import enum
 import gzip
+import html
 import json
 import os
 import pickle
 import re
 import shutil
-from collections import OrderedDict, defaultdict, deque
+import datetime
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from operator import itemgetter
 from pathlib import Path
 from time import time
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union, Literal
 
+import xrefer
 from xrefer.backend import Address, BackEnd, FunctionType, XrefType, get_current_backend
 from xrefer.core.clusters import ClusterManager, FunctionalCluster
-from xrefer.core.helpers import enrich_string_data_core, log, log_elapsed_time
+from xrefer.core.helpers import enrich_string_data_core, find_cluster_analysis, log, log_elapsed_time
 from xrefer.core.settings import XReferSettingsManager
 from xrefer.lang import get_language_object
-from xrefer.llm.artifact_analyzer import ArtifactAnalyzer
-from xrefer.llm.base import ModelConfig, ModelType
-from xrefer.llm.categorizer import CATEGORIES, Categorizer
-from xrefer.llm.cluster_analyzer import ClusterAnalyzer
+from xrefer.llm import ArtifactAnalyzer, ClusterAnalyzer, CATEGORIES, Categorizer
+from xrefer.llm.base import ModelConfig
 from xrefer.loaders.capa import load_capa_json
 from xrefer.loaders.trace import parse_api_trace
 
@@ -44,13 +45,9 @@ if TYPE_CHECKING:
 try:
     from idaapi import hide_wait_box, show_wait_box
 except ImportError:
-
     def show_wait_box(message: str, *args, **kwargs) -> None:
-        """Fallback for show_wait_box if idaapi is not available."""
-        print(f"Wait: {message}", *args, **kwargs)
-
+        print(f"Wait: {message.removeprefix('HIDECANCEL\n')}", *args, **kwargs)
     def hide_wait_box(*args, **kwargs) -> None:
-        """Fallback for hide_wait_box if idaapi is not available."""
         print("Wait box hidden", *args, **kwargs)
 
 
@@ -78,6 +75,9 @@ class Reference:
         """Get human-readable type name."""
         return self.entity_type.name.lower()
 
+AnalysisMode = Literal["light", "full"]
+""" Light: Disables Language Model categorization & xref propagation.  """
+
 
 class XRefer:
     """
@@ -92,7 +92,15 @@ class XRefer:
     INDIRECT_XREFS = 1
     COMBINED_XREFS = 2
 
-    def __init__(self, ep: Optional[int] = None, backend: Optional[BackEnd] = None, auto_analyze: bool = True) -> None:
+    def __init__(
+        self,
+        ep: Optional[int] = None,
+        backend: Optional[BackEnd] = None,
+        auto_analyze: bool = True,
+        *,
+        mode: Optional[AnalysisMode] = 'full',
+        html_report: bool = True,
+    ) -> None:
         """
         Initialize the XRefer object.
 
@@ -188,8 +196,9 @@ class XRefer:
             self._processed_orphan_thunks: Set[int] = set()
             self.clusters = None
             self.cluster_analysis = None
+            self.mode = mode
+            self.html_report = html_report
             self.configure_llm_and_lookups()
-
             # Run analysis if requested
             if auto_analyze:
                 self.load_analysis()
@@ -304,7 +313,7 @@ class XRefer:
 
         log("Sifting library references...")
 
-        if self.llm_lookups:
+        if self.llm_lookups and self.mode == 'full':
             lib_list = [x[1] for x in self.lang.lib_refs]
             _, self.categories["lib_categories"] = Categorizer.categorize(lib_list, self.categories["libs"], type="lib")
 
@@ -451,7 +460,7 @@ class XRefer:
             if not artifacts:
                 log("No artifacts found for analysis")
                 return
-
+            log(f"Total artifacts for analysis: {len(artifacts)}")
             # Get interesting artifacts
             interesting_artifacts = ArtifactAnalyzer.find_interesting_artifacts(artifacts)
 
@@ -569,7 +578,6 @@ class XRefer:
             for block in func.basic_blocks:
                 # Iterate over the instructions in the basic block
                 for addr in self._backend.instructions(block.start, block.end):
-                    # print(f"{idc.func_contains(addr, addr)}, create_xref_mapping, \t{addr = :#x}")
                     for ref in self._backend.get_xrefs_from(Address(addr)):
                         # Check if the reference points within the same function
                         if Address(ref.target) in func:
@@ -631,6 +639,25 @@ class XRefer:
         """
         return {"libs": set(), "imports": set(), "strings": set(), "capa": set(), "api_trace": set(), "libs_ea": {}, "imports_ea": {}, "strings_ea": {}, "capa_ea": {}, "api_trace_ea": {}}
 
+    def ensure_global_xrefs_entry(self, func_ea: int) -> Dict[int, Dict[str, Union[Set[int], Dict[int, Set[int]]]]]:
+        """
+        Ensure a global_xrefs entry exists for the given function address.
+
+        Args:
+            func_ea (int): Function address.
+
+        Returns:
+            Dict[int, Dict[str, Union[Set[int], Dict[int, Set[int]]]]]: The initialized global_xrefs entry.
+        """
+        return self.global_xrefs.setdefault(
+            func_ea,
+            {
+                self.DIRECT_XREFS: self.init_global_xrefs_template(),
+                self.INDIRECT_XREFS: self.init_global_xrefs_template(),
+                self.COMBINED_XREFS: set(),
+            },
+        )
+
     def set_and_get_entity_index(self, entity: Tuple[str, str, EntityType]) -> int:
         """
         Get the index of an entity, adding it to the list if not already present.
@@ -657,16 +684,20 @@ class XRefer:
         """
         log("Getting imports...")
         entries = list(self._backend.get_imports())
-        if self.llm_lookups:
+        categorize_apis = self.llm_lookups and self.mode == "full"
+        if categorize_apis:
             api_list = [x[1] for x in entries]
             _, self.categories["api_categories"] = Categorizer.categorize(api_list, self.categories["apis"])
         for ea, name, module_name in entries:
-            try:
-                category_index = self.categories["apis"][name]
-                category = self.categories["api_categories"][category_index]
-                entity = (category, name, EntityType.IMPORT)
-            except (KeyError, IndexError) as e:
-                log(f"Warning: Failed to categorize import {name}: {e}")
+            if categorize_apis:
+                try:
+                    category_index = self.categories["apis"][name]
+                    category = self.categories["api_categories"][category_index]
+                    entity = (category, name, EntityType.IMPORT)
+                except (KeyError, IndexError) as e:
+                    log(f"Warning: Failed to categorize import {name}: {e}")
+                    entity = (module_name, name, EntityType.IMPORT)
+            else:
                 entity = (module_name, name, EntityType.IMPORT)
             self.entities.append(entity)
             self.imports.append(Reference(int(ea), len(self.entities) - 1, EntityType.IMPORT))
@@ -733,6 +764,7 @@ class XRefer:
         """
         log("Mapping references to leaf functions...")
         ref_to_search: List[Reference] = []
+        initial_leaf_count = len(self.leaf_funcs)
 
         while ref_list:
             # addr, item, type = ref_list.pop()
@@ -765,6 +797,7 @@ class XRefer:
                 ref_list = ref_to_search
                 ref_to_search = []
 
+        log(f"Mapped {len(self.mapped_refs)} references to {len(self.leaf_funcs) - initial_leaf_count} new leaf functions (total: {len(self.leaf_funcs)})")
     def propagate_xref_nodes(self, iter: int) -> bool:
         """
         Propagate cross-reference information through call paths.
@@ -788,6 +821,7 @@ class XRefer:
             - Updates entity visibility through call chains
         """
         total = len(self.paths[self.current_analysis_ep]) - 1
+        assert total >= 0, f"Hmm, {self.current_analysis_ep = :#x}, {self.paths = }"
         modified = False
 
         for index, (_, path_group) in enumerate(self.paths[self.current_analysis_ep].items()):
@@ -849,9 +883,9 @@ class XRefer:
             if not func:
                 continue
 
-            if func.is_thunk:
-                continue
             fn_start = func.start
+            if func.is_thunk and not self.is_simple_api_thunk(fn_start):
+                continue
 
             # Use orphan check that considers indirect xrefs
             is_orphan = self.is_orphan_function(fn_start)
@@ -992,15 +1026,19 @@ class XRefer:
             for path in path_group:
                 child_func_ea = None
                 for func_ea in reversed(path):
+                    parent_xref_entry = self.ensure_global_xrefs_entry(func_ea)
                     for xref_type in "libs", "imports", "strings", "capa", "api_trace":
                         for xref_cat in self.DIRECT_XREFS, self.INDIRECT_XREFS:
-                            self.global_xrefs[func_ea][self.COMBINED_XREFS].update(self.global_xrefs[func_ea][xref_cat][xref_type])
+                            parent_xref_entry[self.COMBINED_XREFS].update(parent_xref_entry[xref_cat][xref_type])
+                            if child_func_ea is None:
+                                continue
+                            child_xref_entry = self.ensure_global_xrefs_entry(child_func_ea)
                             try:
-                                for xref in self.global_xrefs[child_func_ea][xref_cat][xref_type]:
+                                for xref in child_xref_entry[xref_cat][xref_type]:
                                     try:
-                                        self.global_xrefs[func_ea][self.INDIRECT_XREFS][self.entity_suffix_map[xref_type]][xref].add(child_func_ea)
+                                        parent_xref_entry[self.INDIRECT_XREFS][self.entity_suffix_map[xref_type]][xref].add(child_func_ea)
                                     except KeyError:
-                                        self.global_xrefs[func_ea][self.INDIRECT_XREFS][self.entity_suffix_map[xref_type]][xref] = {child_func_ea}
+                                        parent_xref_entry[self.INDIRECT_XREFS][self.entity_suffix_map[xref_type]][xref] = {child_func_ea}
                             except KeyError:
                                 pass
 
@@ -1127,13 +1165,8 @@ class XRefer:
                                     root_nodes.add(simplified[0])
                                     # Update intermediate paths map
                                     intermediate_paths_map.update(path_intermediates)
-
             if not graph_paths or not root_nodes:
-                log("No valid paths found for clustering")
-                # Restore previous state
-                self.clusters = current_clusters
-                self.cluster_analysis = current_analysis
-                return
+                raise AssertionError("Cluster analysis invoked without any valid call paths")
 
             # Create clusters
             log(f"Creating clusters from {len(graph_paths)} paths with {len(root_nodes)} root nodes")
@@ -1151,7 +1184,40 @@ class XRefer:
 
                 log(f"Generated analysis for {len(self.cluster_analysis.get('clusters', {}))} clusters")
 
+                def populate_library_flag(cluster_list):
+                    for cluster in cluster_list:
+                        analysis = find_cluster_analysis(self.cluster_analysis, cluster.id)
+                        if analysis:
+                            # The LLM returns 0 or 1. Convert to boolean.
+                            is_lib_val = analysis.get("library_or_runtime") if isinstance(analysis, dict) else analysis.library_or_runtime
+                            cluster.is_library = bool(int(is_lib_val))
+                        # Recurse into subclusters
+                        if cluster.subclusters:
+                            populate_library_flag(cluster.subclusters)
+
+                populate_library_flag(self.clusters)
+
+                total_clusters = 0
+                non_library_clusters = 0
+
+                def tally_clusters(cluster_list: List["FunctionalCluster"]) -> None:
+                    nonlocal total_clusters, non_library_clusters
+                    for cluster in cluster_list:
+                        total_clusters += 1
+                        if not getattr(cluster, "is_library", False):
+                            non_library_clusters += 1
+                        if cluster.subclusters:
+                            tally_clusters(cluster.subclusters)
+
+                tally_clusters(self.clusters)
+                if total_clusters:
+                    log(f"Non-library clusters: {non_library_clusters}/{total_clusters}")
             except Exception as e:
+                import traceback
+                # Don't print traceback for known rate limit errors
+                import litellm
+                if not isinstance(e, litellm.exceptions.RateLimitError):
+                    traceback.print_exc()
                 log(f"[-] Error analyzing clusters: {str(e)}")
                 # Restore previous state
                 self.clusters = current_clusters
@@ -1162,6 +1228,8 @@ class XRefer:
             # Restore previous state
             self.clusters = current_clusters
             self.cluster_analysis = current_analysis
+        assert self.clusters is not None
+        assert self.cluster_analysis is not None
 
     def generate_list_of_non_excluded_functions(self) -> None:
         """
@@ -1196,6 +1264,8 @@ class XRefer:
             if not self.llm_lookups:
                 log("LLM lookups disabled - skipping cluster analysis")
                 return
+            if ClusterAnalyzer.current_config is None:
+                raise RuntimeError("Cluster analysis requires LLM configuration, but none is set. Set llm_model_id and api_key in xrefer settings or disable llm_lookups to skip clustering.")
 
             log(f"Found {len(self.artifact_functions)} functions with non-excluded artifacts")
 
@@ -1223,6 +1293,8 @@ class XRefer:
             log("Running cluster analysis...")
             self.analyze_clusters(entities_to_cluster)
             self.save_analysis()
+            if self.html_report:
+                self.generate_html_report()
 
         except Exception as e:
             import traceback
@@ -1364,8 +1436,12 @@ class XRefer:
         Returns:
             Union[int, Dict[int, List[int]]]: Color tag or a dictionary of color tags.
         """
+        _color_tags = self.color_tags
+        # HACK: hardcode just for IDA (We need to remove IDA logic, but this is the fastest fix without breaking...)
+        if all(v == '' for v in _color_tags.values()):
+            _color_tags = {'INDIRECT LIBRARY XREFS': '\x08', 'INDIRECT IMPORT XREFS': '"', 'INDIRECT STRING XREFS': '\x1d', 'INDIRECT CAPA XREFS': '\x1a'}
         if table_name in self.color_tags:
-            return self.color_tags[table_name]
+            return _color_tags[table_name]
 
         tag_index = {}
 
@@ -1424,26 +1500,53 @@ class XRefer:
         start_time: float = time()
         analysis_file_path = self.settings["paths"]["analysis"]
 
+        cache_loaded = False
+        master_struct = None
+
         if os.path.exists(analysis_file_path):
             log("Loading existing analysis from: %s" % analysis_file_path)
-            with gzip.open(analysis_file_path, "rb") as infile:
-                master_struct = pickle.load(infile)
-                self.image_base = master_struct["image_base"]
-                self.lang = master_struct["lang"]
-                self.global_xrefs = master_struct["global_xrefs"]
-                self.string_index_cache = master_struct["string_index_cache"]
-                self.caller_xrefs_cache = master_struct["caller_xrefs_cache"]
-                self.paths = master_struct["paths"]
-                self.table_data = master_struct["table_data"]
-                self.entities = master_struct["entities"]
-                self.reverse_entity_lookup_index = master_struct["reverse_entity_lookup_index"]
-                self.entity_xrefs = master_struct["entity_xrefs"]
-                self.graph_cache = master_struct["graph_cache"]
-                self.leaf_funcs = master_struct["leaf_funcs"]
-                self.api_trace_data = master_struct.get("api_trace_data", {})
-                self.interesting_artifacts = master_struct.get("interesting_artifacts", set())
-                self.clusters = master_struct.get("clusters", [])
-                self.cluster_analysis = master_struct.get("cluster_analysis", {})
+            try:
+                with gzip.open(analysis_file_path, "rb") as infile:
+                    try:
+                        first_obj = pickle.load(infile)
+                    except ModuleNotFoundError as err:
+                        log(f"Cached analysis requires missing backend modules ({err}); running fresh analysis.")
+                    else:
+                        if isinstance(first_obj, dict) and first_obj.get("__xrefer_metadata__"):
+                            saved_backend = first_obj.get("backend")
+                            if saved_backend and saved_backend != self._backend.name:
+                                log(f"Cached analysis saved for backend '{saved_backend}' cannot be used with current backend '{self._backend.name}'; skipping cache.")
+                            else:
+                                try:
+                                    master_struct = pickle.load(infile)
+                                    cache_loaded = True
+                                except ModuleNotFoundError as err:
+                                    log(f"Cached analysis payload requires missing backend modules ({err}); running fresh analysis.")
+                                except Exception as err:
+                                    log(f"Failed to load cached analysis payload: {err}; running fresh analysis.")
+                        else:
+                            master_struct = first_obj
+                            cache_loaded = True
+            except (OSError, EOFError, pickle.PickleError) as err:
+                log(f"Failed to read cached analysis: {err}; running fresh analysis.")
+
+        if cache_loaded and master_struct is not None:
+            self.image_base = master_struct["image_base"]
+            self.lang = master_struct["lang"]
+            self.global_xrefs = master_struct["global_xrefs"]
+            self.string_index_cache = master_struct["string_index_cache"]
+            self.caller_xrefs_cache = master_struct["caller_xrefs_cache"]
+            self.paths = master_struct["paths"]
+            self.table_data = master_struct["table_data"]
+            self.entities = master_struct["entities"]
+            self.reverse_entity_lookup_index = master_struct["reverse_entity_lookup_index"]
+            self.entity_xrefs = master_struct["entity_xrefs"]
+            self.graph_cache = master_struct["graph_cache"]
+            self.leaf_funcs = master_struct["leaf_funcs"]
+            self.api_trace_data = master_struct.get("api_trace_data", {})
+            self.interesting_artifacts = master_struct.get("interesting_artifacts", set())
+            self.clusters = master_struct.get("clusters", [])
+            self.cluster_analysis = master_struct.get("cluster_analysis", {})
 
             self.sync_image_base(False)
             self.process_exclusions()
@@ -1468,8 +1571,21 @@ class XRefer:
             return
         else:
             try:
-                self.run_full_analysis()
+                self.analyze(self.mode)
                 self.save_analysis()
+            except AssertionError as err:
+                hide_wait_box()
+                message = str(err)
+                if "No call paths were generated for entry point" in message:
+                    ep_value = self.current_analysis_ep
+                    log(
+                        "\n"
+                        f"[!] XRefer stopped: no call paths could be generated for entry point {ep_value:#x}. \n"
+                        "[!] The entry point does not lead to any cross-references. \n"
+                        "[!] Please specify a different entry point and rerun the analysis. (CLI: `--entry-point <address>`)\n\n"
+                    )
+                else:
+                    log(f"[-] Analysis aborted: {message}")
             except Exception as err:
                 log(f"[-] Error running full analysis: {err}")
                 import traceback
@@ -1525,7 +1641,13 @@ class XRefer:
                 "clusters": self.clusters,
                 "cluster_analysis": self.cluster_analysis,
             }
-            pickle.dump(master_struct, outfile)
+            metadata = {
+                "__xrefer_metadata__": True,
+                "version": 2,
+                "backend": self._backend.name,
+            }
+            pickle.dump(metadata, outfile, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(master_struct, outfile, protocol=pickle.HIGHEST_PROTOCOL)
 
     def load_categories(self) -> None:
         """
@@ -1594,27 +1716,30 @@ class XRefer:
             self.llm_lookups = self.settings["llm_lookups"]
 
             if self.llm_lookups:
-                llm_origin = self.settings["llm_origin"]
-                model_name = self.settings["llm_model"]
+                model_id = self.settings["llm_model_id"]
                 api_key = self.settings["api_key"]
-                model_type = None
-
-                if llm_origin == "openai":
-                    model_type = ModelType.OPENAI
-                elif llm_origin == "google":
-                    model_type = ModelType.GOOGLE
-                else:
-                    raise ValueError(f"Unsupported LLM origin: {llm_origin}")
-
-                log(f"Setting LLM model to: {model_name}")
-                config_1 = ModelConfig(model_type, model_name, api_key, ignore_token_limit=True)
-                config_2 = ModelConfig(model_type, model_name, api_key)
+                if not model_id:
+                    log(f"LLM lookups are enabled but missing setting(s): llm_model_id. Disabling LLM for this session. Update {self.settings_manager.settings_file} to enable it.")
+                    self.llm_lookups = False
+                    self.settings["llm_lookups"] = False
+                    return
+                if not api_key:
+                    log(f"LLM lookups are enabled but missing setting(s): api_key. Disabling LLM for this session. Update {self.settings_manager.settings_file} to enable it.")
+                    self.llm_lookups = False
+                    self.settings["llm_lookups"] = False
+                    return
+                log(f"Setting LLM model to: {model_id}")
+                config_1 = ModelConfig(model_id=model_id, api_key=api_key, ignore_token_limit=True)
+                config_2 = ModelConfig(model_id=model_id, api_key=api_key)
+                assert config_2 is not None
                 ArtifactAnalyzer.set_model_config(config_1)
                 ClusterAnalyzer.set_model_config(config_1)
                 Categorizer.set_model_config(config_2)
 
         except Exception as err:
             log(f"[-] Error loading config: {str(err)}")
+            self.llm_lookups = False
+            self.settings["llm_lookups"] = False
 
     def sync_image_base(self, manual: bool = True) -> None:
         """
@@ -2147,17 +2272,29 @@ class XRefer:
     def _gather_sorted_function_api_calls(self, func_ea):
         if func_ea not in self.api_trace_data:
             return []
+        _should_colorize = False
+        if 'ida' == self._backend.name:
+            import ida_lines
+            _should_colorize = True
 
         function_api_calls = []
         for api_name, api_calls in self.api_trace_data[func_ea].items():
-            # TODO(rand0m): This is formatting. Should be in gui/. Refactoring the entire code is needed. No time for this now.
-            # api_name = ida_lines.COLSTR(api_name.split(".")[1], ida_lines.SCOLOR_IMPNAME)
-            api_name = api_name.split(".")[1]
+            api_name_colorized = api_name_clean = api_name.split('.')[1]
+            if _should_colorize:
+                api_name_colorized = ida_lines.COLSTR(api_name.split('.')[1], ida_lines.SCOLOR_IMPNAME)
 
             for call in api_calls:
-                # call_addr = ida_lines.COLSTR(f"0x{call['call_addr']:x}", ida_lines.SCOLOR_LIBNAME)
-                call_addr = f"0x{call['call_addr']:x}"
-                function_api_calls.append((call["index"], f"{call_addr}: {api_name}{call['call_str']} x {call['count']}"))
+                call_addr_colorized = call_addr_clean = f'0x{call["call_addr"]:x}'
+                if _should_colorize:
+                    call_addr_colorized = ida_lines.COLSTR(f'0x{call["call_addr"]:x}', ida_lines.SCOLOR_LIBNAME)
+
+                # We need both colorized for the view and clean for the report
+                function_api_calls.append((
+                    call['index'],
+                    f'{call_addr_colorized}: {api_name_colorized}{call["call_str"]} x {call["count"]}',
+                    # f'{call_addr_clean}: {api_name_clean}{ida_lines.tag_remove(call["call_str"])} x {call["count"]}'
+                    f'{call_addr_clean}: {api_name_clean}{call["call_str"]} x {call["count"]}'
+                ))
 
         return function_api_calls
 
@@ -2199,7 +2336,8 @@ class XRefer:
                         path_api_calls.append((call["index"], f"{call_addr}: {api_name}{call['call_str']} x {call['count']}"))
 
         function_api_calls = self._gather_sorted_function_api_calls(func_ea)
-        path_api_calls.extend(function_api_calls)
+        # We only need the colorized version for the view
+        path_api_calls.extend([(call[0], call[1]) for call in function_api_calls])
         path_api_calls.sort(key=itemgetter(0))
         return [call[1] for call in path_api_calls]
 
@@ -2435,7 +2573,7 @@ class XRefer:
                 sorted_xref_table[key]["color_tags"] = self.get_color_tags(func_ea, key)
                 sorted_xref_table[key]["heading"] = []
 
-    def run_full_analysis(self) -> None:
+    def analyze(self, mode: Optional[AnalysisMode] = None) -> None:
         """
         Perform the full analysis, loading configuration and categories, sifting references, and generating context tables.
         """
@@ -2471,13 +2609,7 @@ class XRefer:
             if not isinstance(ref, Reference):
                 ref = Reference(*ref)
             fn = self._backend.get_function_at(ref.address)
-            if fn is None:
-                import ida_idaapi
-                import idc
-
-                orig_name = idc.get_func_name(ida_idaapi.ea_t(ref.address))
-                log(f"ERROR? Function not found for address: {ref.address:#x} (should be {orig_name = })")
-                continue
+            assert fn is not None
             func_ea = fn.start
             self.leaf_funcs.add(func_ea)
 
@@ -2500,7 +2632,9 @@ class XRefer:
 
         if not self.current_analysis_ep:
             self.current_analysis_ep = self.lang.entry_point
-
+            assert self.current_analysis_ep is not None
+        if self.current_analysis_ep is None:
+            raise AssertionError("Analysis entry point could not be determined")
         self._backend.set_function_comment(Address(self.lang.entry_point), self.lang.ep_annotation)
         self.process_exclusions()
         self.run_secondary_analysis()
@@ -2509,17 +2643,25 @@ class XRefer:
         """
         Run secondary analysis, including generating call paths and propagating cross-reference nodes.
         """
+        if self.current_analysis_ep is None:
+            raise AssertionError("Current analysis entry point is unset before path generation")
         self.generate_all_simple_call_paths_for_ep()
-        iters = 1
 
-        while self.propagate_xref_nodes(iters):
-            iters += 1
-
-        self.fix_thunk_xrefs()
+        ep_paths = self.paths.get(self.current_analysis_ep, {})
+        if not ep_paths:
+            raise AssertionError(f"No call paths were generated for entry point 0x{self.current_analysis_ep:x}")
+        if not any(ep_paths.values()):
+            raise AssertionError(f"Call path generation produced only empty targets for entry point 0x{self.current_analysis_ep:x}")
+        if self.mode=='full':
+            iters = 1
+            while self.propagate_xref_nodes(iters):
+                iters += 1
+            self.fix_thunk_xrefs()
         self.populate_xref_addrs()
         self.cluster_all_non_excluded()
-        log("Populating function context tables...")
-        self._populate_function_context_tables()
+        if self.mode == 'full':
+            log("Populating function context tables...")
+            self._populate_function_context_tables()
 
     def run_standalone_secondary_analysis(self) -> None:
         """
@@ -2548,6 +2690,8 @@ class XRefer:
         Returns:
             bool: True if analysis should proceed, False if it should be cancelled
         """
+        if self.settings["suppress_notifications"]:
+            return True
         missing_files = {}
 
         # Check for API trace file
@@ -2566,17 +2710,27 @@ class XRefer:
             missing_files["xrefs"] = xrefs_path
 
         # If only user xrefs is missing or notifications are suppressed, proceed
-        if not missing_files or (len(missing_files) == 1 and "xrefs" in missing_files) or self.settings["suppress_notifications"]:
+        if not missing_files or (len(missing_files) == 1 and "xrefs" in missing_files):
             return True
+        _WARNING_MSG = f"Missing required analysis files: {missing_files}. If you want to suppress this check, enable 'suppress_notifications' in settings ({self.settings_manager.settings_file})."
+        if self._backend.name == "ida":
+            try:
+                from PyQt5.QtWidgets import QApplication, QDialog
+            except ImportError as exc:
+                log(f"{_WARNING_MSG} PyQt5 is not available; running in headless mode.")
+                raise EnvironmentError(f"{_WARNING_MSG} PyQt5 is required to prompt for missing files. Enable 'suppress_notifications' to bypass this check.") from exc
+            if not QApplication.instance():
+                log(f"{_WARNING_MSG} No active QApplication; running in headless mode.")
+                raise EnvironmentError(f"{_WARNING_MSG} This run is headless. Enable 'suppress_notifications' to bypass this check.")
 
-        # Show dialog (lazy import to avoid circular dependency)
-        from xrefer.gui.settings import MissingFilesDialog
+            from xrefer.gui.settings import MissingFilesDialog
 
-        dialog = MissingFilesDialog(missing_files)
-        result = dialog.exec_()
-        from PyQt5.QtWidgets import QDialog
+            dialog = MissingFilesDialog(missing_files)
+            result = dialog.exec_()
+            return result == QDialog.Accepted
 
-        return result == QDialog.Accepted
+        log(_WARNING_MSG)
+        raise EnvironmentError(_WARNING_MSG)
 
     def clear_affected_graph_cache(self) -> None:
         """
@@ -2625,47 +2779,43 @@ class XRefer:
             List[List[int]]: A list of call paths between the initial and final functions.
         """
         all_paths = []
-        path_buffer = deque([[final]])
-        try:
-            func_name_initial = self._backend.get_function_at(Address(initial))
-            func_name_final = self._backend.get_function_at(Address(final))
-        except Exception as e:
-            import ida_idaapi
-            import idc
+        path_buffer = [[final]]
 
-            log(f"Error {idc.get_func_name(ida_idaapi.ea_t(initial)) = }")
-            raise e
-
+        func_name_initial = self._backend.get_function_at(Address(initial))
+        func_name_final = self._backend.get_function_at(Address(final))
         log(f"Building call paths :: {func_name_initial} -> {func_name_final}")
-        xref_cache = {}
-        while path_buffer and len(all_paths) < max_limit and len(path_buffer) < max_limit:
-            current_path = path_buffer.popleft()
-            refs = set()
-            target = current_path[-1]
-            if target not in xref_cache:
-                refs = set()
-                for cross_ref in self._backend.get_xrefs_to(target):
-                    fn = self._backend.get_function_at(cross_ref.source)
-                    if fn:
-                        refs.add(fn.start)
-                xref_cache[target] = refs
-            else:
-                refs = xref_cache[target]
 
+        paths_found = 0
+        while path_buffer and len(all_paths) < max_limit and len(path_buffer) < max_limit:
+            refs = set()
+            target = path_buffer[0][-1]
+
+            if len(path_buffer[0]) < max_limit:
+                for cross_ref in self._backend.get_xrefs_to(target):
+                    if fn := self._backend.get_function_at(cross_ref.source):
+                        refs.add(fn.start)
             if refs:
+                current_path = path_buffer.pop(0)
                 for ref in refs:
                     if ref in current_path:
                         continue
                     if ref == initial:
                         all_paths = self.insert_path(all_paths, (current_path + [ref])[::-1])
+                        paths_found += 1
                     else:
                         path_buffer.append(current_path + [ref])
 
-            elif len(current_path) > 0 and initial not in current_path:
-                continue  # Skip this path as it doesn't lead to initial
+            elif initial not in path_buffer[0]:
+                path_buffer.pop(0)
 
-            elif len(current_path) > 0 and initial in current_path:
-                all_paths = self.insert_path(all_paths, current_path[::-1])
+            elif initial in path_buffer[0]:
+                all_paths = self.insert_path(all_paths, path_buffer.pop(0)[::-1])
+                paths_found += 1
+
+        if paths_found == 0:
+            log(f"  -> No path found from {func_name_initial} to {func_name_final}")
+        else:
+            log(f"  -> Found {paths_found} path(s)")
         return all_paths
 
     def generate_all_simple_call_paths_for_ep(self) -> None:
@@ -2675,6 +2825,8 @@ class XRefer:
         if self.current_analysis_ep not in self.paths:
             self.paths[self.current_analysis_ep] = {}
 
+        log(f"Generating call paths from EP {self.current_analysis_ep:#x} to {len(self.leaf_funcs)} leaf functions...")
+
         for func_ea in self.leaf_funcs:
             if self.current_analysis_ep != func_ea:
                 # Check if the paths from current_analysis_ep to func_ea are already stored
@@ -2682,6 +2834,13 @@ class XRefer:
                     _paths = self.generate_simple_call_paths(self.current_analysis_ep, func_ea)
                     if len(_paths):
                         self.paths[self.current_analysis_ep][func_ea] = _paths
+
+        total_paths_generated = len(self.paths[self.current_analysis_ep])
+        log(f"Generated {total_paths_generated} call path groups for EP {self.current_analysis_ep:#x}")
+        if total_paths_generated == 0:
+            log(f"WARNING: No paths found from EP {self.current_analysis_ep:#x} to any leaf functions!")
+        elif total_paths_generated < len(self.leaf_funcs) / 2:
+            log(f"WARNING: Only {total_paths_generated}/{len(self.leaf_funcs)} leaf functions are reachable from EP")
 
     def is_node_in_existing_paths(self, node_ea: int) -> bool:
         """
@@ -2939,3 +3098,179 @@ class XRefer:
                 rename_function(f_ea, "xunc", allow_cluster_prefix_check=False)
 
         log("Function renaming complete")
+
+    def get_artifacts_for_cluster(self, cluster: "FunctionalCluster") -> Dict[str, List[str]]:
+        """Aggregates all unique artifacts for a given cluster."""
+        artifacts = {
+            "APIS": set(),
+            "Binary strings": set(),
+            "Capa Matches": set(),
+            "Library References": set()
+        }
+
+        # Gather artifacts from all functions within the cluster
+        for func_ea in cluster.nodes:
+            for api in self.get_apis_for_function(func_ea):
+                artifacts["APIS"].add(api)
+            for string in self.get_strings_for_function(func_ea):
+                artifacts["Binary strings"].add(string)
+            for capa in self.get_capa_for_function(func_ea):
+                artifacts["Capa Matches"].add(capa)
+            for lib in self.get_libs_for_function(func_ea):
+                artifacts["Library References"].add(lib)
+
+        # Convert sets to sorted lists for stable output
+        return {key: sorted(list(value)) for key, value in artifacts.items()}
+
+    def get_api_trace_for_cluster_for_html_report(self, cluster: "FunctionalCluster") -> str:
+        """Aggregates and sorts all API trace calls for a cluster, formatted for the HTML report without addresses."""
+        all_calls = []
+        for func_ea in cluster.nodes:
+            calls_with_index = self._gather_sorted_function_api_calls(func_ea)
+            all_calls.extend(calls_with_index)
+
+        all_calls.sort(key=itemgetter(0))
+
+        # For each call, take the clean string (call[2]), split it at the first colon, and take the second part.
+        report_lines = []
+        for call in all_calls:
+            parts = call[2].split(': ', 1)
+            if len(parts) > 1:
+                report_lines.append(parts[1])
+            else:
+                report_lines.append(call[2]) # Fallback
+
+        return "\n".join(report_lines)
+
+    def get_api_trace_for_cluster(self, cluster: "FunctionalCluster") -> str:
+        """Aggregates and sorts all API trace calls for a cluster."""
+        all_calls = []
+        for func_ea in cluster.nodes:
+            # _gather_sorted_function_api_calls returns (index, colorized_str, clean_str)
+            calls_with_index = self._gather_sorted_function_api_calls(func_ea)
+            all_calls.extend(calls_with_index)
+
+        # Sort all collected calls by their original index
+        all_calls.sort(key=itemgetter(0))
+
+        # Return as a single newline-separated string, using the clean version
+        return "\n".join([call[2] for call in all_calls])
+
+    def generate_report_data(self) -> Dict[str, Any]:
+        """Builds the complete data dictionary for the HTML report."""
+        if not self.clusters or not self.cluster_analysis:
+            raise Exception("Cluster analysis data is not available.")
+
+        node_data_array = []
+
+        # Helper to recursively process clusters
+        def process_cluster(cluster, parent_key=None):
+            cluster_id = cluster.id
+            analysis = find_cluster_analysis(self.cluster_analysis, cluster_id)
+            if not analysis: return
+
+            artifacts_dict = self.get_artifacts_for_cluster(cluster)
+            artifacts_str = ""
+            for category, items in artifacts_dict.items():
+                if items:
+                    artifacts_str += f"{category}\n" + "\n".join([f"- {item}" for item in items]) + "\n@@@\n"
+
+            node_data = {
+                "key": cluster_id,
+                "label": f"cluster.id.{cluster.id_str}\\n{analysis.get('label') if isinstance(analysis, dict) else analysis.label}",
+                "description": analysis.get('description') if isinstance(analysis, dict) else analysis.description,
+                "artifacts": artifacts_str.strip(),
+                "apiTrace": self.get_api_trace_for_cluster_for_html_report(cluster),
+                "isLibrary": cluster.is_library
+            }
+            if parent_key is not None:
+                node_data["parent"] = parent_key
+
+            node_data_array.append(node_data)
+
+            for subcluster in cluster.subclusters:
+                process_cluster(subcluster, parent_key=cluster_id)
+
+        # Handle the "Anatomy" root node logic
+        top_level_clusters = [c for c in self.clusters if c.parent_cluster_id is None]
+
+        # Check if there is a single common ancestor for all top-level clusters
+        # This is a simplified check. A more robust check would build a graph and find roots.
+        if len(top_level_clusters) > 1:
+            # Create a dummy "Anatomy" root node
+            node_data_array.append({
+                "key": 0, # Dummy key for the root
+                "label": "High Level Clusters",
+                "description": "Top-level view of disjointed functional clusters detected in the binary.",
+                "artifacts": "",
+                "apiTrace": ""
+            })
+            for cluster in top_level_clusters:
+                process_cluster(cluster, parent_key=0)
+        elif len(top_level_clusters) == 1:
+            # Single root cluster, no need for the dummy node
+            process_cluster(top_level_clusters[0])
+
+        def pretty_filesize(size_in_bytes: int) -> str:
+            """Convert file size in bytes to a human-readable string."""
+            for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+                if size_in_bytes < 1024:
+                    return f"{size_in_bytes:.2f} {unit}"
+                size_in_bytes /= 1024
+            return f"{size_in_bytes:.2f} PB"
+
+        report_data = {
+            "metadata": {
+                "date": datetime.datetime.now(datetime.UTC).isoformat(timespec="minutes"),
+                "xrefer-version": xrefer.__version__,
+                "backend": self._backend.name,
+                "llm": self.settings["llm_model_id"],
+            },
+            "file_details": {
+                "sha256": self._backend.binary_hash,
+                "file_size": pretty_filesize(self._backend.size),
+                "file_type": html.escape(self._backend.filetype()),
+            },
+            "anatomical_summary": {
+                "category": self.cluster_analysis.get("binary_category", "Uncategorized"),
+                "summary": html.escape(self.cluster_analysis.get("binary_description", "No summary available.")),
+                "report": html.escape(self.cluster_analysis.get("binary_report", "No report available.")),
+            },
+            "node_data_array": node_data_array,
+        }
+        return report_data
+
+    def generate_html_report(self):
+        """Generates and saves the final HTML report."""
+        data_dir = Path(__file__).parent.parent / "data"
+        assert data_dir.exists(), f"Data directory does not exist: {data_dir}"
+        _html_path = data_dir / "report_tmpl.html"
+        assert _html_path.exists(), f"HTML template does not exist: {_html_path}"
+        _html = _html_path.read_text(encoding='utf-8')
+
+        report_data = self.generate_report_data()
+        json_data = json.dumps(report_data["node_data_array"], indent=2)
+
+        for placeholder, value in (
+            ('var originalNodeData = []; /*DATA_PLACEHOLDER*/', f'var originalNodeData = {json_data};'),
+            ('<!--CREATED_PLACEHOLDER-->', report_data["metadata"]["date"]),
+            ('<!--BACKEND_PLACEHOLDER-->', report_data["metadata"]["backend"]),
+            ('<!--XREFER_VERSION_PLACEHOLDER-->', report_data["metadata"]["xrefer-version"]),
+            ('<!--XREFER_MODEL_PLACEHOLDER-->', report_data["metadata"]["llm"]),
+            ('<!--SHA256_PLACEHOLDER-->', report_data["file_details"]["sha256"]),
+            # ('<!--MD5_PLACEHOLDER-->', report_data["file_details"]["md5"]),
+            ('<!--SIZE_PLACEHOLDER-->', report_data["file_details"]["file_size"]),
+            ('<!--TYPE_PLACEHOLDER-->', report_data["file_details"]["file_type"]),
+            ('<!--SUMMARY_PLACEHOLDER-->', report_data["anatomical_summary"]["summary"]),
+            ('<!--REPORT_PLACEHOLDER-->', report_data["anatomical_summary"]["report"]),
+        ):
+            _html = _html.replace(placeholder, value)
+        REPORT_SUFFIX= '_report.html'
+        save_path = f"{self._backend.path}{REPORT_SUFFIX}"
+
+        try:
+            with open(save_path, 'w', encoding='utf-8') as f:
+                f.write(_html)
+            log(f"Report saved to: {save_path}")
+        except Exception as e:
+            log(f"Failed to write or open report: {e}")
