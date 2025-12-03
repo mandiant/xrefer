@@ -216,7 +216,7 @@ You can:
         config = None
         if prompt_type == PromptType.CATEGORIZER:
             config = ProcessConfig(categories=categories or [], item_type=type)
-            return self._process_single([items], prompt_type, config)
+            return self._process_single(items, prompt_type, config)
 
         if ignore_token_limit:
             log(f"[+] Processing all {len(items)} items in single batch")

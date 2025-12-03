@@ -684,16 +684,20 @@ class XRefer:
         """
         log("Getting imports...")
         entries = list(self._backend.get_imports())
-        if self.llm_lookups and self.mode == 'full':
+        categorize_apis = self.llm_lookups and self.mode == "full"
+        if categorize_apis:
             api_list = [x[1] for x in entries]
             _, self.categories["api_categories"] = Categorizer.categorize(api_list, self.categories["apis"])
         for ea, name, module_name in entries:
-            try:
-                category_index = self.categories["apis"][name]
-                category = self.categories["api_categories"][category_index]
-                entity = (category, name, EntityType.IMPORT)
-            except (KeyError, IndexError) as e:
-                log(f"Warning: Failed to categorize import {name}: {e}")
+            if categorize_apis:
+                try:
+                    category_index = self.categories["apis"][name]
+                    category = self.categories["api_categories"][category_index]
+                    entity = (category, name, EntityType.IMPORT)
+                except (KeyError, IndexError) as e:
+                    log(f"Warning: Failed to categorize import {name}: {e}")
+                    entity = (module_name, name, EntityType.IMPORT)
+            else:
                 entity = (module_name, name, EntityType.IMPORT)
             self.entities.append(entity)
             self.imports.append(Reference(int(ea), len(self.entities) - 1, EntityType.IMPORT))
