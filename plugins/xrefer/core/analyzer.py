@@ -1260,6 +1260,8 @@ class XRefer:
             if not self.llm_lookups:
                 log("LLM lookups disabled - skipping cluster analysis")
                 return
+            if ClusterAnalyzer.current_config is None:
+                raise RuntimeError("Cluster analysis requires LLM configuration, but none is set. Set llm_model_id and api_key in xrefer settings or disable llm_lookups to skip clustering.")
 
             log(f"Found {len(self.artifact_functions)} functions with non-excluded artifacts")
 
@@ -1713,9 +1715,15 @@ class XRefer:
                 model_id = self.settings["llm_model_id"]
                 api_key = self.settings["api_key"]
                 if not model_id:
-                    raise ValueError("LLM model identifier is empty")
+                    log(f"LLM lookups are enabled but missing setting(s): llm_model_id. Disabling LLM for this session. Update {self.settings_manager.settings_file} to enable it.")
+                    self.llm_lookups = False
+                    self.settings["llm_lookups"] = False
+                    return
                 if not api_key:
-                    raise ValueError("API key for LLM model is empty")
+                    log(f"LLM lookups are enabled but missing setting(s): api_key. Disabling LLM for this session. Update {self.settings_manager.settings_file} to enable it.")
+                    self.llm_lookups = False
+                    self.settings["llm_lookups"] = False
+                    return
                 log(f"Setting LLM model to: {model_id}")
                 config_1 = ModelConfig(model_id=model_id, api_key=api_key, ignore_token_limit=True)
                 config_2 = ModelConfig(model_id=model_id, api_key=api_key)
@@ -1726,6 +1734,8 @@ class XRefer:
 
         except Exception as err:
             log(f"[-] Error loading config: {str(err)}")
+            self.llm_lookups = False
+            self.settings["llm_lookups"] = False
 
     def sync_image_base(self, manual: bool = True) -> None:
         """

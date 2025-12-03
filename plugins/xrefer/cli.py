@@ -6,6 +6,7 @@ Unified XRefer CLI backed by the packaged xrefer module.
 import argparse
 import sys
 import traceback
+import json
 from importlib.util import find_spec
 from pathlib import Path
 from typing import Any, Literal
@@ -320,6 +321,60 @@ def parse_entry_point(value: str) -> int:
     return ep
 
 
+def maybe_prompt_for_llm_settings(settings_path: Path) -> None:
+    settings = _load_llm_settings(settings_path)
+    if not settings.get("llm_lookups", True):
+        return
+
+    missing = _missing_llm_fields(settings)
+    if not missing:
+        return
+
+    print(f"[!] LLM lookups are enabled but missing: {', '.join(missing)}.")
+    if not sys.stdin.isatty():
+        print("[!] Running without LLM for this invocation. Re-run in a TTY to enter your API key.")
+        return
+
+    print("Do you want to configure LLM access now? (y/N): ", end="")
+    choice = input().strip().lower()
+    if choice not in {"y", "yes"}:
+        print("[!] Continuing without LLM for this run. Configure later by editing the settings file.")
+        return
+
+    model_prompt = f"Enter model id [{settings['llm_model_id']}]: "
+    model_id = input(model_prompt).strip() or settings["llm_model_id"]
+
+    api_key = input("Enter API key (leave empty to cancel): ").strip()
+    if not api_key:
+        print("[!] No API key provided. Continuing without LLM for this run.")
+        return
+
+    settings["api_key"] = api_key
+    settings["llm_model_id"] = model_id
+
+    try:
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(settings_path, "w") as f:
+            json.dump(settings, f, indent=4)
+        print(f"[+] Saved LLM settings to {settings_path}")
+    except Exception as exc:
+        print(f"[!] Warning: Failed to save settings to {settings_path}: {exc}")
+        print("[!] Continuing without LLM for this run.")
+
+
+def _load_llm_settings(settings_path: Path) -> dict[str, Any]:
+    settings = {"llm_lookups": True, "llm_model_id": "gemini/gemini-2.5-pro", "api_key": ""}
+    if settings_path.exists():
+        try:
+            settings.update(json.loads(settings_path.read_text()))
+        except Exception as exc:
+            print(f"[!] Warning: Failed to read settings file {settings_path}, using defaults for this run: {exc}")
+    return settings
+
+
+def _missing_llm_fields(settings: dict[str, Any]) -> list[str]:
+    return [field for field in ("llm_model_id", "api_key") if not settings.get(field)]
+
 def cli():
     """Command line interface."""
     available_backends = detect_available_backends()
@@ -347,12 +402,13 @@ def cli():
         print(f"[x] Error: File not found: {file_path}")
         sys.exit(1)
 
-    # Store original streams for cleanup
+    settings_path = Path.home() / ".xrefer" / "settings.json"
+    maybe_prompt_for_llm_settings(settings_path)
+
     original_stdout = sys.stdout
     original_stderr = sys.stderr
     log_file_handle = None
 
-    # Redirect logs if specified
     if args.logfile:
         log_file = Path(args.logfile).resolve()
         print(f"[+] Redirecting logs to: {log_file}")
