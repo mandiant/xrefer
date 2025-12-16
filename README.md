@@ -69,3 +69,6 @@ Contributions, bug reports, and feature requests are welcome. Please open an iss
 ## Important Privacy Notice
 
 XRefer's LLM-based features, when enabled, send portions of analyzed data (e.g., APIs, strings, library references, and function relationships) to external servers, such as Google's Gemini API or other configured LLM endpoints. These external services process the information to generate natural language descriptions and insights. If you are analyzing sensitive binaries or prefer not to share data outside your local environment, you can disable all LLM features in the settings, preventing any external communication. Please consult Google Gemini's [Terms of Service](https://cloud.google.com/gemini/docs/discover/data-governance)  before use.
+
+## Mailing List
+Subscribe to the FLARE mailing list for community announcements! Email "subscribe" to [flare-external@google.com](mailto:flare-external@google.com?subject=subscribe).
