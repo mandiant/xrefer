@@ -57,6 +57,7 @@ class XReferStateMachine(StateMachine):
     start_xref_listing = base.to(xref_listing) | search.to(xref_listing) | interesting_artifacts.to(xref_listing)
     start_boundary_results = base.to(boundary_results)
     start_last_boundary_results = base.to(last_boundary_results)
+    end_last_boundary_results = last_boundary_results.to(base)
     start_interesting_artifacts = base.to(interesting_artifacts)
     start_cluster_graphs = base.to(cluster_graphs) | clusters.to(cluster_graphs)
 
