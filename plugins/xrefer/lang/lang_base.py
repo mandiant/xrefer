@@ -21,6 +21,7 @@ import ida_bytes
 import ida_entry
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Tuple
+from xrefer.core.disasm_backend import get_backend
 
 
 class LanguageBase(ABC):
@@ -144,8 +145,10 @@ class LanguageBase(ABC):
         """
         Extract strings from the IDB with optional filtering.
         
-        Retrieves all defined strings from IDA's database and optionally filters
-        them based on provided filter strings.
+        This method now uses the disassembler backend abstraction layer to
+        provide consistent string extraction across different disassemblers.
+        The backend handles xref-based delimiting (like IDA's native behavior)
+        to provide cleaner output and reduce noise.
         
         Args:
             filters (Optional[List[str]]): List of strings to filter out. If None,
@@ -155,23 +158,16 @@ class LanguageBase(ABC):
             Dict[int, List[str]]: Dictionary mapping string addresses to lists containing
                                  the string content. Each list typically has one string,
                                  but may contain multiple elements for special cases.
+        
+        Note:
+            The backend can be configured using `disasm_backend.set_backend()` to
+            use different extraction strategies:
+            - IDABackend: Uses IDA's native string extraction (default)
+            - XRefBasedStringExtractor: Custom xref-based extraction with additional
+              filtering heuristics
         """
-        if filters is None:
-            filters = []
-            
-        str_dict = {}
-        strings = idautils.Strings(False)
-        strings.setup(strtypes=[ida_nalt.STRTYPE_C, ida_nalt.STRTYPE_C_16,
-                              ida_nalt.STRTYPE_C_32])
-                              
-        for s in strings:
-            str_type = idc.get_str_type(s.ea)
-            if str_type is not None:
-                contents = ida_bytes.get_strlit_contents(s.ea, -1, str_type)
-                if not any(f in contents for f in filters):
-                    str_dict[s.ea] = [contents.decode('utf-8')]
-
-        return str_dict
+        backend = get_backend()
+        return backend.get_strings(filters=filters)
     
     @staticmethod
     def fallback_cmain_detection() -> Optional[int]:
