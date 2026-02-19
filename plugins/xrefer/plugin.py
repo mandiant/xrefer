@@ -33,7 +33,7 @@ class XReferPlugin(idaapi.plugin_t):
         wanted_name (str): Display name of the plugin in IDA.
         wanted_hotkey (str): Default hotkey to activate the plugin.
         xrefer_view (Optional[XReferView]): The plugin's main view instance.
-        version (float): Plugin version number.
+        version (str): Plugin version (semantic version string).
     """
     flags: int = idaapi.PLUGIN_KEEP
     wanted_name: str = "XRefer"
@@ -42,7 +42,7 @@ class XReferPlugin(idaapi.plugin_t):
     def __init__(self):
         """Initialize plugin with empty view."""
         self.xrefer_view = None
-        self.version = 1.0
+        self.version = "1.0.4"
 
     def init(self) -> int:
         """
