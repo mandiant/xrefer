@@ -69,6 +69,7 @@ class XReferSettingsManager:
             "llm_model": "gemini-1.5-pro",
             "api_key": "",
             "enable_exclusions": True,
+            "exclude_non_language_libs": False,
             "display_options": {
                 "auto_size_graphs": True,
                 "hide_llm_disclaimer": False,
@@ -896,6 +897,12 @@ class XReferSettingsDialog(QDialog):
         path_layout.addWidget(self.exclusion_browse_btn, 0, 3)
         
         layout.addLayout(path_layout)
+
+        self.exclude_non_language_libs_checkbox = QCheckBox("Exclude non-language specific library functions from analysis")
+        self.exclude_non_language_libs_checkbox.setChecked(self.settings["exclude_non_language_libs"])
+        self.exclude_non_language_libs_checkbox.setToolTip("Exclude non-language specific library functions from analysis")
+        layout.addWidget(self.exclude_non_language_libs_checkbox)
+
         # Lists
         lists_layout = QGridLayout()
         self.exclusion_lists = {}
@@ -997,6 +1004,7 @@ class XReferSettingsDialog(QDialog):
             "llm_model": self.llm_model_combo.currentText(),
             "api_key": self.api_key_edit.text(),
             "enable_exclusions": self.enable_exclusion_checkbox.isChecked(),
+            "exclude_non_language_libs" : self.exclude_non_language_libs_checkbox.isChecked(),
             # Add display options
             "display_options": {
                 "auto_size_graphs": self.auto_size_graphs.isChecked(),
