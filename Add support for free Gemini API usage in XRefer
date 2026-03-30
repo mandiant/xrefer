@@ -1,0 +1,11 @@
+This PR introduces support for using the free-tier Gemini API in XRefer, enabling users to leverage LLM-assisted functionality without requiring paid API access.
+
+Motivation
+
+Currently, XRefer’s LLM integration assumes access to paid API services. However, Google’s Gemini free tier provides limited but useful capabilities that can be leveraged for tasks such as:
+
+Function summarization
+String/context interpretation
+Lightweight classification
+
+Supporting the free tier lowers the barrier to entry and makes XRefer more accessible to a broader set of users.
