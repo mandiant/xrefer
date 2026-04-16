@@ -385,8 +385,7 @@ def cli():
     parser.add_argument("--save", action="store_true", help="Save changes to database/project")
     parser.add_argument("--auto-analysis", action="store_true", help="Run auto analysis (default: True)", default=True)
     parser.add_argument("--mode", choices=["light", "full"], default="light", help="Select analyzer mode (default: full)")
-    parser.add_argument("--no-html-report", dest="html_report", action="store_false", help="Disable HTML report generation")
-    parser.set_defaults(html_report=True)
+    parser.add_argument("--report-data-mode", choices=["html", "json", "none"], default="html", help="Report output format: html (standalone), json (data only), or none")
     parser.add_argument("--force", action="store_true", help="Remove previous artifacts and re-analyze")
     parser.add_argument("--entry-point", type=parse_entry_point, help="Override entry point address (decimal or hex like 0x401000)")
     parser.add_argument("-L", "--logfile", help="Output log file path")
@@ -419,7 +418,7 @@ def cli():
     xrefer_kwargs = {
         "auto_analyze": args.auto_analysis,
         "mode": args.mode,
-        "html_report": args.html_report,
+        "report_data_mode": args.report_data_mode,
     }
     if args.entry_point is not None:
         xrefer_kwargs["ep"] = args.entry_point
@@ -429,7 +428,7 @@ def cli():
         print(f"[+] File: {file_path}")
         print(f"[+] Auto-analysis: {args.auto_analysis}")
         print(f"[+] Analyzer mode: {args.mode}")
-        print(f"[+] HTML report: {args.html_report}")
+        print(f"[+] Report data mode: {args.report_data_mode}")
         print(f"[+] Save changes: {args.save}")
         print(f"[+] Force re-analysis: {args.force}")
         if args.entry_point is not None:

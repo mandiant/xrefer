@@ -88,8 +88,8 @@ XRefer's LLM-based features, when enabled, send portions of analyzed data (e.g.,
    For reference on CLI options, run:
    ```bash
     ❯ uv run xrefer --help
-    usage: xrefer [-h] --backend {ida,binaryninja,ghidra} [--save] [--auto-analysis] [--mode {light,full}] [--no-html-report] [--force]
-                  [--entry-point ENTRY_POINT] [-L LOGFILE]
+    usage: xrefer [-h] --backend {ida,binaryninja,ghidra} [--save] [--auto-analysis] [--mode {light,full}]
+                  [--report-data-mode {html,json,none}] [--force] [--entry-point ENTRY_POINT] [-L LOGFILE]
                   file
 
     Unified XRefer CLI for multiple backends
@@ -104,7 +104,8 @@ XRefer's LLM-based features, when enabled, send portions of analyzed data (e.g.,
       --save                Save changes to database/project
       --auto-analysis       Run auto analysis (default: True)
       --mode {light,full}   Select analyzer mode (default: full)
-      --no-html-report      Disable HTML report generation
+      --report-data-mode {html,json,none}
+                            Report output format: html (standalone), json (data only), or none
       --force               Remove previous artifacts and re-analyze
       --entry-point ENTRY_POINT
                             Override entry point address (decimal or hex like 0x401000)
@@ -123,4 +124,3 @@ XRefer's LLM-based features, when enabled, send portions of analyzed data (e.g.,
    ```
    git submodule update --init --recursive
    ```
-

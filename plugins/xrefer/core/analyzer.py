@@ -78,6 +78,9 @@ class Reference:
 AnalysisMode = Literal["light", "full"]
 """ Light: Disables Language Model categorization & xref propagation.  """
 
+ReportDataMode = Literal["html", "json", "none"]
+"""html: standalone HTML with embedded data, json: write JSON only, none: skip report output (default)."""
+
 
 class XRefer:
     """
@@ -99,7 +102,7 @@ class XRefer:
         auto_analyze: bool = True,
         *,
         mode: Optional[AnalysisMode] = 'full',
-        html_report: bool = True,
+        report_data_mode: ReportDataMode = "none",
     ) -> None:
         """
         Initialize the XRefer object.
@@ -111,6 +114,9 @@ class XRefer:
             self.settings_manager = XReferSettingsManager()
             self.settings = self.settings_manager.load_settings()
             self.exclusions = self.settings_manager.load_exclusions()
+            self.report_data_mode: ReportDataMode = report_data_mode
+            self.analysis_warnings: List[str] = []
+            self.analysis_errors: List[str] = []
 
             self.table_names: Dict[int, str] = {1: "INDIRECT LIBRARY XREFS", 2: "INDIRECT IMPORT XREFS", 3: "INDIRECT STRING XREFS", 4: "INDIRECT CAPA XREFS"}
             self.entity_type: Dict[EntityType, str] = {
@@ -197,7 +203,6 @@ class XRefer:
             self.clusters = None
             self.cluster_analysis = None
             self.mode = mode
-            self.html_report = html_report
             self.configure_llm_and_lookups()
             # Run analysis if requested
             if auto_analyze:
@@ -1293,14 +1298,25 @@ class XRefer:
             log("Running cluster analysis...")
             self.analyze_clusters(entities_to_cluster)
             self.save_analysis()
-            if self.html_report:
-                self.generate_html_report()
+            if self.report_data_mode in ("html", "json"):
+                if self.clusters and self.cluster_analysis:
+                    if self.report_data_mode == "html":
+                        self.generate_html_report()
+                    else:
+                        self.save_report_data_json()
+                else:
+                    warn_msg = "Skipping report generation - cluster analysis data unavailable"
+                    log(warn_msg)
+                    self.analysis_warnings.append(warn_msg)
+            else:
+                log("Report generation disabled by report_data_mode=none")
 
         except Exception as e:
             import traceback
 
             traceback.print_exc()
             log(f"[-] Error in cluster_all_non_excluded: {str(e)}")
+            self.analysis_errors.append(f"Cluster analysis failed: {str(e)}")
 
     def add_missing_intermediate_nodes(self, clusters: List["FunctionalCluster"], paths: Dict[int, Dict[int, List[List[int]]]]) -> None:
         """
@@ -3120,7 +3136,7 @@ class XRefer:
                 artifacts["Library References"].add(lib)
 
         # Convert sets to sorted lists for stable output
-        return {key: sorted(list(value)) for key, value in artifacts.items()}
+        return {key: sorted(value) for key, value in artifacts.items()}
 
     def get_api_trace_for_cluster_for_html_report(self, cluster: "FunctionalCluster") -> str:
         """Aggregates and sorts all API trace calls for a cluster, formatted for the HTML report without addresses."""
@@ -3170,16 +3186,14 @@ class XRefer:
             if not analysis: return
 
             artifacts_dict = self.get_artifacts_for_cluster(cluster)
-            artifacts_str = ""
-            for category, items in artifacts_dict.items():
-                if items:
-                    artifacts_str += f"{category}\n" + "\n".join([f"- {item}" for item in items]) + "\n@@@\n"
+            # Drop empty categories to keep report payload lean
+            artifacts_dict = {category: items for category, items in artifacts_dict.items() if items}
 
             node_data = {
                 "key": cluster_id,
                 "label": f"cluster.id.{cluster.id_str}\\n{analysis.get('label') if isinstance(analysis, dict) else analysis.label}",
                 "description": analysis.get('description') if isinstance(analysis, dict) else analysis.description,
-                "artifacts": artifacts_str.strip(),
+                "artifacts": artifacts_dict,
                 "apiTrace": self.get_api_trace_for_cluster_for_html_report(cluster),
                 "isLibrary": cluster.is_library
             }
@@ -3202,7 +3216,7 @@ class XRefer:
                 "key": 0, # Dummy key for the root
                 "label": "High Level Clusters",
                 "description": "Top-level view of disjointed functional clusters detected in the binary.",
-                "artifacts": "",
+                "artifacts": {},
                 "apiTrace": ""
             })
             for cluster in top_level_clusters:
@@ -3219,6 +3233,9 @@ class XRefer:
                 size_in_bytes /= 1024
             return f"{size_in_bytes:.2f} PB"
 
+        cat = self.cluster_analysis.get("binary_category", "Uncategorized")
+        category_value = str(cat)
+
         report_data = {
             "metadata": {
                 "date": datetime.datetime.now(datetime.UTC).isoformat(timespec="minutes"),
@@ -3229,16 +3246,25 @@ class XRefer:
             "file_details": {
                 "sha256": self._backend.binary_hash,
                 "file_size": pretty_filesize(self._backend.size),
-                "file_type": html.escape(self._backend.filetype()),
+                "file_type": self._backend.filetype(),
             },
             "anatomical_summary": {
-                "category": self.cluster_analysis.get("binary_category", "Uncategorized"),
-                "summary": html.escape(self.cluster_analysis.get("binary_description", "No summary available.")),
-                "report": html.escape(self.cluster_analysis.get("binary_report", "No report available.")),
+                "category": category_value,
+                "summary": self.cluster_analysis.get("binary_description", "No summary available."),
+                "report": self.cluster_analysis.get("binary_report", "No report available."),
             },
             "node_data_array": node_data_array,
         }
         return report_data
+
+    def save_report_data_json(self) -> None:
+        """Write report data JSON only (no HTML)."""
+        report_data = self.generate_report_data()
+        report_json_suffix = "_report_data.json"
+        json_path = Path(f"{self._backend.path}{report_json_suffix}")
+        json_payload = json.dumps(report_data, indent=2, default=str)
+        json_path.write_text(json_payload, encoding="utf-8")
+        log(f"Report data saved to: {json_path}")
 
     def generate_html_report(self):
         """Generates and saves the final HTML report."""
@@ -3249,28 +3275,41 @@ class XRefer:
         _html = _html_path.read_text(encoding='utf-8')
 
         report_data = self.generate_report_data()
-        json_data = json.dumps(report_data["node_data_array"], indent=2)
+        data_mode: ReportDataMode = getattr(self, "report_data_mode", "html")
+        json_data = json.dumps(report_data, indent=2, default=str)
+        report_html_suffix = "_report.html"
+
+        save_path = f"{self._backend.path}{report_html_suffix}"
+
+        data_url_value = json.dumps("")
+        embedded_payload = json_data.replace("</", "<\\/")
 
         for placeholder, value in (
-            ('var originalNodeData = []; /*DATA_PLACEHOLDER*/', f'var originalNodeData = {json_data};'),
-            ('<!--CREATED_PLACEHOLDER-->', report_data["metadata"]["date"]),
-            ('<!--BACKEND_PLACEHOLDER-->', report_data["metadata"]["backend"]),
-            ('<!--XREFER_VERSION_PLACEHOLDER-->', report_data["metadata"]["xrefer-version"]),
-            ('<!--XREFER_MODEL_PLACEHOLDER-->', report_data["metadata"]["llm"]),
-            ('<!--SHA256_PLACEHOLDER-->', report_data["file_details"]["sha256"]),
+            ('"DATA_URL_PLACEHOLDER"', data_url_value),
+            ('"DATA_MODE_PLACEHOLDER"', json.dumps(data_mode)),
+            ('EMBEDDED_NODE_DATA_PLACEHOLDER', embedded_payload),
+            ('<!--CREATED_PLACEHOLDER-->', html.escape(str(report_data["metadata"]["date"]))),
+            ('<!--BACKEND_PLACEHOLDER-->', html.escape(str(report_data["metadata"]["backend"]))),
+            ('<!--XREFER_VERSION_PLACEHOLDER-->', html.escape(str(report_data["metadata"]["xrefer-version"]))),
+            ('<!--XREFER_MODEL_PLACEHOLDER-->', html.escape(str(report_data["metadata"]["llm"]))),
+            ('<!--SHA256_PLACEHOLDER-->', html.escape(str(report_data["file_details"]["sha256"]))),
             # ('<!--MD5_PLACEHOLDER-->', report_data["file_details"]["md5"]),
-            ('<!--SIZE_PLACEHOLDER-->', report_data["file_details"]["file_size"]),
-            ('<!--TYPE_PLACEHOLDER-->', report_data["file_details"]["file_type"]),
-            ('<!--SUMMARY_PLACEHOLDER-->', report_data["anatomical_summary"]["summary"]),
-            ('<!--REPORT_PLACEHOLDER-->', report_data["anatomical_summary"]["report"]),
+            ('<!--SIZE_PLACEHOLDER-->', html.escape(str(report_data["file_details"]["file_size"]))),
+            ('<!--TYPE_PLACEHOLDER-->', html.escape(str(report_data["file_details"]["file_type"]))),
+            ('<!--SUMMARY_PLACEHOLDER-->', html.escape(str(report_data["anatomical_summary"]["summary"]))),
+            ('<!--REPORT_PLACEHOLDER-->', html.escape(str(report_data["anatomical_summary"]["report"]))),
         ):
-            _html = _html.replace(placeholder, value)
-        REPORT_SUFFIX= '_report.html'
-        save_path = f"{self._backend.path}{REPORT_SUFFIX}"
+            if placeholder == 'EMBEDDED_NODE_DATA_PLACEHOLDER':
+                # Only replace the embedded payload marker once so the guard string in
+                # the runtime script (used to detect placeholder data) is not rewritten.
+                _html = _html.replace(placeholder, value, 1)
+            else:
+                _html = _html.replace(placeholder, value)
 
         try:
             with open(save_path, 'w', encoding='utf-8') as f:
                 f.write(_html)
             log(f"Report saved to: {save_path}")
+            log("Report data embedded in HTML (standalone mode)")
         except Exception as e:
             log(f"Failed to write or open report: {e}")
