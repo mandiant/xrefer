@@ -935,16 +935,22 @@ class XRefer:
 
         # Filter out excluded artifacts and those with >2 xrefs
         filtered_indices = set()
+        excluded_count = 0
+        high_xref_count = 0
         for idx in interesting_indices:
-            if self.settings["enable_exclusions"]:
-                if idx in self.excluded_entities:
-                    continue
+            if self.settings["enable_exclusions"] and idx in self.excluded_entities:
+                excluded_count += 1
+                continue
             # Check xref count before adding
             if idx not in self.entity_xrefs:
                 self.populate_entity_xrefs(idx)
             xrefs = self.entity_xrefs.get(idx, set())
-            if len(xrefs) <= 2:  # Only include if 5 or fewer xrefs
-                filtered_indices.add(idx)
+            if len(xrefs) > 2:  # Only include if 2 or fewer xrefs
+                high_xref_count += 1
+                continue
+            filtered_indices.add(idx)
+
+        log(f"Grouping {len(interesting_indices)} interesting artifacts (after exclusions: {len(filtered_indices)}, excluded: {excluded_count}, high-xref filtered: {high_xref_count})")
 
         # Process remaining artifacts
         for idx in filtered_indices:
@@ -1138,6 +1144,23 @@ class XRefer:
             func_artifacts, orphan_func_artifacts, _ = self._group_interesting_artifacts(entities_to_cluster)
 
             all_candidate_funcs = set(func_artifacts.keys()) | set(orphan_func_artifacts.keys())
+            # Always treat the current entry point as interesting so small binaries still cluster
+            if self.current_analysis_ep:
+                all_candidate_funcs.add(self.current_analysis_ep)
+
+            def _fmt_func(ea: int) -> str:
+                fn = self._backend.get_function_at(ea)
+                if fn is None or not getattr(fn, "name", None):
+                    return f"{ea:#x}"
+                try:
+                    return f"{fn.name} ({ea:#x})"
+                except Exception:
+                    return f"{ea:#x}"
+
+            log(f"Cluster candidates: funcs_with_artifacts={len(func_artifacts)}, orphan_funcs={len(orphan_func_artifacts)}, total_candidates={len(all_candidate_funcs)}")
+            if all_candidate_funcs:
+                preview = ", ".join(_fmt_func(ea) for ea in list(all_candidate_funcs)[:10])
+                log(f"Candidate function sample: {preview}")
 
             if not all_candidate_funcs:
                 log("No candidate functions found for clustering")
@@ -1155,10 +1178,23 @@ class XRefer:
             intermediate_paths_map = {}  # Map node pairs to shortest intermediate paths
 
             # Process each path to find root nodes and track intermediates
+            paths_examined = 0
+            candidate_paths_found = 0
+            low_interest_paths = 0
+            logged_low_interest = 0
             for ep in self.paths:
                 for func_ea, paths in self.paths[ep].items():
                     if func_ea in all_candidate_funcs:
+                        candidate_paths_found += len(paths)
                         for path in paths:
+                            paths_examined += 1
+                            interesting_in_path = [node for node in path if node in all_candidate_funcs]
+                            if len(interesting_in_path) < 2:
+                                low_interest_paths += 1
+                                if logged_low_interest < 3:
+                                    log(f"Skipping path (needs >=2 interesting nodes): interesting={[_fmt_func(ea) for ea in interesting_in_path]}, path_len={len(path)}")
+                                    logged_low_interest += 1
+                                continue
                             path_tuple = tuple(path)
                             if path_tuple not in seen_paths:
                                 seen_paths.add(path_tuple)
@@ -1171,7 +1207,16 @@ class XRefer:
                                     # Update intermediate paths map
                                     intermediate_paths_map.update(path_intermediates)
             if not graph_paths or not root_nodes:
-                raise AssertionError("Cluster analysis invoked without any valid call paths")
+                warn_msg = (
+                    "No valid call paths found; skipping cluster analysis and report generation. "
+                    f"paths_examined={paths_examined}, candidate_paths={candidate_paths_found}, low_interest_paths={low_interest_paths}, candidates={len(all_candidate_funcs)}, graph_paths={len(graph_paths)}, root_nodes={len(root_nodes)}"
+                )
+                log(warn_msg)
+                self.analysis_warnings.append(warn_msg)
+                # Keep state consistent for downstream consumers
+                self.clusters = current_clusters or []
+                self.cluster_analysis = current_analysis or {}
+                return
 
             # Create clusters
             log(f"Creating clusters from {len(graph_paths)} paths with {len(root_nodes)} root nodes")
@@ -1188,6 +1233,16 @@ class XRefer:
                     return
 
                 log(f"Generated analysis for {len(self.cluster_analysis.get('clusters', {}))} clusters")
+
+                def _normalize_category_value(cat: Any) -> str:
+                    cat_str = str(getattr(cat, "value", cat))
+                    if cat_str.startswith("BinaryCategory."):
+                        cat_str = cat_str.split(".", 1)[1]
+                    return cat_str
+
+                if isinstance(self.cluster_analysis, dict):
+                    self.cluster_analysis["binary_category"] = _normalize_category_value(self.cluster_analysis.get("binary_category", "Uncategorized"))
+
 
                 def populate_library_flag(cluster_list):
                     for cluster in cluster_list:

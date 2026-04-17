@@ -79,6 +79,25 @@ def cleanup_previous_analysis(file_path: Path, backend: str, force: bool = False
             xrefer_file.unlink()
 
 
+def _print_completion_summary(xrefer_obj: "XRefer") -> None:
+    """Print a consistent completion summary that surfaces warnings/errors."""
+    status_prefix = "[+]"
+    status_msg = "XRefer analysis complete"
+    if getattr(xrefer_obj, "analysis_errors", None):
+        status_prefix = "[x]"
+        status_msg = "XRefer analysis finished with errors"
+    elif getattr(xrefer_obj, "analysis_warnings", None):
+        status_prefix = "[!]"
+        status_msg = "XRefer analysis complete with warnings"
+
+    print(f"{status_prefix} {status_msg}, results saved to {xrefer_obj.settings['paths']['analysis']}")
+
+    for err in getattr(xrefer_obj, "analysis_errors", []):
+        print(f"[x] {err}")
+    for warn in getattr(xrefer_obj, "analysis_warnings", []):
+        print(f"[!] {warn}")
+
+
 def setup_ida_backend():
     """Set up IDA Pro backend requirements."""
     try:
@@ -136,7 +155,7 @@ def analysis_ida(filepath: Path, modules: dict[str, Any] | None = None, *, xrefe
         params.update(xrefer_kwargs)
 
     xrefer_obj = XRefer(**params)  # This automatically calls load_analysis() when auto_analyze=True
-    print(f"[+] XRefer analysis complete, results saved to {xrefer_obj.settings['paths']['analysis']}")
+    _print_completion_summary(xrefer_obj)
     return xrefer_obj
 
 
@@ -156,7 +175,7 @@ def analysis_binaryninja(bv, modules: dict[str, Any] | None = None, *, xrefer_kw
         params.update(xrefer_kwargs)
 
     xrefer_obj = XRefer(**params)  # This automatically calls load_analysis() when auto_analyze=True
-    print(f"[+] XRefer analysis complete, results saved to {xrefer_obj.settings['paths']['analysis']}")
+    _print_completion_summary(xrefer_obj)
     return xrefer_obj
 
 
@@ -177,7 +196,7 @@ def analysis_ghidra(_filepath: Path, modules: dict[str, Any] | None = None, *, x
         params.update(xrefer_kwargs)
 
     xrefer_obj = XRefer(**params)  # This automatically calls load_analysis() when auto_analyze=True
-    print(f"[+] XRefer analysis complete, results saved to {xrefer_obj.settings['paths']['analysis']}")
+    _print_completion_summary(xrefer_obj)
     return xrefer_obj
 
 
@@ -203,7 +222,7 @@ def _analyze_ida(
 
     try:
         idapro.open_database(str(file_path), run_auto_analysis=auto_analysis)
-        analysis_ida(file_path, modules=modules, xrefer_kwargs=xrefer_kwargs)
+        return analysis_ida(file_path, modules=modules, xrefer_kwargs=xrefer_kwargs)
     finally:
         idapro.close_database(save=save_changes)
 
@@ -245,12 +264,13 @@ def _analyze_binaryninja(
         if save_changes:
             bv.save_auto_snapshot()
 
-        analysis_binaryninja(bv, modules=modules, xrefer_kwargs=xrefer_kwargs)
+        xrefer_obj = analysis_binaryninja(bv, modules=modules, xrefer_kwargs=xrefer_kwargs)
 
         if save_changes:
             bv.save_auto_snapshot()
             print(f"[+] Saved Binary Ninja database: {bndb_path}")
 
+        return xrefer_obj
     finally:
         bv.file.close()
 
@@ -297,7 +317,7 @@ def _analyze_ghidra(
 
         ghidra_backend = backend_manager.create_backend("ghidra", program=flat_api.getCurrentProgram())
         backend_manager.set_active_backend(ghidra_backend)
-        analysis_ghidra(file_path, modules=modules, xrefer_kwargs=xrefer_kwargs)
+        xrefer_obj = analysis_ghidra(file_path, modules=modules, xrefer_kwargs=xrefer_kwargs)
         if save_changes:
             print("[+] Saving Ghidra project...")
             try:
@@ -308,6 +328,7 @@ def _analyze_ghidra(
                 flat_api.saveProgram(program)
             except Exception as save_error:
                 print(f"[!] Save failed: {save_error}")
+        return xrefer_obj
 
 
 def parse_entry_point(value: str) -> int:
@@ -434,11 +455,12 @@ def cli():
         if args.entry_point is not None:
             print(f"[+] Entry point override: {args.entry_point:#x}")
 
+        analysis_result = None
         try:
             if args.backend == "ida":
-                _analyze_ida(file_path, args.auto_analysis, args.save, args.force, xrefer_kwargs=xrefer_kwargs)
+                analysis_result = _analyze_ida(file_path, args.auto_analysis, args.save, args.force, xrefer_kwargs=xrefer_kwargs)
             elif args.backend == "binaryninja":
-                _analyze_binaryninja(file_path, args.auto_analysis, args.save, args.force, xrefer_kwargs=xrefer_kwargs)
+                analysis_result = _analyze_binaryninja(file_path, args.auto_analysis, args.save, args.force, xrefer_kwargs=xrefer_kwargs)
             elif args.backend == "ghidra":
                 print(
                     """
@@ -448,11 +470,17 @@ def cli():
 """,
                     file=sys.stderr,
                 )
-                _analyze_ghidra(file_path, args.auto_analysis, args.save, args.force, xrefer_kwargs=xrefer_kwargs)
+                analysis_result = _analyze_ghidra(file_path, args.auto_analysis, args.save, args.force, xrefer_kwargs=xrefer_kwargs)
             else:
                 print(f"[x] Error: Unknown backend: {args.backend}")
                 sys.exit(1)
-            print("[+] Analysis completed successfully")
+            if analysis_result and getattr(analysis_result, "analysis_errors", None):
+                print("[x] Analysis completed with errors (see above)")
+                sys.exit(1)
+            elif analysis_result and getattr(analysis_result, "analysis_warnings", None):
+                print("[!] Analysis completed with warnings (see above)")
+            else:
+                print("[+] Analysis completed successfully")
         except KeyboardInterrupt:
             print("\n[!] Analysis interrupted by user")
             sys.exit(1)
