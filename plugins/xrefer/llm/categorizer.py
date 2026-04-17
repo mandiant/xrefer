@@ -15,9 +15,8 @@
 from typing import Dict, List, Tuple
 
 from xrefer.core.helpers import log
-from xrefer.llm.base import ModelConfig
+from xrefer.llm.base import ModelConfig, PromptType
 from xrefer.llm.processor import LLMProcessor
-from xrefer.llm.prompts import PromptType
 
 CATEGORIES = [
     "File and Path I/O",
@@ -92,6 +91,7 @@ class Categorizer:
 
         # Process uncategorized items
         index_results = processor.process_items(items=uncategorized, prompt_type=PromptType.CATEGORIZER, categories=categories, type=type)
+        index_results = index_results["category_assignments"]
 
         # Convert index-based results back to item mappings
         named_results = {}

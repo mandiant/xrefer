@@ -12,7 +12,7 @@ import idaapi
 import idautils
 import idc
 
-from ..base import Address, BackEnd, BackendError, BasicBlock, Function, FunctionType, Section, SectionType, String, StringEncType, Xref, XrefType
+from ..base import Address,BackEnd,BackendError,BasicBlock,Function,FunctionType,Section,SectionType,String,StringEncType,Xref,XrefType,Instruction,Operand,OperandType
 
 
 class IDAFunction(Function):
@@ -221,6 +221,8 @@ class IDASection(Section):
             return SectionType.CODE
         elif self._seg.perm & ida_segment.SEGPERM_WRITE:
             return SectionType.DATA
+        elif self._seg.perm & ida_segment.SEG_DATA:
+            return SectionType.DATA
         elif self._seg.perm & ida_segment.SEGPERM_READ:
             return SectionType.DATA
         else:
@@ -246,6 +248,11 @@ class IDABackend(BackEnd):
         """Get IDA image base address."""
         return Address(idaapi.get_imagebase())
 
+    @property
+    def size(self) -> int:
+        """Get size of the currently opened IDA database."""
+        return ida_nalt.retrieve_input_file_size()
+
     def _path_impl(self) -> str:
         """Get the path of the currently opened IDA database."""
         input_path: Optional[str] = idc.get_idb_path()
@@ -255,6 +262,10 @@ class IDABackend(BackEnd):
 
     def _binary_hash_impl(self):
         return ida_nalt.retrieve_input_file_sha256().hex()
+
+    def filetype(self) -> str:
+        """Get the file type of the binary (e.g., 'PE', 'ELF', 'Mach-O')."""
+        return idaapi.get_file_type_name()
 
     #
     # Function Analysis
@@ -321,6 +332,13 @@ class IDABackend(BackEnd):
             return data if data else None
         except Exception:
             return None
+
+    def _resolve_file_offset_impl(self, file_offset: int) -> Address | None:
+        """Resolve a file offset to a linear address using IDA APIs."""
+        ea = idaapi.get_fileregion_ea(file_offset)
+        if ea == idaapi.BADADDR:
+            return None
+        return Address(int(ea))
 
     def instructions(self, start: Address, end: Address) -> Iterator[Address]:
         """Iterate over instruction addresses in the specified range."""
@@ -392,3 +410,55 @@ class IDABackend(BackEnd):
     def _set_function_comment_impl(self, address: Address, comment: str) -> None:
         """Set function comment in IDA."""
         idc.set_func_cmt(int(address), comment, 0)
+
+    def _get_disassembly_impl(self, address: Address) -> Instruction:
+        """Backend-specific implementation for getting disassembly at a specific address."""
+        ea = int(address)
+
+        # Full disassembly text and mnemonic
+        text = idc.generate_disasm_line(ea, 0) or ""
+        mnem = (idc.print_insn_mnem(ea) or "").lower()
+
+        # Collect operands with best-effort typing
+        operands: list[Operand] = []
+        for i in range(8):  # x86/x64 has max 4; use 8 as a safe cap
+            op_type_id = idc.get_operand_type(ea, i)
+            if op_type_id == idc.o_void:
+                break
+
+            op_text = idc.print_operand(ea, i) or ""
+            op_kind = OperandType.OTHER
+            op_value = None
+
+            try:
+                if op_type_id == idc.o_imm:
+                    op_kind = OperandType.IMMEDIATE
+                    val = idc.get_operand_value(ea, i)
+                    op_value = Address(int(val))
+                elif op_type_id == idc.o_reg:
+                    op_kind = OperandType.REGISTER
+                elif op_type_id in (idc.o_mem,):
+                    op_kind = OperandType.MEMORY
+                    val = idc.get_operand_value(ea, i)
+                    op_value = Address(int(val))
+                elif op_type_id in (idc.o_phrase, idc.o_displ):
+                    # Memory with computed address; keep value None (use xrefs to resolve)
+                    op_kind = OperandType.MEMORY
+                else:
+                    op_kind = OperandType.OTHER
+            except Exception as e:
+                from logging import getLogger
+                logger = getLogger(__name__)
+                logger.exception(f"Failed to parse operand at {ea:#x} operand {i}: {e}")
+                op_kind = OperandType.OTHER
+                op_value = None
+
+            operands.append(Operand(type=op_kind, text=op_text, value=op_value))
+
+        ins = Instruction(
+            address=Address(ea),
+            mnemonic=mnem,
+            operands=tuple(operands),
+            text=text
+        )
+        return ins

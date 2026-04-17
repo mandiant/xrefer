@@ -28,6 +28,7 @@ import ida_nalt
 import ida_ua
 import idaapi
 import idc
+import ida_idaapi
 import networkx as nx
 from PyQt5 import QtCore, QtWidgets
 from tabulate import tabulate
@@ -297,7 +298,7 @@ class CollapseIndicator(QtWidgets.QWidget):
         self.reposition()
 
 
-from xrefer.core.helpers import convert_int_to_hex, create_table_from_rows, enrich_string_data_core, find_cluster_analysis, get_visible_width, sort_clusters, word_wrap_text
+from xrefer.core.helpers import convert_int_to_hex, create_table_from_rows, enrich_string_data_core, find_cluster_analysis, get_visible_width, sort_clusters, word_wrap_text, set_log_function
 
 
 def enrich_string_data(str_indexes: List[int], entity_list: List[str], lookup: bool = True, max_threads: int = 50) -> List[Tuple[str, str, int, str, dict, list]]:
@@ -429,6 +430,7 @@ def log(string: str) -> None:
     print(f"[XRefer] {string}")
     idaapi.replace_wait_box(f"HIDECANCEL\n{string}")
 
+    set_log_function(log)
 
 def log_elapsed_time(msg: str, start_time: float) -> None:
     """
@@ -484,7 +486,7 @@ def handle_entrypoint_selection(plugin_instance: Any, custom_ep: int) -> bool:
         bool: True if entry point was valid and analysis started, False otherwise
     """
     if custom_ep != idc.BADADDR:
-        ep_name: str = idc.get_func_name(custom_ep)
+        ep_name: str = idc.get_func_name(ida_idaapi.ea_t(custom_ep))
         if plugin_instance.xrefer_view and plugin_instance.xrefer_view.xrefer_obj.lang:
             log(f"Custom entrypoint selected for secondary analysis: 0x{custom_ep:x} ({ep_name})")
             plugin_instance.xrefer_view.xrefer_obj.current_analysis_ep = custom_ep
@@ -651,7 +653,7 @@ def create_function_rows_for_interesting_artifacts(func_ea: int, artifacts: List
     # Color first artifact based on its type
     artifact_color = xrefer_obj.color_tags[xrefer_obj.table_names[first_artifact[0]]]
     colored_artifact = f"\x01{artifact_color}{first_artifact[1]}\x02{artifact_color}"
-    colored_func_name = f"\x01{ida_lines.SCOLOR_DEMNAME}{idc.get_func_name(func_ea)}\x02{ida_lines.SCOLOR_DEMNAME}"
+    colored_func_name = f"\x01{ida_lines.SCOLOR_DEMNAME}{idc.get_func_name(ida_idaapi.ea_t(func_ea))}\x02{ida_lines.SCOLOR_DEMNAME}"
 
     first_row = [f"{colored_addr}{colored_arrow}", f" {colored_artifact}", colored_func_name]
     rows.append(first_row)

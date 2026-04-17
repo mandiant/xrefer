@@ -15,12 +15,13 @@
 from typing import TYPE_CHECKING, Any, Dict, List
 
 from xrefer.core.helpers import log
-from xrefer.llm.base import ModelConfig
+from xrefer.llm.base import ModelConfig, PromptType
 from xrefer.llm.processor import LLMProcessor
-from xrefer.llm.prompts import PromptType
+
 
 if TYPE_CHECKING:
     from xrefer.core.clusters import FunctionalCluster
+    from xrefer.core.analyzer import XRefer
 
 
 class ClusterAnalyzer:
@@ -46,7 +47,7 @@ class ClusterAnalyzer:
         cls._processor = None  # Force new processor with new config
 
     @classmethod
-    def analyze_clusters(cls, clusters: List["FunctionalCluster"], xrefer_obj) -> Dict[str, Any]:
+    def analyze_clusters(cls, clusters: List["FunctionalCluster"], xrefer_obj, batch_size = 30) -> Dict[str, Any]:
         """
         Analyze cluster hierarchy using LLM.
 
@@ -59,96 +60,78 @@ class ClusterAnalyzer:
         """
         processor = cls._get_processor()
 
-        try:
-            cluster_count = 0
-            batch_size = 30
+        cluster_count = 0
 
-            def count_clusters(cluster):
-                nonlocal cluster_count
-                cluster_count += 1
-                for subcluster in cluster.subclusters:
-                    count_clusters(subcluster)
+        def count_clusters(cluster):
+            nonlocal cluster_count
+            cluster_count += 1
+            for subcluster in cluster.subclusters:
+                count_clusters(subcluster)
 
-            for cluster in clusters:
-                count_clusters(cluster)
+        for cluster in clusters:
+            count_clusters(cluster)
 
-            if cluster_count == 0:
-                # No clusters to analyze
-                return {}
-
-            if cluster_count <= batch_size:
-                # Single request scenario, no partial instructions
-                cluster_data = cls.format_cluster_data(clusters, xrefer_obj, start_idx=0, end_idx=cluster_count)
-                log(f"Generated cluster data ({len(cluster_data)} chars)")
-                results = processor.process_items(cluster_data, prompt_type=PromptType.CLUSTER_ANALYZER, ignore_token_limit=True)
-
-                if not isinstance(results, dict):
-                    log("[-] Error: LLM returned invalid format")
-                    return {}
-
-                required_keys = {"clusters", "binary_description", "binary_category"}
-                if not all(key in results for key in required_keys):
-                    log("[-] Error: Missing required keys in LLM response")
-                    log(f"Found keys: {list(results.keys())}")
-                    return {}
-
-                return results
-            else:
-                # Multiple batch scenario
-                all_clusters_result = {}
-                binary_description = None
-                binary_category = None
-                binary_report = None
-                log(f"Going to process {cluster_count} clusters through the LLM. This will take some time...")
-
-                # Process clusters in batches of batch_size
-                for start in range(0, cluster_count, batch_size):
-                    end = min(start + batch_size, cluster_count)
-                    log(f"Processing clusters {start + 1} to {end} in this batch")
-
-                    cluster_data = cls.format_cluster_data(clusters, xrefer_obj, start_idx=start, end_idx=end)
-                    log(f"Generated cluster data ({len(cluster_data)} chars)")
-                    results = processor.process_items(cluster_data, prompt_type=PromptType.CLUSTER_ANALYZER, ignore_token_limit=True)
-
-                    if not isinstance(results, dict) or not results:
-                        log("[-] Error: LLM returned erroneous response, please re-start cluster analysis")
-                        break
-
-                    # Extract clusters from partial result
-                    partial_clusters = results.get("clusters", {})
-                    # Merge cluster analyses
-                    for cid, cdata in partial_clusters.items():
-                        all_clusters_result[cid] = cdata
-
-                    # Update binary fields from the latest batch
-                    if "binary_description" in results:
-                        binary_description = results["binary_description"]
-                    if "binary_category" in results:
-                        binary_category = results["binary_category"]
-                    if "binary_report" in results:
-                        binary_report = results["binary_report"]
-
-                # After processing all batches, ensure required fields are present
-                if not all_clusters_result:
-                    log("[-] Error: No cluster data received after all batches")
-                    return {}
-
-                if binary_description is None or binary_category is None:
-                    log("[-] Error: Missing binary_description or binary_category after batched analysis")
-                    return {}
-
-                final_result = {"clusters": all_clusters_result, "binary_description": binary_description, "binary_category": binary_category}
-                if binary_report is not None:
-                    final_result["binary_report"] = binary_report
-
-                return final_result
-
-        except Exception as e:
-            log(f"[-] Error analyzing clusters: {str(e)}")
+        if cluster_count == 0:
+            # No clusters to analyze
             return {}
 
+        if cluster_count <= batch_size:
+            # Single request scenario, no partial instructions
+            cluster_data = cls.format_cluster_data(clusters, xrefer_obj, start_idx=0, end_idx=cluster_count)
+            log(f"Generated cluster data ({len(cluster_data)} chars)")
+            results = processor.process_items(cluster_data, prompt_type=PromptType.CLUSTER_ANALYZER, ignore_token_limit=True)
+            results = dict(results)  # Ensure it's a dict # TODO: Drop dict across the codebase for better developer experience.
+            return results
+        else:
+            # Multiple batch scenario
+            all_clusters_result = {}
+            binary_description = None
+            binary_category = None
+            binary_report = None
+            log(f"Going to process {cluster_count} clusters through the LLM. This will take some time...")
+
+            # Process clusters in batches of batch_size
+            for start in range(0, cluster_count, batch_size):
+                end = min(start + batch_size, cluster_count)
+                log(f"Processing clusters {start + 1} to {end} in this batch")
+
+                cluster_data = cls.format_cluster_data(clusters, xrefer_obj, start_idx=start, end_idx=end)
+                log(f"Generated cluster data ({len(cluster_data)} chars)")
+                results = processor.process_items(cluster_data, prompt_type=PromptType.CLUSTER_ANALYZER, ignore_token_limit=True)
+                results = dict(results)  # Ensure it's a dict
+
+                # Extract clusters from partial result
+                partial_clusters = results.get("clusters", {})
+                # Merge cluster analyses
+                for cid, cdata in partial_clusters.items():
+                    all_clusters_result[cid] = cdata
+
+                # Update binary fields from the latest batch
+                if "binary_description" in results:
+                    binary_description = results["binary_description"]
+                if "binary_category" in results:
+                    binary_category = results["binary_category"]
+                if "binary_report" in results:
+                    binary_report = results["binary_report"]
+
+            # After processing all batches, ensure required fields are present
+            if not all_clusters_result:
+                log("[-] Error: No cluster data received after all batches")
+                return {}
+
+            if binary_description is None or binary_category is None:
+                log("[-] Error: Missing binary_description or binary_category after batched analysis")
+                return {}
+
+            final_result = {"clusters": all_clusters_result, "binary_description": binary_description, "binary_category": binary_category}
+            if binary_report is not None:
+                final_result["binary_report"] = binary_report
+
+            return final_result
+
+
     @staticmethod
-    def format_cluster_data(clusters: List["FunctionalCluster"], xrefer_obj, start_idx: int = 0, end_idx: int = None) -> str:
+    def format_cluster_data(clusters: List["FunctionalCluster"], xrefer_obj: 'XRefer', start_idx: int = 0, end_idx: int = None) -> str:
         """
         Format cluster hierarchy for LLM analysis.
 
@@ -177,73 +160,56 @@ class ClusterAnalyzer:
 
             def format_cluster(cluster: "FunctionalCluster", depth: int = 0) -> str:
                 indent = "  " * depth
-
-                formatted = f"{indent}Cluster {cluster.id}:\n"
-                formatted += f"{indent}Type: {'Primary' if cluster.parent_cluster_id is None else f'Subcluster of {cluster.parent_cluster_id}'}\n"
-                formatted += f"{indent}Root: 0x{cluster.root_node:x}\n\n"
-
-                # Add nodes and their artifacts
-                formatted += f"{indent}Functions:\n"
+                formatted = [f"{indent}Cluster {cluster.id}:",
+                             f"{indent}Type: {'Primary' if cluster.parent_cluster_id is None else f'Subcluster of {cluster.parent_cluster_id}'}",
+                             f"{indent}Root: {cluster.root_node:#x}",
+                             '',
+                             f"{indent}Functions:"]
                 for node in cluster.nodes:
                     if node not in cluster.cluster_refs:
-                        formatted += f"{indent}- Function 0x{node:x}:\n"
-                        try:
-                            # Get APIs
-                            apis = xrefer_obj.get_apis_for_function(node)
-                            if apis:
-                                formatted += f"{indent}  APIs:\n"
-                                for api in apis:
-                                    formatted += f"{indent}    {api}\n"
-                                    # Get top 10 calls
-                                    calls = xrefer_obj.get_direct_calls(api, node, colorized=False)
-                                    if calls:
-                                        sorted_calls = sorted(calls, key=lambda x: x[1], reverse=True)[:10]
-                                        for call_str, count in sorted_calls:
-                                            formatted += f"{indent}      Call: {call_str} (called {count} times)\n"
+                        formatted.append(f"{indent}- Function {node:#x}:")
+                        # Get APIs
+                        if apis := xrefer_obj.get_apis_for_function(node):
+                            formatted.append(f"{indent}  APIs:")
+                            for api in apis:
+                                formatted.append(f"{indent}    API: {api}")
+                                # Get top 10 calls
+                                if calls := xrefer_obj.get_direct_calls(api, node, colorized=False):
+                                    sorted_calls = sorted(calls, key=lambda x: x[1], reverse=True)[:10]
+                                    for call_str, count in sorted_calls:
+                                        formatted.append(f"{indent}      Call: {call_str} (called {count} times)")
 
-                            # Get libraries
-                            libs = xrefer_obj.get_libs_for_function(node)
-                            if libs:
-                                formatted += f"{indent}  Libraries: {', '.join(libs)}\n"
-
-                            # Get strings
-                            strings = xrefer_obj.get_strings_for_function(node)
-                            if strings:
-                                formatted += f"{indent}  Strings: {', '.join(strings)}\n"
-
-                            # Get CAPA matches
-                            capa = xrefer_obj.get_capa_for_function(node)
-                            if capa:
-                                formatted += f"{indent}  CAPA: {', '.join(capa)}\n"
-
-                        except Exception as e:
-                            log(f"[-] Error getting artifacts for function 0x{node:x}: {str(e)}")
-                            continue
-
+                        for label, data in [
+                            ('Libraries', xrefer_obj.get_libs_for_function(node)),
+                            ('Strings', xrefer_obj.get_strings_for_function(node)),
+                            ('CAPA', xrefer_obj.get_capa_for_function(node)),
+                        ]:
+                            if data:
+                                formatted.append(f"{indent}  {label}: {', '.join(data)}")
                 # Add call flow
                 if cluster.edges:
-                    formatted += f"\n{indent}Call Flow:\n"
+                    formatted.append(f"\n{indent}Call Flow:")
                     for source, target in cluster.edges:
-                        source_label = f"0x{source:x}"
+                        source_label = f"{source:#x}"
                         if target in cluster.cluster_refs:
                             target_label = f"Cluster {cluster.cluster_refs[target]}"
                         else:
-                            target_label = f"0x{target:x}"
-                        formatted += f"{indent}- {source_label} -> {target_label}\n"
+                            target_label = f"{target:#x}"
+                        formatted.append(f"{indent}- {source_label} -> {target_label}")
 
                 # Add cluster references
                 if cluster.cluster_refs:
-                    formatted += f"\n{indent}References to Other Clusters:\n"
+                    formatted.append(f"\n{indent}References to Other Clusters:")
                     for node, cluster_id in cluster.cluster_refs.items():
-                        formatted += f"{indent}- Node 0x{node:x} replaced by Cluster {cluster_id}\n"
+                        formatted.append(f"{indent}- Node {node:#x} replaced by Cluster {cluster_id}")
 
                 # Recursively add subclusters
                 if cluster.subclusters:
-                    formatted += f"\n{indent}Subclusters:\n"
+                    formatted.append(f"\n{indent}Subclusters:")
                     for subcluster in cluster.subclusters:
-                        formatted += "\n" + format_cluster(subcluster, depth + 1)
+                        formatted.append("\n" + format_cluster(subcluster, depth + 1))
 
-                return formatted
+                return "\n".join(formatted)
 
             # Start building the formatted output
             # If we are analyzing a subset, add a note clarifying that the LLM must analyze all clusters
@@ -261,16 +227,21 @@ class ClusterAnalyzer:
                     f"for the entire binary. All clusters are provided below for context. "
                 )
 
-            formatted = "Binary Analysis Clusters\n=====================\n\n"
-            formatted += "Structure is organized hierarchically with primary clusters and their subclusters.\n"
-            formatted += "Each cluster shows its functions, artifacts (APIs, strings, etc.), and call flows.\n"
-            formatted += "References to subclusters indicate where complex behavior is encapsulated.\n\n"
-            formatted += note
+            formatted = '''Structure is organized hierarchically with primary clusters and their subclusters.
+Each cluster shows its functions, artifacts (APIs, strings, etc.), and call flows.
+References to subclusters indicate where complex behavior is encapsulated.
 
-            for cluster in clusters:
-                formatted += format_cluster(cluster) + "\n\n"
+{note}
 
-            formatted += ps_note
+<CLUSTER>
+{formatted_clusters}
+</CLUSTER>
+
+{ps_note}
+'''.format(
+    note=note,
+    formatted_clusters='\n\n'.join(format_cluster(c) for c in clusters),
+    ps_note=ps_note)
             return formatted
 
         finally:

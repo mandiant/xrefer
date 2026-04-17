@@ -41,14 +41,13 @@ class FunctionType(Enum):
 class XrefType(Enum):
     """Cross-reference types for different kinds of references."""
 
-    CALL = auto()
-    JUMP = auto()
-    BRANCH_TRUE = auto()
-    BRANCH_FALSE = auto()
-    DATA_READ = auto()
-    DATA_WRITE = auto()
-    DATA_OFFSET = auto()
-    STRING_REF = auto()
+    CALL = auto() # direct/indirect call
+    JUMP = auto() # direct/conditional/indirect jump
+    BRANCH_TRUE = JUMP   # alias: treat as JUMP
+    BRANCH_FALSE = JUMP  # alias: treat as JUMP
+    DATA_READ = auto() # data read access (e.g. mov eax, [addr])
+    DATA_WRITE = auto() # data write access (e.g. mov [addr], eax)
+    DATA_OFFSET = auto() # data offset reference (e.g. lea eax, [addr])
     UNKNOWN = auto()
 
 
@@ -103,6 +102,45 @@ class Address(int):
     def is_valid(self) -> bool:
         """Check if this address is valid (not the sentinel value)."""
         return self != self.invalid()
+
+
+class OperandType(Enum):
+    """Canonical operand categories across backends."""
+    IMMEDIATE = auto()
+    REGISTER  = auto()
+    MEMORY    = auto()
+    RELATIVE  = auto()   # branch/call rel targets
+    OTHER     = auto()
+
+@dataclass(frozen=True)
+class MemoryOperand:
+    """Structured memory operand (best-effort, tolerant across tools)."""
+    base: Optional[str] = None
+    index: Optional[str] = None
+    scale: Optional[int] = None
+    disp: Optional[int] = None
+    seg: Optional[str] = None
+    addr_size: Optional[int] = None  # in bits if known
+
+@dataclass(frozen=True)
+class Operand:
+    """Unified operand."""
+    type: OperandType
+    text: str
+    value: Optional[Address]=None
+    # reg: Optional[str] = None
+    # imm: Optional[int] = None
+    # mem: Optional[MemoryOperand] = None
+
+@dataclass
+class Instruction:
+    address: Address
+    # prefixes: Tuple[str, ...]      # e.g., ("lock",) or (). TODO: forget for now
+    mnemonic: str                  # canonical, lowercased, NO prefixes
+    operands: Tuple[Operand, ...]
+    text: str                      # full display text as shown in tool
+
+
 
 
 @dataclass
@@ -368,6 +406,12 @@ class BackEnd(ABC):
         """Get image base address where binary is loaded."""
 
     @property
+    @abstractmethod
+    def size(self) -> int:
+        """Get total size of the binary in bytes."""
+        ...
+
+    @property
     def binary_hash(self) -> str:
         """
         Get SHA256 hash of the binary file (cached).
@@ -388,6 +432,11 @@ class BackEnd(ABC):
         This should return the hash without
         """
         raise NotImplementedError("Backend must implement _binary_hash_impl() to provide binary hash.")
+
+    @abstractmethod
+    def filetype(self) -> str:
+        """Get the file type of the binary (e.g., 'PE', 'ELF', 'Mach-O')."""
+        ...
 
     def is_valid_address(self, address: Address) -> bool:
         """
@@ -444,9 +493,6 @@ class BackEnd(ABC):
             String objects for each identified string
         """
         ...
-        pass
-
-    # Symbol Resolution
 
     @abstractmethod
     def get_name_at(self, address: Address) -> str:
@@ -734,6 +780,12 @@ class BackEnd(ABC):
         except Exception:
             return False
 
+    def disassemble(self, address: Address) -> "Instruction":
+        """
+        Disassemble a single instruction at `address`.
+        """
+        return self._get_disassembly_impl(address)
+
     #
     # Backend-Specific Implementation Methods
     #
@@ -756,4 +808,27 @@ class BackEnd(ABC):
     @abstractmethod
     def _path_impl(self) -> str:
         """Backend-specific implementation for getting binary path."""
+        ...
+
+    @abstractmethod
+    def _get_disassembly_impl(self, address: Address) -> Instruction:
+        """Backend-specific implementation for getting disassembly at a specific address."""
+        ...
+
+    def resolve_file_offset(self, file_offset: int) -> Address | None:
+        """Resolve a file offset to a memory address if possible.
+
+        Args:
+            file_offset: Raw file offset to resolve
+
+        Returns:
+            Resolved Address or None if the offset does not map to memory
+        """
+        if file_offset < 0:
+            raise ValueError("file_offset must be non-negative")
+        return self._resolve_file_offset_impl(file_offset)
+
+    @abstractmethod
+    def _resolve_file_offset_impl(self, file_offset: int) -> Address | None:
+        """Backend-specific implementation for resolving file offsets."""
         ...

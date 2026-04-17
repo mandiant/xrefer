@@ -1,0 +1,3 @@
+[submodule "tests/e2e/xrefer-test"]
+	path = tests/e2e/xrefer-test
+	url = https://github.com/rand-tech/xrefer-test.git

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+import enum
 import re
 import traceback
 import weakref
@@ -26,6 +27,7 @@ import ida_idaapi
 import ida_idp
 import ida_kernwin
 import ida_lines
+import ida_idaapi
 import idaapi
 import idautils
 import idc
@@ -105,6 +107,14 @@ class XReferView(idaapi.simplecustviewer_t):
                 ("DIRECT XREFS", 1),
             ]
         )
+        # HACK: Bring back color_tags just for IDA. We removed this from the core because we didn't want to keep IDA specific logic in core. However, to bring back the coloring in the IDA plugin, we directly
+        self.xrefer_obj.color_tags = {
+                self.xrefer_obj.table_names[1]: ida_lines.SCOLOR_DEMNAME, # "INDIRECT LIBRARY XREFS"
+                self.xrefer_obj.table_names[2]: ida_lines.SCOLOR_IMPNAME, # "INDIRECT IMPORT XREFS"
+                self.xrefer_obj.table_names[3]: ida_lines.SCOLOR_DSTR,    # "INDIRECT STRING XREFS"
+                self.xrefer_obj.table_names[4]: ida_lines.SCOLOR_CODNAME, # "INDIRECT CAPA XREFS"
+            }
+
         self.table_names: List[str] = list(self.table_states.keys())
         self.subtable_states: Dict[str, Dict[str, bool]] = {}
         self.api_expansion_state = defaultdict(lambda: defaultdict(lambda: {"direct": False, "indirect": False}))
@@ -239,8 +249,8 @@ class XReferView(idaapi.simplecustviewer_t):
 
             # Initial content population
             if not self.func_ea:
-                idaapi.jumpto(self.xrefer_obj.current_analysis_ep)
-                self.update(ea=self.xrefer_obj.current_analysis_ep)
+                idaapi.jumpto(int(self.xrefer_obj.current_analysis_ep))
+                self.update(ea=int(self.xrefer_obj.current_analysis_ep))
             else:
                 self.update(ea=self.func_ea)
 
@@ -624,7 +634,7 @@ class XReferView(idaapi.simplecustviewer_t):
             addr: int = get_addr_from_text(word)
             # Set a flag to indicate double-click navigation
             self._from_double_click = True
-            idaapi.jumpto(addr)
+            idaapi.jumpto(int(addr))
             self.update(True, ea=addr)
             # Reset the flag after update
             self._from_double_click = False
@@ -1109,12 +1119,12 @@ class XReferView(idaapi.simplecustviewer_t):
                     pass
 
             if old_name:
-                idaapi.jumpto(addr)
+                idaapi.jumpto(int(addr))
                 new_name: str = idaapi.ask_str(old_name, 0, "Enter new function name:")
                 if new_name:
                     if idaapi.set_name(xref_to_func_ea, new_name):
                         idaapi.refresh_idaview_anyway()
-                        func_ea: int = idc.get_name_ea_simple(idc.get_func_name(addr))
+                        func_ea: int = idc.get_name_ea_simple(idc.get_func_name(ida_idaapi.ea_t(addr)))
                         self.xref_coverage_dict[func_ea] = self.generate_xref_coverage_dict(func_ea)
                         return True
         except:
@@ -1718,6 +1728,8 @@ class XReferView(idaapi.simplecustviewer_t):
 
         # Add binary information with proper alignment
         binary_cat = cluster_analysis.get("binary_category", "Unknown")
+        if isinstance(binary_cat, enum.Enum):
+            binary_cat = binary_cat.name
 
         # Choose between description or report based on toggle
         if self.state_machine.cluster_manager.is_showing_report():
@@ -2142,7 +2154,7 @@ class XReferView(idaapi.simplecustviewer_t):
             cluster = self.xrefer_obj.clusters[0]
             if not self.state_machine.cluster_manager.get_current_cluster():
                 self.state_machine.cluster_manager.push_cluster(cluster.id)
-            self.draw_individual_cluster_graph(cluster.id, self.func_ea)
+            self.draw_individual_cluster_graph(cluster.id)
             return
 
         def count_cluster_stats(cluster):
@@ -2185,6 +2197,9 @@ class XReferView(idaapi.simplecustviewer_t):
 
         # Print binary analysis with enhanced formatting
         binary_cat = cluster_analysis.get("binary_category", "Unknown")
+        # if it's enum
+        if isinstance(binary_cat, enum.Enum):
+            binary_cat = str(binary_cat.name)
 
         # Choose between description or report based on toggle
         if self.state_machine.cluster_manager.is_showing_report():
@@ -2294,6 +2309,7 @@ class XReferView(idaapi.simplecustviewer_t):
                     addr = int(addr_str, 16)
                     # Check if this is the highlighted address
                     if highlight_addr is not None and addr == highlight_addr:
+                        # TODO: Is this a bug? Why are we using `COLOR_ERROR`. COLOR_ADDR feels more appropriate skip for now.
                         return f"\x01\x12{addr_str}{remainder}\x02\x12"
 
                     # Only apply intermediate node coloring in intermediate graph mode

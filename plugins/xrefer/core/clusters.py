@@ -50,6 +50,7 @@ class FunctionalCluster:
         self.cluster_refs = {}  # Maps node -> cluster_id for replaced nodes
         self.intermediate_paths = {}  # Maps (source, target) -> set of intermediate paths
         self.backend = backend  # Backend instance for platform-agnostic operations
+        self.is_library: bool = False # This is correct
 
     @classmethod
     def reset_id_counter(cls):

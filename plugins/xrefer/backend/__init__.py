@@ -1,6 +1,6 @@
 """backend abstraction with pythonic factory pattern."""
 
-from .base import Address, BackEnd, BackendError, Function, FunctionType, Section, String, StringEncType, Xref, XrefType
+from .base import Address, BackEnd, BackendError, Function, FunctionType, Section, SectionType, String, StringEncType, Xref, XrefType, OperandType, Operand, Instruction
 from .factory import backend_manager, get_backend, list_available_backends
 from .utils import sample_path
 
@@ -50,6 +50,11 @@ def _ensure_backend_initialized():
 
 def get_current_backend():
     """Get the current backend instance, initializing if needed."""
+    # First check if backend manager has an active backend
+    active_backend = backend_manager.get_active_backend()
+    if active_backend is not None:
+        return active_backend
+    # Fall back to legacy initialization
     _ensure_backend_initialized()
     return Backend
 
@@ -71,8 +76,13 @@ __all__ = [
     "String",
     "Xref",
     "Section",
+    "SectionType",
     "sample_path",
     "get_indirect_calls",
+    # operand
+    "Instruction",
+    "Operand",
+    "OperandType",
     # Base classes
     "BackEnd",
 ]

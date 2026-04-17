@@ -14,9 +14,8 @@
 
 from typing import Dict, List, Set
 
-from xrefer.llm.base import ModelConfig
+from xrefer.llm.base import ModelConfig, PromptType
 from xrefer.llm.processor import LLMProcessor
-from xrefer.llm.prompts import PromptType
 
 
 class ArtifactAnalyzer:
