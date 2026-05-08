@@ -30,10 +30,37 @@ import idaapi
 import idc
 import ida_idaapi
 import networkx as nx
-from PyQt5 import QtCore, QtWidgets
+from qtpy import QtCore, QtWidgets
 from tabulate import tabulate
 
 from xrefer.core.analyzer import ApiCall
+
+
+def twidget_to_qt(twidget):
+    """Convert an IDA TWidget* into a QWidget of the active Qt binding.
+
+    IDA 9.3 ships two bridge implementations on PluginForm:
+
+    - ``TWidgetToQtPythonWidget`` (canonical name; aliased as
+      ``TWidgetToPyQtWidget`` and ``FormToPyQtWidget``): PySide6-native via
+      ``shiboken6.Shiboken.wrapInstance``. Returns a PySide6 widget regardless
+      of whether the PyQt5 shim is active. Reads no module-level state. This
+      is the function we always want.
+    - ``TWidgetToPySideWidget`` (aliased as ``FormToPySideWidget``): broken in
+      9.3 — it dereferences ``__main__.QtGui.QWidget``, which is undefined for
+      vanilla PySide6 (``QWidget`` lives in ``QtWidgets``). It looks vestigial
+      from the Qt4 era and cannot be rescued by planting modules. Do not call.
+
+    Older IDA (8.x) exposes only ``TWidgetToPyQtWidget``; under those versions
+    the return type is a PyQt5 widget. Either way, the canonical lookup below
+    resolves to the right implementation.
+    """
+    plugin_form = idaapi.PluginForm
+    bridge = (
+        getattr(plugin_form, "TWidgetToQtPythonWidget", None)
+        or plugin_form.TWidgetToPyQtWidget
+    )
+    return bridge(twidget)
 
 
 class FocusEventFilter(QtCore.QObject):

@@ -32,7 +32,7 @@ import idaapi
 import idautils
 import idc
 import networkx as nx
-from PyQt5 import QtCore, QtGui, QtWidgets
+from qtpy import QtCore, QtGui, QtWidgets
 
 from xrefer.core.analyzer import ApiCall, XRefer
 from xrefer.core.helpers import (find_cluster_analysis, get_addr_from_text, is_windows_or_linux, longest_line_length, parse_cluster_id, remove_non_displayable, strip_color_codes,
@@ -43,7 +43,7 @@ from xrefer.gui.help import ContextHelp
 from xrefer.gui.helpers import (CollapseEventFilter, CollapseIndicator, FocusEventFilter, KeyEventFilter, colorize_api_call, create_cluster_relationship_graph,
                                 create_colored_table_from_cols, create_interesting_artifacts_table, create_xrefs_table_colored, draw_cluster_hierarchy, find_cluster_analysis,
                                 format_api_call_for_ida, help_text, log, patch_asciinet, prepare_interesting_artifacts_table_rows, register_popup_action,
-                                set_focus_to_code, set_xref_coverage_color)
+                                set_focus_to_code, set_xref_coverage_color, twidget_to_qt)
 from xrefer.gui.legacy.shim import format_ribbon
 from xrefer.gui.state_machine import XReferStateMachine
 
@@ -224,7 +224,7 @@ class XReferView(idaapi.simplecustviewer_t):
                 log("Failed to get widget")
                 return
 
-            self.qt_widget = idaapi.PluginForm.TWidgetToPyQtWidget(self.widget)
+            self.qt_widget = twidget_to_qt(self.widget)
             if not self.qt_widget:
                 log("Failed to get Qt widget")
                 return

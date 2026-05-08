@@ -2721,10 +2721,10 @@ class XRefer:
         _WARNING_MSG = f"Missing required analysis files: {missing_files}. If you want to suppress this check, enable 'suppress_notifications' in settings ({self.settings_manager.settings_file})."
         if self._backend.name == "ida":
             try:
-                from PyQt5.QtWidgets import QApplication, QDialog
+                from qtpy.QtWidgets import QApplication, QDialog
             except ImportError as exc:
-                log(f"{_WARNING_MSG} PyQt5 is not available; running in headless mode.")
-                raise EnvironmentError(f"{_WARNING_MSG} PyQt5 is required to prompt for missing files. Enable 'suppress_notifications' to bypass this check.") from exc
+                log(f"{_WARNING_MSG} Qt bindings are not available; running in headless mode.")
+                raise EnvironmentError(f"{_WARNING_MSG} A Qt binding (PyQt5/PySide6) is required to prompt for missing files. Enable 'suppress_notifications' to bypass this check.") from exc
             if not QApplication.instance():
                 log(f"{_WARNING_MSG} No active QApplication; running in headless mode.")
                 raise EnvironmentError(f"{_WARNING_MSG} This run is headless. Enable 'suppress_notifications' to bypass this check.")
