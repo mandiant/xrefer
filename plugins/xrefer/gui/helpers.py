@@ -33,6 +33,8 @@ import networkx as nx
 from PyQt5 import QtCore, QtWidgets
 from tabulate import tabulate
 
+from xrefer.core.analyzer import ApiCall
+
 
 class FocusEventFilter(QtCore.QObject):
     """
@@ -618,6 +620,13 @@ def colorize_api_call(input_string: str) -> str:
         i += 1
 
     return ida_lines.COLSTR("".join(result), ida_lines.SCOLOR_DEMNAME)
+
+
+def format_api_call_for_ida(rec: ApiCall) -> str:
+    """Render an ApiCall record for the IDA custom-viewer panel with full color decoration."""
+    addr = ida_lines.COLSTR(f"0x{rec.call_addr:x}", ida_lines.SCOLOR_LIBNAME)
+    name = ida_lines.COLSTR(rec.api_name.split(".")[-1], ida_lines.SCOLOR_IMPNAME)
+    return f"{addr}: {name}{colorize_api_call(rec.call_str)} x {rec.count}"
 
 
 def create_function_rows_for_interesting_artifacts(func_ea: int, artifacts: List[Tuple], xrefer_obj) -> List[List[str]]:

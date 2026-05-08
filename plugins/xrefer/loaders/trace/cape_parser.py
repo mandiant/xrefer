@@ -124,16 +124,10 @@ class CapeTraceParser(BaseTraceParser):
         return str(value)
 
     def _format_api_call(self, api_call: Dict[str, Any]) -> str:
-        """
-        Format complete API call for display.
+        """Format an API call as plain "(args) = ret".
 
-        Creates colored string representation including arguments and return value.
-
-        Args:
-            api_call (Dict[str, Any]): API call information dictionary
-
-        Returns:
-            str: Formatted API call string with color codes
+        Color/styling is applied later by the rendering layer (see
+        xrefer.gui.helpers.format_api_call_for_ida).
         """
         args = []
         for arg in api_call.get("arguments", []):
@@ -145,7 +139,6 @@ class CapeTraceParser(BaseTraceParser):
                 args.append(arg_value)
 
         args_str = f"({', '.join(args)})"
-        # TODO(rand0m): This is formatting. Should be in gui/. Refactoring the entire code is needed. No time for this now.  There was a colorize_api_call function in the original code.
 
         ret_val = api_call.get("return", "0x0")
         if isinstance(ret_val, str) and ret_val.startswith("0x"):

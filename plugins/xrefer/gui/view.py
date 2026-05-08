@@ -34,15 +34,16 @@ import idc
 import networkx as nx
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-from xrefer.core.analyzer import XRefer
+from xrefer.core.analyzer import ApiCall, XRefer
 from xrefer.core.helpers import (find_cluster_analysis, get_addr_from_text, is_windows_or_linux, longest_line_length, parse_cluster_id, remove_non_displayable, strip_color_codes,
                                  wrap_substring_with_string)
 from xrefer.core.settings import XReferSettingsManager
 from xrefer.gui.action_handlers import ArtifactAnalysisHandler, ClusterEverythingHandler, ClusterInterestingFunctionsHandler, CopyInterestingStringsHandler, PeekViewToggleHandler
 from xrefer.gui.help import ContextHelp
-from xrefer.gui.helpers import (CollapseEventFilter, CollapseIndicator, FocusEventFilter, KeyEventFilter, create_cluster_relationship_graph, create_colored_table_from_cols,
-                                create_interesting_artifacts_table, create_xrefs_table_colored, draw_cluster_hierarchy, find_cluster_analysis, help_text, log, patch_asciinet,
-                                prepare_interesting_artifacts_table_rows, register_popup_action, set_focus_to_code, set_xref_coverage_color)
+from xrefer.gui.helpers import (CollapseEventFilter, CollapseIndicator, FocusEventFilter, KeyEventFilter, colorize_api_call, create_cluster_relationship_graph,
+                                create_colored_table_from_cols, create_interesting_artifacts_table, create_xrefs_table_colored, draw_cluster_hierarchy, find_cluster_analysis,
+                                format_api_call_for_ida, help_text, log, patch_asciinet, prepare_interesting_artifacts_table_rows, register_popup_action,
+                                set_focus_to_code, set_xref_coverage_color)
 from xrefer.gui.legacy.shim import format_ribbon
 from xrefer.gui.state_machine import XReferStateMachine
 
@@ -1443,7 +1444,7 @@ class XReferView(idaapi.simplecustviewer_t):
             calls = self.xrefer_obj.get_indirect_calls(api_name, self.func_ea)
 
         for call, count in calls:
-            self.AddLine(f"{indent}{call} x {count}")
+            self.AddLine(f"{indent}{colorize_api_call(call)} x {count}")
 
     def add_expanded_calls(self, line: str) -> bool:
         """
@@ -3372,105 +3373,49 @@ class XReferView(idaapi.simplecustviewer_t):
         exclusions = self.xrefer_obj.settings_manager.load_exclusions()
         return api_suffix in (name.lower() for name in exclusions["apis"])
 
-    def filter_api_calls(self, calls: List[str]) -> List[str]:
-        """
-        Filter API calls based on exclusions settings.
-
-        Removes excluded API calls from the provided list.
-
-        Args:
-            calls (List[str]): List of API call strings to filter
-
-        Returns:
-            List[str]: Filtered list with excluded calls removed
-        """
+    def filter_api_calls(self, calls: List[ApiCall]) -> List[ApiCall]:
+        """Drop API call records whose api_name is on the exclusions list."""
         if not self.xrefer_obj.settings["enable_exclusions"]:
             return calls
+        return [c for c in calls if not self.is_api_excluded(c.api_name)]
 
-        filtered_calls = []
-        for call in calls:
-            # Extract API name from the call string
-            # Format is typically: "0x123456: ApiName(args) = result"
-            try:
-                api_name = call.split(":")[1].strip().split("(")[0].strip()
-                api_name_cleaned = api_name.split('"')[1].strip()[:-1]
+    def _render_trace(self, calls: List[ApiCall], empty_msg: str) -> None:
+        """Shared rendering for the three trace scopes."""
+        self.ClearLines()
+        self.print_ribbon()
 
-                if not self.is_api_excluded(api_name_cleaned):
-                    filtered_calls.append(call)
-            except IndexError:
-                # If we can't parse the call string, include it
-                filtered_calls.append(call)
+        if not calls:
+            self.AddLine(empty_msg)
+            return
 
-        return filtered_calls
+        filtered_calls = self.filter_api_calls(calls)
+        if not filtered_calls:
+            self.AddLine("    ALL API CALLS ARE EXCLUDED")
+            return
+
+        for rec in filtered_calls:
+            self.AddLine(format_api_call_for_ida(rec))
 
     def handle_trace_scope_function(self) -> None:
-        """
-        Handle function-scope trace display.
-
-        Shows API calls made directly from the current function,
-        applying exclusions filtering if enabled.
-        """
-        self.ClearLines()
-        self.print_ribbon()
-        calls = self.xrefer_obj.gather_sorted_function_api_calls(self.func_ea)
-
-        if not calls:
-            self.AddLine("    NO API CALLS FOUND FOR CURRENT FUNCTION")
-            return
-
-        filtered_calls = self.filter_api_calls(calls)
-        if not filtered_calls:
-            self.AddLine("    ALL API CALLS ARE EXCLUDED")
-            return
-
-        for call in filtered_calls:
-            self.AddLine(call)
+        """Function-scope trace: API calls made directly from the current function."""
+        self._render_trace(
+            self.xrefer_obj.gather_sorted_function_api_calls(self.func_ea),
+            "    NO API CALLS FOUND FOR CURRENT FUNCTION",
+        )
 
     def handle_trace_scope_path(self) -> None:
-        """
-        Handle path-scope trace display.
-
-        Shows API calls made from current function and all functions
-        called along paths from it, applying exclusions filtering.
-        """
-        self.ClearLines()
-        self.print_ribbon()
-        calls = self.xrefer_obj.gather_sorted_path_api_calls(self.func_ea)
-
-        if not calls:
-            self.AddLine("    NO API CALLS FOUND FOR CURRENT PATH")
-            return
-
-        filtered_calls = self.filter_api_calls(calls)
-        if not filtered_calls:
-            self.AddLine("    ALL API CALLS ARE EXCLUDED")
-            return
-
-        for call in filtered_calls:
-            self.AddLine(call)
+        """Path-scope trace: direct + indirect API calls reachable from the current function."""
+        self._render_trace(
+            self.xrefer_obj.gather_sorted_path_api_calls(self.func_ea),
+            "    NO API CALLS FOUND FOR CURRENT PATH",
+        )
 
     def handle_trace_scope_full(self) -> None:
-        """
-        Handle full-scope trace display.
-
-        Shows all API calls in the trace file, applying exclusions
-        filtering if enabled.
-        """
-        self.ClearLines()
-        self.print_ribbon()
-        calls = self.xrefer_obj.gather_sorted_full_api_calls()
-
-        if not calls:
-            self.AddLine("    NO API CALLS FOUND IN DATABASE")
-            return
-
-        filtered_calls = self.filter_api_calls(calls)
-        if not filtered_calls:
-            self.AddLine("    ALL API CALLS ARE EXCLUDED")
-            return
-
-        for call in filtered_calls:
-            self.AddLine(call)
+        """Full-scope trace: every API call in the trace database."""
+        self._render_trace(
+            self.xrefer_obj.gather_sorted_full_api_calls(),
+            "    NO API CALLS FOUND IN DATABASE",
+        )
 
     def handle_no_context_available(self) -> None:
         """
@@ -3763,7 +3708,7 @@ class XReferView(idaapi.simplecustviewer_t):
                             # Limit the length of the call string and add "..." if truncated
                             if len(call) > 150:
                                 call = call[:150] + "..."
-                            tooltip += f"  {call}\n"
+                            tooltip += f"  {colorize_api_call(call)}\n"
                             line_count += 1
                 else:
                     tooltip += f"\x01{entity_color_tag}{entity_content}\x02{entity_color_tag}\n"
