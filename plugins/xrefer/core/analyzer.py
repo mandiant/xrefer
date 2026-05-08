@@ -1159,9 +1159,11 @@ class XRefer:
             func_artifacts, orphan_func_artifacts, _ = self._group_interesting_artifacts(entities_to_cluster)
 
             all_candidate_funcs = set(func_artifacts.keys()) | set(orphan_func_artifacts.keys())
-            # Always treat the current entry point as interesting so small binaries still cluster
-            if self.current_analysis_ep:
-                all_candidate_funcs.add(self.current_analysis_ep)
+            # NOTE: do NOT force-add self.current_analysis_ep into the candidates.
+            # On main, candidates are strictly artifact-bearing functions. Adding the
+            # EP turned it into a common ancestor on every call path, which caused
+            # otherwise-separate clusters to merge into one (regression vs. main).
+            # Reverting to main's semantics.
 
             def _fmt_func(ea: int) -> str:
                 fn = self._backend.get_function_at(ea)
@@ -1222,20 +1224,42 @@ class XRefer:
                                     # Update intermediate paths map
                                     intermediate_paths_map.update(path_intermediates)
             if not graph_paths or not root_nodes:
-                warn_msg = (
-                    "No valid call paths found; skipping cluster analysis and report generation. "
-                    f"paths_examined={paths_examined}, candidate_paths={candidate_paths_found}, low_interest_paths={low_interest_paths}, candidates={len(all_candidate_funcs)}, graph_paths={len(graph_paths)}, root_nodes={len(root_nodes)}"
-                )
-                log(warn_msg)
-                self.analysis_warnings.append(warn_msg)
-                # Keep state consistent for downstream consumers
-                self.clusters = current_clusters or []
-                self.cluster_analysis = current_analysis or {}
-                return
-
-            # Create clusters
-            log(f"Creating clusters from {len(graph_paths)} paths with {len(root_nodes)} root nodes")
-            self.clusters = ClusterManager.decompose_into_clusters(graph_paths, intermediate_paths_map, root_nodes, self.artifact_functions, backend=self._backend)
+                # No multi-candidate paths exist — typical for tiny binaries with
+                # 0-1 artifact-bearing functions. Fall back to a single degenerate
+                # cluster rooted at the entry point so the user sees something
+                # rather than an empty view. This is the same intent as the old
+                # `all_candidate_funcs.add(self.current_analysis_ep)` hack, but
+                # localized: it only triggers when normal decomposition produced
+                # nothing, so it doesn't merge naturally-separate clusters on
+                # normal-sized binaries.
+                if all_candidate_funcs and self.current_analysis_ep:
+                    log(
+                        f"No multi-candidate paths found; building degenerate single cluster "
+                        f"rooted at EP 0x{self.current_analysis_ep:x} for "
+                        f"{len(all_candidate_funcs)} candidate(s). "
+                        f"(paths_examined={paths_examined}, low_interest_paths={low_interest_paths})"
+                    )
+                    fallback = FunctionalCluster(
+                        self.current_analysis_ep, parent_cluster_id=None, backend=self._backend
+                    )
+                    fallback.nodes.update(all_candidate_funcs)
+                    self.clusters = [fallback]
+                    # Fall through so LLM analysis still labels the fallback cluster.
+                else:
+                    warn_msg = (
+                        "No valid call paths found; skipping cluster analysis and report generation. "
+                        f"paths_examined={paths_examined}, candidate_paths={candidate_paths_found}, low_interest_paths={low_interest_paths}, candidates={len(all_candidate_funcs)}, graph_paths={len(graph_paths)}, root_nodes={len(root_nodes)}"
+                    )
+                    log(warn_msg)
+                    self.analysis_warnings.append(warn_msg)
+                    # Keep state consistent for downstream consumers
+                    self.clusters = current_clusters or []
+                    self.cluster_analysis = current_analysis or {}
+                    return
+            else:
+                # Normal decomposition path.
+                log(f"Creating clusters from {len(graph_paths)} paths with {len(root_nodes)} root nodes")
+                self.clusters = ClusterManager.decompose_into_clusters(graph_paths, intermediate_paths_map, root_nodes, self.artifact_functions, backend=self._backend)
 
             # Setup and run cluster analysis
             try:
@@ -1243,8 +1267,8 @@ class XRefer:
                 # self.cluster_analysis = ClusterAnalyzer.populate_dummy_cluster_analysis(self.clusters)
                 if not self.cluster_analysis:  # Empty results usually means network issue
                     log("No analysis results obtained - likely network connectivity issue")
-                    self.clusters = current_clusters
-                    self.cluster_analysis = current_analysis
+                    self.clusters = current_clusters or []
+                    self.cluster_analysis = current_analysis or {}
                     return
 
                 log(f"Generated analysis for {len(self.cluster_analysis.get('clusters', {}))} clusters")
@@ -1294,15 +1318,15 @@ class XRefer:
                 if not isinstance(e, litellm.exceptions.RateLimitError):
                     traceback.print_exc()
                 log(f"[-] Error analyzing clusters: {str(e)}")
-                # Restore previous state
-                self.clusters = current_clusters
-                self.cluster_analysis = current_analysis
+                # Restore previous state (coerce None to empty defaults on first run)
+                self.clusters = current_clusters or []
+                self.cluster_analysis = current_analysis or {}
 
         except Exception as e:
             log(f"[-] Error in cluster analysis: {str(e)}")
-            # Restore previous state
-            self.clusters = current_clusters
-            self.cluster_analysis = current_analysis
+            # Restore previous state (coerce None to empty defaults on first run)
+            self.clusters = current_clusters or []
+            self.cluster_analysis = current_analysis or {}
         assert self.clusters is not None
         assert self.cluster_analysis is not None
 
