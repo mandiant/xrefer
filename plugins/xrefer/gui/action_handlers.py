@@ -18,7 +18,7 @@ from typing import Any
 import ida_funcs
 import idaapi
 import idc
-from PyQt5 import QtCore, QtGui, QtWidgets
+from qtpy import QtCore, QtGui, QtWidgets
 
 from xrefer.gui.helpers import dump_indirect_calls, handle_entrypoint_selection, log
 from xrefer.gui.settings import XReferSettingsDialog
@@ -730,28 +730,18 @@ class DumpIndirectCallsHandler(idaapi.action_handler_t):
 
 class ShowWindowHandler(idaapi.action_handler_t):
     def activate(self, ctx: Any) -> bool:
-        """
-        Handle show window action.
+        """Show the XRefer window, rebuilding the view from scratch.
+
+        ``view.create()`` calls ``view.cleanup()`` first, which already
+        tears down any prior dock widget, qt widget, event filters, etc.
+        Don't reach into the view's internal Qt state from here.
         """
         from xrefer.plugin import plugin_instance
 
-        # Create a fresh view if needed, otherwise reuse existing
         if plugin_instance.xrefer_view:
-            # Clear old dock widget if it exists
-            if hasattr(plugin_instance.xrefer_view, "dock_widget"):
-                plugin_instance.xrefer_view.dock_widget.setWidget(None)
-                plugin_instance.xrefer_view.dock_widget.deleteLater()
-                delattr(plugin_instance.xrefer_view, "dock_widget")
-
-            # Show and update
             plugin_instance.xrefer_view.create()
-
-        from xrefer.plugin import plugin_instance
-
-        if plugin_instance.xrefer_view:
             return idaapi.AST_ENABLE_ALWAYS
-        else:
-            return idaapi.AST_DISABLE
+        return idaapi.AST_DISABLE
 
     def update(self, ctx: Any) -> int:
         """

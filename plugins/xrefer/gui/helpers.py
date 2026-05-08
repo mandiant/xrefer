@@ -30,8 +30,75 @@ import idaapi
 import idc
 import ida_idaapi
 import networkx as nx
-from PyQt5 import QtCore, QtWidgets
+from qtpy import QtCore, QtWidgets
 from tabulate import tabulate
+
+from xrefer.core.analyzer import ApiCall
+
+
+def qt_object_alive(obj) -> bool:
+    """Return True if ``obj`` is a Python wrapper around a still-live Qt C++ object.
+
+    Qt+Python lifetime: when the underlying C++ object is destroyed, the
+    Python wrapper survives but any method call on it raises
+    ``RuntimeError: Internal C++ object … already deleted``. Use this check
+    before touching any cached widget reference.
+
+    Probes the active binding's introspection module (``shiboken6`` for
+    PySide6, ``shiboken2`` for PySide2, ``sip`` for PyQt5/6). If none is
+    importable we err on the side of "alive" — caller still gets a
+    ``RuntimeError`` if the access turns out to be invalid.
+    """
+    if obj is None:
+        return False
+    try:
+        from shiboken6 import isValid
+        return bool(isValid(obj))
+    except ImportError:
+        pass
+    try:
+        from shiboken2 import isValid
+        return bool(isValid(obj))
+    except ImportError:
+        pass
+    try:
+        from PyQt5 import sip
+        return not sip.isdeleted(obj)
+    except (ImportError, TypeError):
+        pass
+    try:
+        from PyQt6 import sip
+        return not sip.isdeleted(obj)
+    except (ImportError, TypeError):
+        pass
+    return True
+
+
+def twidget_to_qt(twidget):
+    """Convert an IDA TWidget* into a QWidget of the active Qt binding.
+
+    IDA 9.3 ships two bridge implementations on PluginForm:
+
+    - ``TWidgetToQtPythonWidget`` (canonical name; aliased as
+      ``TWidgetToPyQtWidget`` and ``FormToPyQtWidget``): PySide6-native via
+      ``shiboken6.Shiboken.wrapInstance``. Returns a PySide6 widget regardless
+      of whether the PyQt5 shim is active. Reads no module-level state. This
+      is the function we always want.
+    - ``TWidgetToPySideWidget`` (aliased as ``FormToPySideWidget``): broken in
+      9.3 — it dereferences ``__main__.QtGui.QWidget``, which is undefined for
+      vanilla PySide6 (``QWidget`` lives in ``QtWidgets``). It looks vestigial
+      from the Qt4 era and cannot be rescued by planting modules. Do not call.
+
+    Older IDA (8.x) exposes only ``TWidgetToPyQtWidget``; under those versions
+    the return type is a PyQt5 widget. Either way, the canonical lookup below
+    resolves to the right implementation.
+    """
+    plugin_form = idaapi.PluginForm
+    bridge = (
+        getattr(plugin_form, "TWidgetToQtPythonWidget", None)
+        or plugin_form.TWidgetToPyQtWidget
+    )
+    return bridge(twidget)
 
 
 class FocusEventFilter(QtCore.QObject):
@@ -620,6 +687,13 @@ def colorize_api_call(input_string: str) -> str:
     return ida_lines.COLSTR("".join(result), ida_lines.SCOLOR_DEMNAME)
 
 
+def format_api_call_for_ida(rec: ApiCall) -> str:
+    """Render an ApiCall record for the IDA custom-viewer panel with full color decoration."""
+    addr = ida_lines.COLSTR(f"0x{rec.call_addr:x}", ida_lines.SCOLOR_LIBNAME)
+    name = ida_lines.COLSTR(rec.api_name.split(".")[-1], ida_lines.SCOLOR_IMPNAME)
+    return f"{addr}: {name}{colorize_api_call(rec.call_str)} x {rec.count}"
+
+
 def create_function_rows_for_interesting_artifacts(func_ea: int, artifacts: List[Tuple], xrefer_obj) -> List[List[str]]:
     """
     Create properly aligned rows for a function's artifacts with tree structure.
@@ -859,53 +933,51 @@ def create_cluster_relationship_graph(clusters: List["FunctionalCluster"], analy
             graph.add_edge(source, target)
             return True
 
-        # Process multiple clusters case
-        for cluster in clusters:
-            cluster_id = f"cluster.id.{cluster.id:04d}"
+        # Recursively process clusters so subclusters at any depth are added
+        # to the graph (the table view in create_cluster_rows already recurses).
+        # Without this, only top-level clusters and their direct children show up,
+        # and any deeper subcluster is silently dropped.
+        def _process(cluster, parent_text=None):
             if cluster.id in merged_nodes:
-                continue  # Skip merged nodes
+                return  # Skip merged nodes
 
-            # Get cluster data
             cluster_data = find_cluster_analysis(analysis, cluster.id)
             if not cluster_data:
-                continue
+                return
 
+            cluster_id = f"cluster.id.{cluster.id:04d}"
             label = cluster_data.get("label", "").strip()
             if not add_valid_node(cluster_id, label):
-                continue
+                return
 
             node_text = f"{cluster_id}\n{label}" if label else cluster_id
 
-            # Process relationships respecting merges
-            if cluster.parent_cluster_id:
-                parent_data = find_cluster_analysis(analysis, cluster.parent_cluster_id)
-                if parent_data:
-                    parent_id = f"cluster.id.{cluster.parent_cluster_id:04d}"
-                    parent_label = parent_data.get("label", "").strip()
-                    if add_valid_node(parent_id, parent_label):
-                        parent_text = f"{parent_id}\n{parent_label}" if parent_label else parent_id
-                        add_valid_edge(parent_text, node_text)
+            # Edge from the (already-added) parent in the recursion chain.
+            if parent_text:
+                add_valid_edge(parent_text, node_text)
 
-            # Handle subclusters
+            # Subclusters — recurse so multi-level hierarchies are fully drawn.
             for subcluster in cluster.subclusters:
-                sub_data = find_cluster_analysis(analysis, subcluster.id)
-                if sub_data and subcluster.id not in merged_nodes:
-                    sub_id = f"cluster.id.{subcluster.id:04d}"
-                    sub_label = sub_data.get("label", "").strip()
-                    if add_valid_node(sub_id, sub_label):
-                        sub_text = f"{sub_id}\n{sub_label}" if sub_label else sub_id
-                        add_valid_edge(node_text, sub_text)
+                _process(subcluster, parent_text=node_text)
 
-            # Handle cluster references
+            # Cluster references — these point at clusters whose root replaced
+            # one of our nodes during decomposition. Add the referenced cluster
+            # as a node and an edge from us to it (no recursion: the referenced
+            # cluster is already reachable via its own subcluster chain).
             for _, ref_id in cluster.cluster_refs.items():
-                if ref_id not in merged_nodes:  # Skip refs to merged nodes
-                    ref_data = find_cluster_analysis(analysis, ref_id)
-                    if ref_data:
-                        ref_id_str = f"cluster.id.{ref_id:04d}"
-                        ref_label = ref_data.get("label", "").strip()
-                        if add_valid_node(ref_id_str, ref_label):
-                            ref_text = f"{ref_id_str}\n{ref_label}" if ref_label else ref_id_str
-                            add_valid_edge(node_text, ref_text)
+                if ref_id in merged_nodes:
+                    continue
+                ref_data = find_cluster_analysis(analysis, ref_id)
+                if not ref_data:
+                    continue
+                ref_id_str = f"cluster.id.{ref_id:04d}"
+                ref_label = ref_data.get("label", "").strip()
+                if add_valid_node(ref_id_str, ref_label):
+                    ref_text = f"{ref_id_str}\n{ref_label}" if ref_label else ref_id_str
+                    add_valid_edge(node_text, ref_text)
+
+        for cluster in clusters:
+            _process(cluster, parent_text=None)
 
         return graph
 
@@ -1038,9 +1110,13 @@ def create_cluster_rows(cluster, analysis, column_width, paths):
     # Process nodes and description
     nodes = sorted(cluster.nodes)
     if nodes:
-        # First row with cluster info and first node
+        # First row with cluster info and first node.
+        # cluster.nodes contains xrefer.backend.base.Address instances (an int
+        # subclass from the gsoc_2025 backend abstraction). IDA 9.3's SWIG
+        # bindings strict-typecheck `ea_t` and reject int subclasses, so we
+        # explicitly cast to plain int when crossing into IDA's C API.
         first_node = nodes[0]
-        func_name = idc.get_func_name(first_node)
+        func_name = idc.get_func_name(int(first_node))
         if len(func_name) > 13:
             func_name = f"{func_name[:11]}.."
         func_name = ida_lines.COLSTR(func_name, ida_lines.SCOLOR_CODNAME)
@@ -1061,7 +1137,7 @@ def create_cluster_rows(cluster, analysis, column_width, paths):
             # If we have more nodes, show the next node with the separator line
             if remaining_nodes:
                 node = remaining_nodes[0]
-                func_name = idc.get_func_name(node)
+                func_name = idc.get_func_name(int(node))
                 if len(func_name) > 13:
                     func_name = f"{func_name[:11]}.."
                 func_name = ida_lines.COLSTR(func_name, ida_lines.SCOLOR_CODNAME)
@@ -1104,7 +1180,7 @@ def create_cluster_rows(cluster, analysis, column_width, paths):
             right_col = ""
             if i < len(remaining_nodes):
                 node = remaining_nodes[i]
-                func_name = idc.get_func_name(node)
+                func_name = idc.get_func_name(int(node))
                 if len(func_name) > 13:
                     func_name = f"{func_name[:11]}.."
                 func_name = ida_lines.COLSTR(func_name, ida_lines.SCOLOR_CODNAME)

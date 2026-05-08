@@ -23,7 +23,6 @@ import shutil
 import datetime
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
-from operator import itemgetter
 from pathlib import Path
 from time import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union, Literal
@@ -49,6 +48,22 @@ except ImportError:
         print(f"Wait: {message.removeprefix('HIDECANCEL\n')}", *args, **kwargs)
     def hide_wait_box(*args, **kwargs) -> None:
         print("Wait box hidden", *args, **kwargs)
+
+
+@dataclass(frozen=True)
+class ApiCall:
+    """One observation of an API call from the trace.
+
+    Backend-agnostic record. Rendering (color, address visibility, etc.)
+    is the consumer's responsibility — the analyzer never produces
+    presentation-layer strings.
+    """
+
+    index: int
+    call_addr: int
+    api_name: str  # full module-qualified name, e.g. "kernel32.CreateFileW"
+    call_str: str  # plain "(args) = ret"
+    count: int
 
 
 class EntityType(enum.IntEnum):
@@ -1144,9 +1159,11 @@ class XRefer:
             func_artifacts, orphan_func_artifacts, _ = self._group_interesting_artifacts(entities_to_cluster)
 
             all_candidate_funcs = set(func_artifacts.keys()) | set(orphan_func_artifacts.keys())
-            # Always treat the current entry point as interesting so small binaries still cluster
-            if self.current_analysis_ep:
-                all_candidate_funcs.add(self.current_analysis_ep)
+            # NOTE: do NOT force-add self.current_analysis_ep into the candidates.
+            # On main, candidates are strictly artifact-bearing functions. Adding the
+            # EP turned it into a common ancestor on every call path, which caused
+            # otherwise-separate clusters to merge into one (regression vs. main).
+            # Reverting to main's semantics.
 
             def _fmt_func(ea: int) -> str:
                 fn = self._backend.get_function_at(ea)
@@ -1207,20 +1224,42 @@ class XRefer:
                                     # Update intermediate paths map
                                     intermediate_paths_map.update(path_intermediates)
             if not graph_paths or not root_nodes:
-                warn_msg = (
-                    "No valid call paths found; skipping cluster analysis and report generation. "
-                    f"paths_examined={paths_examined}, candidate_paths={candidate_paths_found}, low_interest_paths={low_interest_paths}, candidates={len(all_candidate_funcs)}, graph_paths={len(graph_paths)}, root_nodes={len(root_nodes)}"
-                )
-                log(warn_msg)
-                self.analysis_warnings.append(warn_msg)
-                # Keep state consistent for downstream consumers
-                self.clusters = current_clusters or []
-                self.cluster_analysis = current_analysis or {}
-                return
-
-            # Create clusters
-            log(f"Creating clusters from {len(graph_paths)} paths with {len(root_nodes)} root nodes")
-            self.clusters = ClusterManager.decompose_into_clusters(graph_paths, intermediate_paths_map, root_nodes, self.artifact_functions, backend=self._backend)
+                # No multi-candidate paths exist — typical for tiny binaries with
+                # 0-1 artifact-bearing functions. Fall back to a single degenerate
+                # cluster rooted at the entry point so the user sees something
+                # rather than an empty view. This is the same intent as the old
+                # `all_candidate_funcs.add(self.current_analysis_ep)` hack, but
+                # localized: it only triggers when normal decomposition produced
+                # nothing, so it doesn't merge naturally-separate clusters on
+                # normal-sized binaries.
+                if all_candidate_funcs and self.current_analysis_ep:
+                    log(
+                        f"No multi-candidate paths found; building degenerate single cluster "
+                        f"rooted at EP 0x{self.current_analysis_ep:x} for "
+                        f"{len(all_candidate_funcs)} candidate(s). "
+                        f"(paths_examined={paths_examined}, low_interest_paths={low_interest_paths})"
+                    )
+                    fallback = FunctionalCluster(
+                        self.current_analysis_ep, parent_cluster_id=None, backend=self._backend
+                    )
+                    fallback.nodes.update(all_candidate_funcs)
+                    self.clusters = [fallback]
+                    # Fall through so LLM analysis still labels the fallback cluster.
+                else:
+                    warn_msg = (
+                        "No valid call paths found; skipping cluster analysis and report generation. "
+                        f"paths_examined={paths_examined}, candidate_paths={candidate_paths_found}, low_interest_paths={low_interest_paths}, candidates={len(all_candidate_funcs)}, graph_paths={len(graph_paths)}, root_nodes={len(root_nodes)}"
+                    )
+                    log(warn_msg)
+                    self.analysis_warnings.append(warn_msg)
+                    # Keep state consistent for downstream consumers
+                    self.clusters = current_clusters or []
+                    self.cluster_analysis = current_analysis or {}
+                    return
+            else:
+                # Normal decomposition path.
+                log(f"Creating clusters from {len(graph_paths)} paths with {len(root_nodes)} root nodes")
+                self.clusters = ClusterManager.decompose_into_clusters(graph_paths, intermediate_paths_map, root_nodes, self.artifact_functions, backend=self._backend)
 
             # Setup and run cluster analysis
             try:
@@ -1228,8 +1267,8 @@ class XRefer:
                 # self.cluster_analysis = ClusterAnalyzer.populate_dummy_cluster_analysis(self.clusters)
                 if not self.cluster_analysis:  # Empty results usually means network issue
                     log("No analysis results obtained - likely network connectivity issue")
-                    self.clusters = current_clusters
-                    self.cluster_analysis = current_analysis
+                    self.clusters = current_clusters or []
+                    self.cluster_analysis = current_analysis or {}
                     return
 
                 log(f"Generated analysis for {len(self.cluster_analysis.get('clusters', {}))} clusters")
@@ -1279,15 +1318,15 @@ class XRefer:
                 if not isinstance(e, litellm.exceptions.RateLimitError):
                     traceback.print_exc()
                 log(f"[-] Error analyzing clusters: {str(e)}")
-                # Restore previous state
-                self.clusters = current_clusters
-                self.cluster_analysis = current_analysis
+                # Restore previous state (coerce None to empty defaults on first run)
+                self.clusters = current_clusters or []
+                self.cluster_analysis = current_analysis or {}
 
         except Exception as e:
             log(f"[-] Error in cluster analysis: {str(e)}")
-            # Restore previous state
-            self.clusters = current_clusters
-            self.cluster_analysis = current_analysis
+            # Restore previous state (coerce None to empty defaults on first run)
+            self.clusters = current_clusters or []
+            self.cluster_analysis = current_analysis or {}
         assert self.clusters is not None
         assert self.cluster_analysis is not None
 
@@ -2268,43 +2307,15 @@ class XRefer:
             pass
         return capa_matches
 
-    def get_direct_calls(self, api_name: str, func_ea: int, colorized: bool = True) -> Tuple[str, ...]:
-        """
-        Retrieve direct API calls for a specific API within a given function.
+    def get_direct_calls(self, api_name: str, func_ea: int) -> Tuple[Tuple[str, int], ...]:
+        """Direct API calls of `func_ea` matching `api_name`, as ((call_str, count), ...).
 
-        This method searches for all instances where the specified API is directly
-        called within the function identified by func_ea.
-
-        Args:
-            api_name (str): The full name of the API to search for, including the module name
-                        (e.g., "kernel32.CreateFileW").
-            func_ea (int): The effective address (EA) of the function to search within.
-            colorized (bool): Whether to return color-coded call strings (True) or
-                            plain call strings (False). Default is True for backward compatibility.
-
-        Returns:
-            Tuple[Tuple[str, int], ...]: A tuple of tuples, where each inner tuple contains:
-                - str: The API call string formatted as "(<arg1>, <arg2>, ...) = <return_value>"
-                - int: Number of times this exact call signature was seen
-
-        Note:
-            If colorized=True, the returned call strings will contain IDA color codes.
-            If colorized=False, the call strings will have identical formatting but no color codes.
+        `call_str` is plain text — apply gui-layer formatting
+        (e.g. xrefer.gui.helpers.colorize_api_call) to render with color.
         """
         func_data = self.api_trace_data.get(func_ea, {})
         api_calls = func_data.get(api_name, [])
-
-        if colorized:
-            return tuple((call["call_str"], call["count"]) for call in api_calls)
-        else:
-            # Reconstruct call strings without color codes
-            plain_calls = []
-            for call in api_calls:
-                args_str = f"({', '.join(call['args'])})"
-                return_str = str(call["return_value"])
-                plain_call = f"{args_str} = {return_str}"
-                plain_calls.append((plain_call, call["count"]))
-            return tuple(plain_calls)
+        return tuple((call["call_str"], call["count"]) for call in api_calls)
 
     def get_indirect_calls(self, api_name: str, func_ea: int) -> Tuple[str, ...]:
         """
@@ -2340,96 +2351,44 @@ class XRefer:
 
         return tuple(result)
 
-    def _gather_sorted_function_api_calls(self, func_ea):
+    def _iter_function_api_calls(self, func_ea: int) -> List[ApiCall]:
+        """Build ApiCall records for direct API calls of a function (unsorted)."""
         if func_ea not in self.api_trace_data:
             return []
-        _should_colorize = False
-        if 'ida' == self._backend.name:
-            import ida_lines
-            _should_colorize = True
-
-        function_api_calls = []
+        records: List[ApiCall] = []
         for api_name, api_calls in self.api_trace_data[func_ea].items():
-            api_name_colorized = api_name_clean = api_name.split('.')[1]
-            if _should_colorize:
-                api_name_colorized = ida_lines.COLSTR(api_name.split('.')[1], ida_lines.SCOLOR_IMPNAME)
-
             for call in api_calls:
-                call_addr_colorized = call_addr_clean = f'0x{call["call_addr"]:x}'
-                if _should_colorize:
-                    call_addr_colorized = ida_lines.COLSTR(f'0x{call["call_addr"]:x}', ida_lines.SCOLOR_LIBNAME)
-
-                # We need both colorized for the view and clean for the report
-                function_api_calls.append((
-                    call['index'],
-                    f'{call_addr_colorized}: {api_name_colorized}{call["call_str"]} x {call["count"]}',
-                    # f'{call_addr_clean}: {api_name_clean}{ida_lines.tag_remove(call["call_str"])} x {call["count"]}'
-                    f'{call_addr_clean}: {api_name_clean}{call["call_str"]} x {call["count"]}'
+                records.append(ApiCall(
+                    index=call["index"],
+                    call_addr=call["call_addr"],
+                    api_name=api_name,
+                    call_str=call["call_str"],
+                    count=call["count"],
                 ))
+        return records
 
-        return function_api_calls
+    def gather_sorted_function_api_calls(self, func_ea: int) -> List[ApiCall]:
+        """Direct API calls of a function, sorted by trace index."""
+        records = self._iter_function_api_calls(func_ea)
+        records.sort(key=lambda r: r.index)
+        return records
 
-    def gather_sorted_function_api_calls(self, func_ea):
-        """
-        Gather and sort all "call_str" for direct API calls of a given function.
+    def gather_sorted_path_api_calls(self, func_ea: int) -> List[ApiCall]:
+        """Direct + indirect API calls reachable from a function, sorted by trace index."""
+        records = self._iter_function_api_calls(func_ea)
+        indirect = self.global_xrefs.get(func_ea, {}).get(self.INDIRECT_XREFS, {}).get("api_trace", set())
+        for indirect_func_ea in indirect:
+            records.extend(self._iter_function_api_calls(indirect_func_ea))
+        records.sort(key=lambda r: r.index)
+        return records
 
-        :param func_ea: The address of the function
-        :return: A list of sorted "call_str" for direct API calls
-        """
-        function_api_calls = self._gather_sorted_function_api_calls(func_ea)
-        function_api_calls.sort(key=itemgetter(0))
-        return [call[1] for call in function_api_calls]
-
-    def gather_sorted_path_api_calls(self, func_ea):
-        """
-        Gather and sort all "call_str" for indirect API calls of a given function.
-
-        :param func_ea: The address of the function
-        :return: A list of sorted "call_str" for indirect API calls
-        """
-        path_api_calls = []
-
-        # Get all functions called indirectly by func_ea
-        indirect_xrefs = self.global_xrefs.get(func_ea, {}).get(self.INDIRECT_XREFS, {})
-        indirect_func_addresses = indirect_xrefs.get("api_trace", set())
-
-        # Gather API calls from these indirect functions
-        for indirect_func_ea in indirect_func_addresses:
-            if indirect_func_ea in self.api_trace_data:
-                for api_name, api_calls in self.api_trace_data[indirect_func_ea].items():
-                    # TODO(rand0m): This is formatting. Should be in gui/. Refactoring the entire code is needed. No time for this now.
-                    # api_name = ida_lines.COLSTR(api_name.split(".")[1], ida_lines.SCOLOR_IMPNAME)
-                    api_name = api_name.split(".")[1]
-
-                    for call in api_calls:
-                        # call_addr = ida_lines.COLSTR(f"0x{call['call_addr']:x}", ida_lines.SCOLOR_LIBNAME)
-                        call_addr = f"0x{call['call_addr']:x}"
-                        path_api_calls.append((call["index"], f"{call_addr}: {api_name}{call['call_str']} x {call['count']}"))
-
-        function_api_calls = self._gather_sorted_function_api_calls(func_ea)
-        # We only need the colorized version for the view
-        path_api_calls.extend([(call[0], call[1]) for call in function_api_calls])
-        path_api_calls.sort(key=itemgetter(0))
-        return [call[1] for call in path_api_calls]
-
-    def gather_sorted_full_api_calls(self):
-        all_calls = []
-
-        # Iterate through all functions and their API calls
-        for func_calls in self.api_trace_data.values():
-            for api_name, api_calls in func_calls.items():
-                # TODO(rand0m): This is formatting. Should be in gui/. Refactoring the entire code is needed. No time for this now.
-                # api_name = ida_lines.COLSTR(api_name.split(".")[1], ida_lines.SCOLOR_IMPNAME)
-                api_name = api_name.split(".")[1]
-
-                for call in api_calls:
-                    # call_addr = ida_lines.COLSTR(f"0x{call['call_addr']:x}", ida_lines.SCOLOR_LIBNAME)
-                    call_addr = f"0x{call['call_addr']:x}"
-                    all_calls.append((call["index"], f"{call_addr}: {api_name}{call['call_str']} x {call['count']}"))
-
-        # Sort the list based on the index
-        all_calls.sort(key=itemgetter(0))
-        return [call[1] for call in all_calls]
+    def gather_sorted_full_api_calls(self) -> List[ApiCall]:
+        """Every API call across all functions, sorted by trace index."""
+        records: List[ApiCall] = []
+        for func_ea in self.api_trace_data:
+            records.extend(self._iter_function_api_calls(func_ea))
+        records.sort(key=lambda r: r.index)
+        return records
 
     def _has_direct_calls(self, func_ea: int, api_name: str) -> bool:
         """Check if a function has direct calls for a specific API."""
@@ -2786,10 +2745,10 @@ class XRefer:
         _WARNING_MSG = f"Missing required analysis files: {missing_files}. If you want to suppress this check, enable 'suppress_notifications' in settings ({self.settings_manager.settings_file})."
         if self._backend.name == "ida":
             try:
-                from PyQt5.QtWidgets import QApplication, QDialog
+                from qtpy.QtWidgets import QApplication, QDialog
             except ImportError as exc:
-                log(f"{_WARNING_MSG} PyQt5 is not available; running in headless mode.")
-                raise EnvironmentError(f"{_WARNING_MSG} PyQt5 is required to prompt for missing files. Enable 'suppress_notifications' to bypass this check.") from exc
+                log(f"{_WARNING_MSG} Qt bindings are not available; running in headless mode.")
+                raise EnvironmentError(f"{_WARNING_MSG} A Qt binding (PyQt5/PySide6) is required to prompt for missing files. Enable 'suppress_notifications' to bypass this check.") from exc
             if not QApplication.instance():
                 log(f"{_WARNING_MSG} No active QApplication; running in headless mode.")
                 raise EnvironmentError(f"{_WARNING_MSG} This run is headless. Enable 'suppress_notifications' to bypass this check.")
@@ -3193,39 +3152,13 @@ class XRefer:
         # Convert sets to sorted lists for stable output
         return {key: sorted(value) for key, value in artifacts.items()}
 
-    def get_api_trace_for_cluster_for_html_report(self, cluster: "FunctionalCluster") -> str:
-        """Aggregates and sorts all API trace calls for a cluster, formatted for the HTML report without addresses."""
-        all_calls = []
+    def get_api_trace_records_for_cluster(self, cluster: "FunctionalCluster") -> List[ApiCall]:
+        """All API call records for a cluster's nodes, sorted by trace index."""
+        records: List[ApiCall] = []
         for func_ea in cluster.nodes:
-            calls_with_index = self._gather_sorted_function_api_calls(func_ea)
-            all_calls.extend(calls_with_index)
-
-        all_calls.sort(key=itemgetter(0))
-
-        # For each call, take the clean string (call[2]), split it at the first colon, and take the second part.
-        report_lines = []
-        for call in all_calls:
-            parts = call[2].split(': ', 1)
-            if len(parts) > 1:
-                report_lines.append(parts[1])
-            else:
-                report_lines.append(call[2]) # Fallback
-
-        return "\n".join(report_lines)
-
-    def get_api_trace_for_cluster(self, cluster: "FunctionalCluster") -> str:
-        """Aggregates and sorts all API trace calls for a cluster."""
-        all_calls = []
-        for func_ea in cluster.nodes:
-            # _gather_sorted_function_api_calls returns (index, colorized_str, clean_str)
-            calls_with_index = self._gather_sorted_function_api_calls(func_ea)
-            all_calls.extend(calls_with_index)
-
-        # Sort all collected calls by their original index
-        all_calls.sort(key=itemgetter(0))
-
-        # Return as a single newline-separated string, using the clean version
-        return "\n".join([call[2] for call in all_calls])
+            records.extend(self._iter_function_api_calls(func_ea))
+        records.sort(key=lambda r: r.index)
+        return records
 
     def generate_report_data(self) -> Dict[str, Any]:
         """Builds the complete data dictionary for the HTML report."""
@@ -3244,12 +3177,16 @@ class XRefer:
             # Drop empty categories to keep report payload lean
             artifacts_dict = {category: items for category, items in artifacts_dict.items() if items}
 
+            api_trace_lines = [
+                f"{r.api_name.split('.')[-1]}{r.call_str} x {r.count}"
+                for r in self.get_api_trace_records_for_cluster(cluster)
+            ]
             node_data = {
                 "key": cluster_id,
                 "label": f"cluster.id.{cluster.id_str}\\n{analysis.get('label') if isinstance(analysis, dict) else analysis.label}",
                 "description": analysis.get('description') if isinstance(analysis, dict) else analysis.description,
                 "artifacts": artifacts_dict,
-                "apiTrace": self.get_api_trace_for_cluster_for_html_report(cluster),
+                "apiTrace": "\n".join(api_trace_lines),
                 "isLibrary": cluster.is_library
             }
             if parent_key is not None:

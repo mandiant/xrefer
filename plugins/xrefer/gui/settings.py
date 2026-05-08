@@ -17,10 +17,10 @@ import os
 import re
 from typing import TYPE_CHECKING, Dict, List
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont, QFontMetrics
-from PyQt5.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMessageBox,
-                             QPushButton, QScrollArea, QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
+from qtpy.QtCore import Qt
+from qtpy.QtGui import QFont, QFontMetrics
+from qtpy.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMessageBox,
+                            QPushButton, QScrollArea, QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
 
 from xrefer.core.settings import XReferSettingsManager
 
@@ -42,6 +42,66 @@ FILE_FILTERS = {
     "exclusions": "JSON Files (*.json);;All Files (*.*)",
     "default": "All Files (*.*)",
 }
+
+
+# Compatibility criteria for the LLM model dropdown. Models must satisfy ALL:
+#   - chat-completion API (DSPy uses chat endpoints)
+#   - >=1M input tokens (cluster prompts get large on real binaries)
+#   - >=16k output tokens (matches the codebase's per-provider max_tokens floor)
+#   - structured output capability (DSPy Predict + Pydantic OutputField needs
+#     either JSON-schema response_format or function-calling fallback)
+# Restricted to direct-API providers users typically have keys for, to avoid
+# 100+ regional/gateway duplicates from Bedrock/Azure/OpenRouter/etc.
+# Anthropic is excluded: litellm reports max_input_tokens=1_000_000 for Claude 4.x
+# entries, but that 1M is beta-gated (requires the anthropic-beta:context-1m-...
+# header AND API tier 4+). The default for those models is 200k, so listing them
+# in a curated dropdown would over-promise and fail at runtime on real prompts.
+_LLM_MIN_INPUT_TOKENS = 1_000_000
+_LLM_MIN_OUTPUT_TOKENS = 16_000
+_LLM_ALLOWED_PROVIDERS = frozenset({"openai", "gemini", "xai"})
+
+
+def _curated_llm_models() -> List[str]:
+    """Return models from litellm.model_cost that meet XRefer's workload requirements.
+
+    Returns an empty list if litellm is unavailable — the caller renders an empty
+    dropdown, which is the right signal since processor.py also imports litellm.
+    """
+    try:
+        import litellm
+        cost_table = litellm.model_cost
+    except (ImportError, AttributeError):
+        return []
+
+    seen: set = set()
+    out: List[str] = []
+    for name, info in cost_table.items():
+        if not isinstance(info, dict):
+            continue
+        if info.get("mode") != "chat":
+            continue
+        provider = info.get("litellm_provider")
+        if provider not in _LLM_ALLOWED_PROVIDERS:
+            continue
+        try:
+            max_in = int(info.get("max_input_tokens") or 0)
+            max_out = int(info.get("max_output_tokens") or 0)
+        except (TypeError, ValueError):
+            continue
+        if max_in < _LLM_MIN_INPUT_TOKENS or max_out < _LLM_MIN_OUTPUT_TOKENS:
+            continue
+        if not (info.get("supports_response_schema") or info.get("supports_function_calling")):
+            continue
+        if name.startswith("ft:"):  # fine-tuned templates, not callable model ids
+            continue
+        if "/" not in name:  # normalize bare names to provider/model form
+            name = f"{provider}/{name}"
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return sorted(out)
+
 
 class CustomTabWidget(QTabWidget):
     """
@@ -452,16 +512,7 @@ class XReferSettingsDialog(QDialog):
         llm_grid = QGridLayout()
 
         self.llm_model_combo = QComboBox()
-        self.llm_model_combo.addItems([
-            "gemini/gemini-2.5-pro",
-            "gemini/gemini-2.5-pro-preview-06-05",
-            "gemini/gemini-2.5-pro-preview-05-06",
-            "gemini/gemini-2.5-flash-preview-05-20",
-            "gemini/gemini-flash-latest",
-            "openai/gpt-5",
-            "openai/gpt-5-mini",
-            "openai/gpt-5-nano",
-        ])
+        self.llm_model_combo.addItems(_curated_llm_models())
         self.llm_model_combo.setEditable(True)
         self.llm_model_combo.setInsertPolicy(QComboBox.NoInsert)
         self.llm_model_combo.setCurrentText(self.settings.get("llm_model_id", ""))

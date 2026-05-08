@@ -174,7 +174,7 @@ class ClusterAnalyzer:
                             for api in apis:
                                 formatted.append(f"{indent}    API: {api}")
                                 # Get top 10 calls
-                                if calls := xrefer_obj.get_direct_calls(api, node, colorized=False):
+                                if calls := xrefer_obj.get_direct_calls(api, node):
                                     sorted_calls = sorted(calls, key=lambda x: x[1], reverse=True)[:10]
                                     for call_str, count in sorted_calls:
                                         formatted.append(f"{indent}      Call: {call_str} (called {count} times)")
