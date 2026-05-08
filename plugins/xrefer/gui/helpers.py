@@ -36,6 +36,44 @@ from tabulate import tabulate
 from xrefer.core.analyzer import ApiCall
 
 
+def qt_object_alive(obj) -> bool:
+    """Return True if ``obj`` is a Python wrapper around a still-live Qt C++ object.
+
+    Qt+Python lifetime: when the underlying C++ object is destroyed, the
+    Python wrapper survives but any method call on it raises
+    ``RuntimeError: Internal C++ object … already deleted``. Use this check
+    before touching any cached widget reference.
+
+    Probes the active binding's introspection module (``shiboken6`` for
+    PySide6, ``shiboken2`` for PySide2, ``sip`` for PyQt5/6). If none is
+    importable we err on the side of "alive" — caller still gets a
+    ``RuntimeError`` if the access turns out to be invalid.
+    """
+    if obj is None:
+        return False
+    try:
+        from shiboken6 import isValid
+        return bool(isValid(obj))
+    except ImportError:
+        pass
+    try:
+        from shiboken2 import isValid
+        return bool(isValid(obj))
+    except ImportError:
+        pass
+    try:
+        from PyQt5 import sip
+        return not sip.isdeleted(obj)
+    except (ImportError, TypeError):
+        pass
+    try:
+        from PyQt6 import sip
+        return not sip.isdeleted(obj)
+    except (ImportError, TypeError):
+        pass
+    return True
+
+
 def twidget_to_qt(twidget):
     """Convert an IDA TWidget* into a QWidget of the active Qt binding.
 

@@ -42,7 +42,7 @@ from xrefer.gui.action_handlers import ArtifactAnalysisHandler, ClusterEverythin
 from xrefer.gui.help import ContextHelp
 from xrefer.gui.helpers import (CollapseEventFilter, CollapseIndicator, FocusEventFilter, KeyEventFilter, colorize_api_call, create_cluster_relationship_graph,
                                 create_colored_table_from_cols, create_interesting_artifacts_table, create_xrefs_table_colored, draw_cluster_hierarchy, find_cluster_analysis,
-                                format_api_call_for_ida, help_text, log, patch_asciinet, prepare_interesting_artifacts_table_rows, register_popup_action,
+                                format_api_call_for_ida, help_text, log, patch_asciinet, prepare_interesting_artifacts_table_rows, qt_object_alive, register_popup_action,
                                 set_focus_to_code, set_xref_coverage_color, twidget_to_qt)
 from xrefer.gui.legacy.shim import format_ribbon
 from xrefer.gui.state_machine import XReferStateMachine
@@ -139,6 +139,12 @@ class XReferView(idaapi.simplecustviewer_t):
         self.widget = None
         self.qt_widget = None
         self.dock_widget = None
+        # Optional Qt children. Always present as attributes (set to None when
+        # absent) so cleanup, deferred callbacks, and resize handlers can rely
+        # on a uniform `is not None` / qt_object_alive check.
+        self.collapse_indicator = None
+        self.resize_filter = None
+        self.close_handler = None
         self.last_non_graph_width = None
         self.in_graph_view = False
         self._is_collapsed = False
@@ -154,38 +160,61 @@ class XReferView(idaapi.simplecustviewer_t):
         """
         self.cleanup()
 
+    def _connect_destroyed_handler(self, widget) -> None:
+        """Connect a destroyed-signal slot bound to *this specific* widget.
+
+        Why a closure: the destroyed signal fires asynchronously, after Qt
+        processes ``deleteLater``. By that time, ``self.qt_widget`` may already
+        have been reassigned to a *new* widget (recreate path). An unbound slot
+        that does ``self.qt_widget = None`` would invalidate the new widget by
+        mistake. Capturing ``widget`` in the closure means the slot only nils
+        our reference when the destroyed widget IS still the one we hold.
+        """
+        def handler(*_args):
+            if self.qt_widget is widget:
+                self.qt_widget = None
+                self.focus_event_filter = None
+                self.event_filter = None
+        widget.destroyed.connect(handler)
+
     def cleanup(self):
-        """Clean up resources and event handlers."""
+        """Clean up resources and event handlers, tolerant of partial teardown.
+
+        IDA may have already destroyed the underlying widget by the time it
+        invokes our cleanup, so each Qt access is guarded by a liveness check.
+        Each block runs independently — a stale reference in one place doesn't
+        prevent the rest of the cleanup from completing. Attributes are set to
+        ``None`` rather than ``delattr``-ed so deferred callbacks see a stable
+        attribute and bail out via ``qt_object_alive(self.X)``.
+        """
         try:
-            if hasattr(self, "qt_widget"):
-                if self.focus_event_filter:
+            if qt_object_alive(self.qt_widget):
+                if self.focus_event_filter is not None:
                     self.qt_widget.removeEventFilter(self.focus_event_filter)
-                if self.event_filter:
+                if self.event_filter is not None:
                     self.qt_widget.removeEventFilter(self.event_filter)
 
             self.focus_event_filter = None
             self.event_filter = None
 
-            if hasattr(self, "collapse_indicator"):
+            if qt_object_alive(self.collapse_indicator):
                 self.collapse_indicator.hide()
                 self.collapse_indicator.setParent(None)
                 self.collapse_indicator.deleteLater()
-                delattr(self, "collapse_indicator")
+            self.collapse_indicator = None
 
-            if hasattr(self, "resize_filter"):
-                delattr(self, "resize_filter")
+            self.resize_filter = None
 
-            if hasattr(self, "dock_widget"):
-                if self.dock_widget:
-                    self.dock_widget.setWidget(None)
-                    self.dock_widget.close()
-                    self.dock_widget.deleteLater()
-                delattr(self, "dock_widget")
+            if qt_object_alive(self.dock_widget):
+                self.dock_widget.setWidget(None)
+                self.dock_widget.close()
+                self.dock_widget.deleteLater()
+            self.dock_widget = None
 
-            if self.qt_widget:
+            if qt_object_alive(self.qt_widget):
                 self.qt_widget.setParent(None)
                 self.qt_widget.deleteLater()
-                self.qt_widget = None
+            self.qt_widget = None
 
         except Exception as e:
             log(f"[-] Error during cleanup: {str(e)}")
@@ -228,6 +257,10 @@ class XReferView(idaapi.simplecustviewer_t):
             if not self.qt_widget:
                 log("Failed to get Qt widget")
                 return
+
+            # Clear our cached references when Qt destroys *this specific*
+            # widget, so cleanup/show paths don't dereference stale wrappers.
+            self._connect_destroyed_handler(self.qt_widget)
 
             self.qt_widget.setFocusPolicy(QtCore.Qt.StrongFocus)
 
@@ -275,7 +308,7 @@ class XReferView(idaapi.simplecustviewer_t):
                 return
 
             # Ensure event filters are properly installed
-            if self.qt_widget:
+            if qt_object_alive(self.qt_widget):
                 if not self.focus_event_filter:
                     self.focus_event_filter = FocusEventFilter(self)
                 if not self.event_filter:
@@ -294,7 +327,7 @@ class XReferView(idaapi.simplecustviewer_t):
                 self.update(True)
 
             # Force a repaint
-            if self.qt_widget:
+            if qt_object_alive(self.qt_widget):
                 self.qt_widget.repaint()
         except Exception as e:
             log(f"[-] Error showing custom window: {str(e)}")
@@ -303,8 +336,15 @@ class XReferView(idaapi.simplecustviewer_t):
     def Show(self, *args) -> None:
         """
         Override Show to use our custom window handling.
+
+        If the underlying Qt widget was destroyed (e.g. user closed the dock),
+        rebuild from scratch via ``create()``; otherwise just bring the existing
+        window forward.
         """
-        self.show_custom_window()
+        if not qt_object_alive(self.qt_widget):
+            self.create()
+        else:
+            self.show_custom_window()
 
     def setup_hooks(self):
         """
@@ -370,7 +410,7 @@ class XReferView(idaapi.simplecustviewer_t):
 
     def position_window(self) -> None:
         """Position and configure the window docking."""
-        if not hasattr(self, "qt_widget") or not self.qt_widget:
+        if not qt_object_alive(self.qt_widget):
             log("Qt widget not initialized")
             return
 
@@ -387,7 +427,7 @@ class XReferView(idaapi.simplecustviewer_t):
 
         try:
             # Create new dock widget if it doesn't exist
-            if not hasattr(self, "dock_widget") or not self.dock_widget:
+            if not qt_object_alive(self.dock_widget):
                 self.dock_widget = QtWidgets.QDockWidget(self.title, main_window)
                 self.dock_widget.setObjectName("XReferDockWidget")
 
@@ -426,9 +466,10 @@ class XReferView(idaapi.simplecustviewer_t):
 
                 # Handle close event
                 def handle_close(event):
-                    if hasattr(self, "collapse_indicator"):
+                    if qt_object_alive(self.collapse_indicator):
                         self.collapse_indicator.hide()
-                    self.dock_widget.hide()
+                    if qt_object_alive(self.dock_widget):
+                        self.dock_widget.hide()
                     event.ignore()
 
                 self.close_handler = handle_close
@@ -440,26 +481,47 @@ class XReferView(idaapi.simplecustviewer_t):
                 # Show dock widget and ensure indicator is visible
                 self.dock_widget.show()
 
-                # Use multiple delayed repositioning attempts to ensure proper placement
-                QtCore.QTimer.singleShot(50, lambda: (self.collapse_indicator.show(), self.collapse_indicator.reposition()))
-                QtCore.QTimer.singleShot(100, lambda: (self.collapse_indicator.reposition(), self.collapse_indicator.raise_()))
-                QtCore.QTimer.singleShot(200, self.collapse_indicator.reposition)
+                # Schedule deferred repositioning. The lambdas may fire after
+                # the dock has been closed/destroyed — guard each access via
+                # the named helpers below.
+                QtCore.QTimer.singleShot(50, self._show_and_reposition_indicator)
+                QtCore.QTimer.singleShot(100, self._reposition_and_raise_indicator)
+                QtCore.QTimer.singleShot(200, self._reposition_indicator)
 
             else:
                 # If dock widget exists but is hidden, show it
                 self.dock_widget.show()
-                if hasattr(self, "collapse_indicator"):
-                    QtCore.QTimer.singleShot(50, lambda: (self.collapse_indicator.show(), self.collapse_indicator.reposition()))
-                    QtCore.QTimer.singleShot(100, lambda: (self.collapse_indicator.reposition(), self.collapse_indicator.raise_()))
+                QtCore.QTimer.singleShot(50, self._show_and_reposition_indicator)
+                QtCore.QTimer.singleShot(100, self._reposition_and_raise_indicator)
 
         except Exception as e:
             log(f"[-] Error creating dock widget: {str(e)}")
             self.cleanup()
             return
 
+    # --- defensive helpers for deferred QTimer callbacks ---
+    # Each runs after a delay; cleanup may have nilled the indicator in the
+    # meantime. ``qt_object_alive`` returns False both for None and for a
+    # wrapper whose C++ object has been deleted, so all three are safe no-ops
+    # against a gone widget.
+
+    def _show_and_reposition_indicator(self) -> None:
+        if qt_object_alive(self.collapse_indicator):
+            self.collapse_indicator.show()
+            self.collapse_indicator.reposition()
+
+    def _reposition_and_raise_indicator(self) -> None:
+        if qt_object_alive(self.collapse_indicator):
+            self.collapse_indicator.reposition()
+            self.collapse_indicator.raise_()
+
+    def _reposition_indicator(self) -> None:
+        if qt_object_alive(self.collapse_indicator):
+            self.collapse_indicator.reposition()
+
     def handle_visibility_changed(self, visible):
         """Handle dock widget visibility changes."""
-        if visible and self.qt_widget:
+        if visible and qt_object_alive(self.qt_widget):
             # Reinstall event filters if needed
             if not self.focus_event_filter:
                 self.focus_event_filter = FocusEventFilter(self)
@@ -470,33 +532,22 @@ class XReferView(idaapi.simplecustviewer_t):
             self.qt_widget.installEventFilter(self.event_filter)
 
             # Show/reposition collapse indicator
-            if hasattr(self, "collapse_indicator"):
+            if qt_object_alive(self.collapse_indicator):
                 self.collapse_indicator.show()
                 self.collapse_indicator.reposition()
 
             self.update(True)
-        elif not visible and hasattr(self, "collapse_indicator"):
+        elif not visible and qt_object_alive(self.collapse_indicator):
             self.collapse_indicator.hide()
 
-    def handle_dock_close(self, event):
-        """
-        Handle dock widget close event to properly clean up resources.
-        """
-        # Clean up the dock widget
-        if hasattr(self, "dock_widget"):
-            self.dock_widget.setWidget(None)
-            self.dock_widget.deleteLater()
-            delattr(self, "dock_widget")
-
-        # Clean up the widget
-        if hasattr(self, "qt_widget"):
-            self.qt_widget.setParent(None)
-            self.qt_widget.deleteLater()
-
-        event.accept()
-
     def reset_size_constraints(self):
-        """Reset size constraints to allow user resizing."""
+        """Reset size constraints to allow user resizing.
+
+        Scheduled via ``QTimer.singleShot`` after creating the dock; may fire
+        after the dock has been closed. Skip silently if the dock is gone.
+        """
+        if not qt_object_alive(self.dock_widget):
+            return
         self.dock_widget.setMinimumWidth(0)
         self.dock_widget.setMaximumWidth(16777215)  # Qt's QWIDGETSIZE_MAX
         self.dock_widget.updateGeometry()
@@ -3202,7 +3253,7 @@ class XReferView(idaapi.simplecustviewer_t):
             return
 
         # Safety check for dock widget
-        if not hasattr(self, "dock_widget") or not self.dock_widget:
+        if not qt_object_alive(self.dock_widget):
             return
 
         # Only resize for specific states
@@ -3232,7 +3283,7 @@ class XReferView(idaapi.simplecustviewer_t):
             self.in_graph_view = False
             return
 
-        if not hasattr(self, "qt_widget") or not self.qt_widget or not hasattr(self, "dock_widget") or not self.dock_widget:
+        if not qt_object_alive(self.qt_widget) or not qt_object_alive(self.dock_widget):
             return
 
         # Store current width before entering graph view if not already in it
@@ -4081,20 +4132,22 @@ class XReferView(idaapi.simplecustviewer_t):
         """
         Get name of table containing current line.
 
-        Searches upward from current line to find enclosing table header.
-
-        Returns:
-            Optional[str]: Name of parent table, or None if not found
+        Searches upward from the line under the mouse to find an enclosing
+        table header. ``GetLineNo(mouse=1)`` returns ``-1`` when the mouse is
+        not over any line — that sentinel is **truthy** in Python, so we must
+        bail out explicitly rather than relying on ``while lineno:``.
         """
-        lineno: int = self.GetLineNo(mouse=1)
-        table_name: Optional[str] = None
+        lineno = self.GetLineNo(mouse=1)
+        if lineno is None or lineno < 0:
+            return None
 
-        while lineno:
-            line, _, _ = self.GetLine(lineno)
-            _table_name: str = line[6:-2].strip()
-            if _table_name in self.table_names:
-                table_name = _table_name
-                break
+        while lineno >= 0:
+            result = self.GetLine(lineno)
+            if not result or result[0] is None:
+                return None
+            line = result[0]
+            candidate = line[6:-2].strip()
+            if candidate in self.table_names:
+                return candidate
             lineno -= 1
-
-        return table_name
+        return None
