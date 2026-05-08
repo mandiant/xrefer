@@ -59,7 +59,8 @@ class LLMProcessor:
             "cache_seed": 0x72616e64306d,
         }
         # match <https://github.com/stanfordnlp/dspy/blob/1df5984007b7fd9bb56f3a8fba7a68b5517efb69/dspy/clients/lm.py#L92>'s logic
-        if re.search(r'openai\/(?:o[1345]|gpt-5)(?:-(?:mini|nano|codex))?', config.model_id):
+        # gpt-5(?:\.\d+)? matches plain gpt-5 plus decimal subversions (gpt-5.4, gpt-5.5, ...).
+        if re.search(r'openai\/(?:o[1345]|gpt-5(?:\.\d+)?)(?:-(?:mini|nano|codex))?', config.model_id):
             lm_kwargs.update({"temperature": 1.0, "max_tokens": 16000})
         # For Gemini models, use full 65k output token capacity and force JSON mode
         # Gemini's structured output doesn't support dynamic object properties
