@@ -35,7 +35,7 @@ import networkx as nx
 from qtpy import QtCore, QtGui, QtWidgets
 
 from xrefer.core.analyzer import ApiCall, XRefer
-from xrefer.core.helpers import (find_cluster_analysis, get_addr_from_text, is_windows_or_linux, longest_line_length, parse_cluster_id, remove_non_displayable, strip_color_codes,
+from xrefer.core.helpers import (find_cluster_analysis, get_addr_from_text, longest_line_length, parse_cluster_id, remove_non_displayable, strip_color_codes,
                                  wrap_substring_with_string)
 from xrefer.core.settings import XReferSettingsManager
 from xrefer.gui.action_handlers import ArtifactAnalysisHandler, ClusterEverythingHandler, ClusterInterestingFunctionsHandler, CopyInterestingStringsHandler, PeekViewToggleHandler
@@ -129,7 +129,11 @@ class XReferView(idaapi.simplecustviewer_t):
         self.state_machine: XReferStateMachine = XReferStateMachine()
         self.table_index_offset: int = 4  # default state starts from direct xrefs
         self.table_count: int = len(self.table_states)
-        self.indent: str = "        " if is_windows_or_linux() else "    "
+        # 8 spaces aligns expanded-table row content with the heading text that
+        # follows the "----" continuation marker; see draw_function_context_table_heading.
+        # Used to be OS-conditional (4 on macOS, 8 on Win/Linux) which produced
+        # noticeably shallower indentation on Mac. Unified across platforms.
+        self.indent: str = "        "
         self.INDENT: str = "    "  # Standard 4-space indentation
         self.peek_flag: bool = False
         self.last_boundary_scan_results: Optional[str] = None
@@ -3595,7 +3599,11 @@ class XReferView(idaapi.simplecustviewer_t):
         hline: str = ida_lines.COLSTR(fmt % heading_line, ida_lines.SCOLOR_DATNAME)
         self.AddLine(hline)
         heading_line = self.xrefer_obj.table_data[func_ea][table_name]["heading"][1]
-        if is_windows_or_linux() and not table_name.startswith("D"):
+        # Non-direct tables get a "----" continuation marker that visually
+        # extends the dashed line from the "(-)" expansion indicator. Direct
+        # tables stand on their own and don't need it. Used to be OS-gated
+        # (only Win/Linux got the marker); unified across platforms.
+        if not table_name.startswith("D"):
             hline = ida_lines.COLSTR(f"    ----{heading_line}", ida_lines.SCOLOR_DATNAME)
         else:
             hline = ida_lines.COLSTR(f"    {heading_line}", ida_lines.SCOLOR_DATNAME)
