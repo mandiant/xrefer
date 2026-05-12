@@ -1242,8 +1242,19 @@ class XRefer:
 
         return None
 
-    def analyze_clusters(self, entities_to_cluster) -> None:
-        """Create clusters based on interesting nodes first, using only shortest intermediate paths."""
+    def analyze_clusters(self, entities_to_cluster, force_no_cache: bool = False) -> None:
+        """Create clusters based on interesting nodes first, using only shortest intermediate paths.
+
+        Args:
+            entities_to_cluster: entity-index iterable feeding the
+                cluster-decomposition pipeline (same as before).
+            force_no_cache: when True, the LLM cluster-analysis call
+                runs through ``LLMProcessor.uncached_lm()`` — DSPy /
+                LiteLLM response cache is bypassed and the LLM is
+                guaranteed to produce a fresh response. Used by the
+                "Force Re-analyze" UI flow when the analyst wants to
+                re-roll the LLM verdict without restarting IDA.
+        """
         # Store current state
         current_clusters = self.clusters
         current_analysis = self.cluster_analysis
@@ -1353,7 +1364,9 @@ class XRefer:
 
             # Setup and run cluster analysis
             try:
-                self.cluster_analysis = ClusterAnalyzer.analyze_clusters(self.clusters, self)
+                self.cluster_analysis = ClusterAnalyzer.analyze_clusters(
+                    self.clusters, self, force_no_cache=force_no_cache,
+                )
                 # self.cluster_analysis = ClusterAnalyzer.populate_dummy_cluster_analysis(self.clusters)
                 if not self.cluster_analysis:  # Empty results usually means network issue
                     log("No analysis results obtained - likely network connectivity issue")
@@ -1440,10 +1453,16 @@ class XRefer:
                     self.artifact_functions.add(func_ea)
                     break
 
-    def cluster_all_non_excluded(self) -> None:
+    def cluster_all_non_excluded(self, force_no_cache: bool = False) -> None:
         """
         Cluster all non-excluded artifacts and run analysis.
         Now includes cluster merging after initial analysis.
+
+        Args:
+            force_no_cache: when True, the LLM cluster-analysis call is
+                routed through ``LLMProcessor.uncached_lm()`` so DSPy /
+                LiteLLM response cache is bypassed. Used by the
+                "Force Re-analyze" UI flow.
         """
         try:
             if not self.artifact_functions:
@@ -1480,7 +1499,7 @@ class XRefer:
 
             # Run cluster analysis
             log("Running cluster analysis...")
-            self.analyze_clusters(entities_to_cluster)
+            self.analyze_clusters(entities_to_cluster, force_no_cache=force_no_cache)
             self.save_analysis()
             if self.report_data_mode in ("html", "json"):
                 if self.clusters and self.cluster_analysis:

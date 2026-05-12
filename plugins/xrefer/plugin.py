@@ -66,6 +66,7 @@ class XReferPlugin(idaapi.plugin_t):
             register_menu_action("Edit/XRefer/Run Analysis/", "XRefer:cluster_everything", "(Re-)run Cluster Analysis on all Functions (default)", ClusterEverythingHandler())
             register_menu_action("Edit/XRefer/Run Analysis/", "XRefer:rerun_cluster_analysis", "(Re-)run Cluster Analysis on Interesting Functions", ClusterInterestingFunctionsHandler())
             register_menu_action("Edit/XRefer/Run Analysis/", "XRefer:rerun_artifact_analysis", "(Re-)run Artifact Analysis", ArtifactAnalysisHandler())
+            register_menu_action("Edit/XRefer/Run Analysis/", "XRefer:force_cluster_analysis", "Force Re-run Cluster Analysis (bypass LLM cache)", ForceClusterEverythingHandler())
             register_menu_action("Edit/XRefer/", "XRefer:show_window", "Show Window", ShowWindowHandler())
             register_menu_action("Edit/XRefer/", "XRefer:dump_indirect_calls", "Dump Indirect Calls", DumpIndirectCallsHandler())
             register_menu_action("Edit/XRefer/", "XRefer:sync_imagebase", "Re-sync Imagebase", SyncImageBaseHandler())
@@ -107,10 +108,27 @@ class ContextHooks(idaapi.UI_Hooks):
         if plugin_instance:
             tft = idaapi.get_widget_type(form)
             if tft in (idaapi.BWN_DISASM, idaapi.BWN_PSEUDOCODE):
-                menu_path: str = "XRefer/"
-                menu_id: str = "XRefer:analyse_custom_entrypoint"
-                label: str = "Analyse this function as a custom entrypoint"
-                register_popup_action(form, popup, menu_path, menu_id, label, AddEntrypointHandler(), label)
+                # Analyse-this-function-as-custom-entrypoint stays at
+                # the top level under XRefer/ for muscle memory.
+                register_popup_action(
+                    form, popup, "XRefer/",
+                    "XRefer:analyse_custom_entrypoint",
+                    "Analyse this function as a custom entrypoint",
+                    AddEntrypointHandler(),
+                    "Analyse this function as a custom entrypoint",
+                )
+                # Force-Re-run lives under the popup's "Run Analysis"
+                # sub-path so the popup mirrors the Edit-menu layout.
+                # IDA accepts the same action id used by the Edit menu
+                # only when it's already registered, so this re-uses
+                # the action that plugin init created.
+                register_popup_action(
+                    form, popup, "XRefer/Run Analysis/",
+                    "XRefer:force_cluster_analysis",
+                    "Force Re-run Cluster Analysis (bypass LLM cache)",
+                    ForceClusterEverythingHandler(),
+                    "Force Re-run Cluster Analysis (bypass LLM cache)",
+                )
 
 
 hooks = ContextHooks()

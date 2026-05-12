@@ -17,8 +17,10 @@ DSPy-native LLM processor with Pydantic validation.
 """
 
 import re
+import secrets
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 import dspy
 import litellm
@@ -44,16 +46,18 @@ class LLMProcessor:
     def __init__(self):
         self.lm: Optional[dspy.LM] = None
         self.config: Optional[ModelConfig] = None
+        # lm_kwargs is the kwargs dict used to build self.lm. Captured
+        # so uncached_lm() can rebuild a parallel LM with cache disabled
+        # for force-analyze runs without affecting the main LM.
+        self._lm_kwargs: Dict[str, Any] = {}
 
-    def set_model_config(self, config: ModelConfig) -> None:
-        """
-        Configure DSPy with the specified LLM.
+    def _build_lm_kwargs(self, config: ModelConfig) -> Dict[str, Any]:
+        """Compute the dspy.LM kwargs dict from a ModelConfig.
 
-        Args:
-            config: Model configuration
+        Factored out so set_model_config and uncached_lm both produce
+        identical model configuration apart from the cache settings.
         """
-        self.config = config
-        lm_kwargs = {
+        lm_kwargs: Dict[str, Any] = {
             "model": config.model_id,
             "api_key": config.api_key,
             "cache_seed": 0x72616e64306d,
@@ -66,9 +70,63 @@ class LLMProcessor:
         # Gemini's structured output doesn't support dynamic object properties
         if 'gemini' in config.model_id.lower():
             lm_kwargs.update({"max_tokens": 65536})
+        return lm_kwargs
 
-        self.lm = dspy.LM(**lm_kwargs)
+    def set_model_config(self, config: ModelConfig) -> None:
+        """
+        Configure DSPy with the specified LLM.
+
+        Args:
+            config: Model configuration
+        """
+        self.config = config
+        self._lm_kwargs = self._build_lm_kwargs(config)
+        self.lm = dspy.LM(**self._lm_kwargs)
         dspy.settings.configure(lm=self.lm)
+
+    @contextmanager
+    def uncached_lm(self) -> Iterator[None]:
+        """Temporarily swap the configured LM with one that bypasses
+        DSPy's response cache for the duration of the ``with`` block.
+
+        Used by the "force re-analyze" UI flow so the analyst can
+        re-run cluster / artifact analysis and be guaranteed fresh LLM
+        responses, even when a prior identical request is still in
+        the LiteLLM cache for this process.
+
+        Implementation: builds a parallel ``dspy.LM`` with
+        ``cache=False`` AND a randomized ``cache_seed`` (belt-and-
+        braces — different DSPy versions read different flags), swaps
+        it into ``dspy.settings`` and ``self.lm`` for the duration of
+        the block, then restores the original. If no model is
+        configured yet, the context manager is a no-op.
+        """
+        if self.config is None or self.lm is None:
+            yield
+            return
+
+        prior_lm = self.lm
+        fresh_kwargs = dict(self._lm_kwargs)
+        # cache=False disables DSPy's response cache; the randomized
+        # cache_seed defeats LiteLLM's deterministic-cache layer in
+        # case cache=False isn't honoured by the active adapter.
+        fresh_kwargs["cache"] = False
+        fresh_kwargs["cache_seed"] = secrets.randbits(64)
+        try:
+            uncached = dspy.LM(**fresh_kwargs)
+        except TypeError:
+            # Older dspy.LM may not accept `cache=`; the randomized
+            # cache_seed alone is enough to bypass the cache.
+            fresh_kwargs.pop("cache", None)
+            uncached = dspy.LM(**fresh_kwargs)
+
+        self.lm = uncached
+        dspy.settings.configure(lm=uncached)
+        try:
+            yield
+        finally:
+            self.lm = prior_lm
+            dspy.settings.configure(lm=prior_lm)
 
     def validate_api_key(self) -> bool:
         """Validate API key with a test call."""

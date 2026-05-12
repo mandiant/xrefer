@@ -12,11 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING, Any, Dict, List
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List
 
 from xrefer.core.helpers import log
 from xrefer.llm.base import ModelConfig, PromptType
 from xrefer.llm.processor import LLMProcessor
+
+
+@contextmanager
+def _null_context() -> Iterator[None]:
+    """A no-op context manager — paired with ``LLMProcessor.uncached_lm``
+    so call-sites can write ``with cache_ctx:`` without branching on
+    whether force-no-cache is on. Python 3.7+ has ``contextlib.nullcontext``
+    for this; we define a local equivalent to keep the import minimal
+    and avoid version-skew issues with the rest of the file's style.
+    """
+    yield
 
 
 if TYPE_CHECKING:
@@ -47,7 +59,13 @@ class ClusterAnalyzer:
         cls._processor = None  # Force new processor with new config
 
     @classmethod
-    def analyze_clusters(cls, clusters: List["FunctionalCluster"], xrefer_obj, batch_size = 30) -> Dict[str, Any]:
+    def analyze_clusters(
+        cls,
+        clusters: List["FunctionalCluster"],
+        xrefer_obj,
+        batch_size = 30,
+        force_no_cache: bool = False,
+    ) -> Dict[str, Any]:
         """
         Analyze cluster hierarchy using LLM.
 
@@ -57,6 +75,13 @@ class ClusterAnalyzer:
         The binary_description, binary_category, and binary_report fields are requested each time.
 
         If the cluster count is <= 50, we request all at once with no partial instructions.
+
+        Args:
+            force_no_cache: when True, bypass DSPy/LiteLLM response cache
+                for every call in this run. Each batch is sent through a
+                temporary LM that has caching disabled, guaranteeing fresh
+                LLM output even for prompt+input combinations the cache
+                has already seen. Used by the "force re-analyze" UI flow.
         """
         processor = cls._get_processor()
 
@@ -75,11 +100,19 @@ class ClusterAnalyzer:
             # No clusters to analyze
             return {}
 
+        # `nullcontext`-style: when force_no_cache is False, do nothing;
+        # otherwise wrap every processor call below in the uncached LM.
+        cache_ctx = processor.uncached_lm() if force_no_cache else _null_context()
+
+        if force_no_cache:
+            log("Force re-analyze: bypassing DSPy / LiteLLM response cache for this run.")
+
         if cluster_count <= batch_size:
             # Single request scenario, no partial instructions
             cluster_data = cls.format_cluster_data(clusters, xrefer_obj, start_idx=0, end_idx=cluster_count)
             log(f"Generated cluster data ({len(cluster_data)} chars)")
-            results = processor.process_items(cluster_data, prompt_type=PromptType.CLUSTER_ANALYZER, ignore_token_limit=True)
+            with cache_ctx:
+                results = processor.process_items(cluster_data, prompt_type=PromptType.CLUSTER_ANALYZER, ignore_token_limit=True)
             results = dict(results)  # Ensure it's a dict # TODO: Drop dict across the codebase for better developer experience.
             cls._warn_on_sparse_binary_report(results.get("binary_report"))
             return results
@@ -98,7 +131,13 @@ class ClusterAnalyzer:
 
                 cluster_data = cls.format_cluster_data(clusters, xrefer_obj, start_idx=start, end_idx=end)
                 log(f"Generated cluster data ({len(cluster_data)} chars)")
-                results = processor.process_items(cluster_data, prompt_type=PromptType.CLUSTER_ANALYZER, ignore_token_limit=True)
+                # Wrap each batch in the uncached LM context when
+                # force_no_cache is on. The processor swaps in a
+                # cache=False / randomized-cache_seed LM for the
+                # duration of this single batch and restores after.
+                batch_ctx = processor.uncached_lm() if force_no_cache else _null_context()
+                with batch_ctx:
+                    results = processor.process_items(cluster_data, prompt_type=PromptType.CLUSTER_ANALYZER, ignore_token_limit=True)
                 results = dict(results)  # Ensure it's a dict
 
                 # Extract clusters from partial result

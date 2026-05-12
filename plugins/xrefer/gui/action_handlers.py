@@ -230,6 +230,52 @@ class ClusterEverythingHandler(idaapi.action_handler_t):
             return idaapi.AST_DISABLE
 
 
+class ForceClusterEverythingHandler(idaapi.action_handler_t):
+    """
+    Handler for running cluster analysis with the DSPy / LiteLLM
+    response cache BYPASSED. Same scope as ClusterEverythingHandler
+    (all non-excluded artifact functions), but every LLM call is
+    routed through ``LLMProcessor.uncached_lm()`` so the model
+    re-generates its response instead of replaying a cached one. Used
+    when the analyst wants to re-roll the LLM verdict without
+    restarting IDA or deleting the on-disk analysis pickle.
+    """
+
+    def activate(self, ctx: Any) -> bool:
+        from xrefer.plugin import plugin_instance
+
+        try:
+            idaapi.show_wait_box("HIDECANCEL\n")
+            log("Force-running Cluster Analysis (LLM cache bypassed)...")
+
+            xrefer_obj = plugin_instance.xrefer_view.xrefer_obj
+            plugin_instance.xrefer_view.state_machine.clear_cluster_history()
+            xrefer_obj.cluster_all_non_excluded(force_no_cache=True)
+
+            current_state = plugin_instance.xrefer_view.state_machine.current_state
+            if current_state in (
+                plugin_instance.xrefer_view.state_machine.clusters,
+                plugin_instance.xrefer_view.state_machine.cluster_graphs,
+            ):
+                plugin_instance.xrefer_view.update(True)
+
+            log("Force cluster analysis complete")
+            idaapi.hide_wait_box()
+            return True
+
+        except Exception as e:
+            idaapi.hide_wait_box()
+            log(f"[-] Error during force cluster analysis: {str(e)}")
+            return False
+
+    def update(self, ctx: Any) -> int:
+        from xrefer.plugin import plugin_instance
+
+        if plugin_instance.xrefer_view:
+            return idaapi.AST_ENABLE_ALWAYS
+        return idaapi.AST_DISABLE
+
+
 class AboutDialogHandler(idaapi.action_handler_t):
     """
     Handler for showing XRefer About dialog.
