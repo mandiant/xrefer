@@ -71,6 +71,7 @@ class XReferPlugin(idaapi.plugin_t):
             register_menu_action("Edit/XRefer/", "XRefer:sync_imagebase", "Re-sync Imagebase", SyncImageBaseHandler())
             register_menu_action("Edit/XRefer/Rename Functions/", "XRefer:rename_rust", "Rename based on Rust compiler strings", RustRenameHandler())
             register_menu_action("Edit/XRefer/Rename Functions/", "XRefer:rename_cluster", "Apply cluster analysis prefixes", ClusterRenameHandler())
+            register_menu_action("Edit/XRefer/", "XRefer:generate_html_report", "Generate HTML Report", GenerateHtmlReportHandler())
             register_menu_action("Edit/XRefer/Configure", "XRefer:Rust:configure", "Configure", XReferSettingsHandler())
             register_menu_action("Edit/XRefer/About", "XRefer:Rust:about", "About", AboutDialogHandler())
         idaapi.msg("[XRefer] Loaded\n")
