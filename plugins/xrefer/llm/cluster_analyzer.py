@@ -106,12 +106,22 @@ class ClusterAnalyzer:
                 for cid, cdata in partial_clusters.items():
                     all_clusters_result[cid] = cdata
 
-                # Update binary fields from the latest batch
+                # Update binary fields from the latest batch.
+                # binary_description / binary_category are updated each
+                # batch (the LLM sees the same context, so later
+                # batches generally give a slightly-refined value).
                 if "binary_description" in results:
                     binary_description = results["binary_description"]
                 if "binary_category" in results:
                     binary_category = results["binary_category"]
-                if "binary_report" in results:
+                # binary_report is only kept from the FINAL batch.
+                # Earlier batches were told (via the partial-batch
+                # note in format_cluster_data) that their binary_report
+                # is a discard-bound placeholder; gating the assignment
+                # here makes that contract explicit on the consumer
+                # side so a non-compliant LLM that still emits a real
+                # report on a partial batch can't leak it through.
+                if "binary_report" in results and end == cluster_count:
                     binary_report = results["binary_report"]
 
             # After processing all batches, ensure required fields are present
@@ -218,13 +228,44 @@ class ClusterAnalyzer:
             ps_note = f"IMPORTANT: Enumerate and ensure you return results for all clusters with IDs {','.join(map(str, range(start_idx + 1, end_idx + 1)))}"
             full_range = start_idx == 0 and end_idx == len(clusters)
             if not full_range:
+                # For partial batches we tell the LLM that
+                # binary_report is going to be discarded (the final
+                # batch produces the kept report). The schema still
+                # requires a valid BinaryReport here — the consumer
+                # gates the assignment, so even a non-compliant LLM
+                # that emits a real report can't leak it through.
+                is_final_batch = end_idx == len(clusters)
+                if is_final_batch:
+                    binary_report_instruction = (
+                        "This is the FINAL batch — produce the kept "
+                        "binary_report here. Apply every BinaryReport "
+                        "field description as written; this is the "
+                        "report the analyst sees."
+                    )
+                else:
+                    binary_report_instruction = (
+                        "binary_report from this batch WILL BE "
+                        "DISCARDED — the report is produced by the "
+                        "final batch only. Return a minimal "
+                        "BinaryReport that still satisfies every "
+                        "field description (overview opens with 'The "
+                        "binary is' or 'This binary is' and fits the "
+                        "length/structure rules, at least one "
+                        "behavior section with an evidence-descriptive "
+                        "heading, empty observed_artifacts is fine). "
+                        "Do not invest effort in this batch's "
+                        "binary_report — describe the binary's "
+                        "overall shape at a high level only."
+                    )
                 note = (
                     f"NOTE: Analyze ALL clusters to understand overall functionality and relationships. "
                     f"However, when producing the final JSON response, ONLY provide the full cluster-level analysis "
-                    f"(label, description, relationships, function_prefix) for clusters with indices in the range "
-                    f"[{start_idx + 1}, {end_idx}]. For all other clusters outside this subset, do NOT provide their "
-                    f"full analysis. Still, as instructed, provide binary_description, binary_category, and binary_report "
-                    f"for the entire binary. All clusters are provided below for context. "
+                    f"(label, description, relationships, function_prefix, library_or_runtime, mitre_attack) for clusters "
+                    f"with indices in the range [{start_idx + 1}, {end_idx}]. For all other clusters outside this subset, "
+                    f"do NOT provide their full analysis. Still, as instructed, provide binary_description and "
+                    f"binary_category for the entire binary. "
+                    f"{binary_report_instruction} "
+                    f"All clusters are provided below for context. "
                 )
 
             formatted = '''Structure is organized hierarchically with primary clusters and their subclusters.
@@ -263,6 +304,31 @@ References to subclusters indicate where complex behavior is encapsulated.
                 "description": f"This is a dummy description for {prefix}{c.id}.",
                 "relationships": f"Dummy relationships for {prefix}{c.id}.",
                 "function_prefix": f"dummy_{prefix}{c.id}",
+                # Synthetic MITRE entries so the HTML report's MITRE
+                # ATT&CK tab renders visibly during dev / debug paths
+                # that bypass the real LLM. Two techniques across two
+                # tactics exercises both the grouping and the rationale
+                # rendering.
+                "mitre_attack": [
+                    {
+                        "id": "T1059.003",
+                        "tactic": "Execution",
+                        "name": "Command and Scripting Interpreter: Windows Command Shell",
+                        "rationale": (
+                            f"Dummy rationale for cluster {prefix}{c.id} — pretend a cmd.exe invocation pattern "
+                            "was observed in this cluster's strings."
+                        ),
+                    },
+                    {
+                        "id": "T1027",
+                        "tactic": "Defense Evasion",
+                        "name": "Obfuscated Files or Information",
+                        "rationale": (
+                            f"Dummy rationale for cluster {prefix}{c.id} — pretend a base64-like decoding loop "
+                            "appears alongside the cluster's CAPA hits."
+                        ),
+                    },
+                ],
             }
 
             for sc in c.subclusters:

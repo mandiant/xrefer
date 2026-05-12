@@ -54,7 +54,7 @@ class ContextHelp:
         # 'function trace', 'path trace', 'full trace',
         # 'graph', 'pinned graph', 'simplified graph', 'pinned simplified graph',
         # 'boundary results', 'last boundary results',
-        # 'interesting artifacts', 'clusters', 'pinned cluster graphs', 'cluster graphs',
+        # 'interesting artifacts', 'orphans', 'clusters', 'pinned cluster graphs', 'cluster graphs',
         # 'xref listing', 'help'
 
         # Global actions (no states specified = appear in all states)
@@ -76,11 +76,13 @@ class ContextHelp:
             Action("T", "enter/cycle trace scopes", ActionCategory.KEYBOARD, {"base"}),
             Action("C", "enter clusters mode", ActionCategory.KEYBOARD, {"base"}),
             Action("I", "show interesting artifacts", ActionCategory.KEYBOARD, {"base"}),
+            Action("O", "show all orphan artifacts", ActionCategory.KEYBOARD, {"base"}),
             Action("X", "show cross-references for artifact", ActionCategory.KEYBOARD, {"base"}),
             Action("B", "run boundary scan (with selected artifacts)", ActionCategory.KEYBOARD, {"base"}),
             Action("L", "show last boundary scan results", ActionCategory.KEYBOARD, {"base"}),
             Action("G", "show artifact path graph (press again to pin/unpin)", ActionCategory.KEYBOARD, {"base"}),
             Action("P", "focus on a call instruction (call focus)", ActionCategory.KEYBOARD, {"base"}),
+            Action("V", "show clusters this function can reach (callers, callees, and intermediates)", ActionCategory.KEYBOARD, {"base"}),
         ]
 
         # Search mode: no special actions besides global; user just types to filter
@@ -102,6 +104,10 @@ class ContextHelp:
         cluster_actions = [
             Action("C", "toggle cluster table/graph", ActionCategory.KEYBOARD, {"clusters", "cluster graphs"}),
             Action("J", "toggle cluster sync in graphs", ActionCategory.KEYBOARD, {"cluster graphs", "pinned cluster graphs"}),
+            Action("L", "show/hide library clusters", ActionCategory.KEYBOARD, {"clusters", "cluster graphs", "pinned cluster graphs"}),
+            Action("M", "show paths between cluster members that go through this function (when it acts as intermediate)", ActionCategory.KEYBOARD, {"cluster graphs", "pinned cluster graphs", "base", "clusters", "neighborhood graph", "pinned neighborhood graph"}),
+            Action("A", "toggle intermediate-paths scope (current cluster ↔ all clusters)", ActionCategory.KEYBOARD, {"cluster graphs", "pinned cluster graphs"}),
+            Action("V", "show clusters this function can reach (callers, callees, and intermediates)", ActionCategory.KEYBOARD, {"clusters", "cluster graphs", "pinned cluster graphs"}),
         ]
 
         # Graph states:
@@ -132,8 +138,20 @@ class ContextHelp:
         # Since B triggers boundary scans, you might have 'boundary results' after pressing B or L from base.
         # Add these if needed.
 
+        # Orphan artifacts table — toggled with O from base, exited with
+        # O or ESC from the orphans view.
+        orphan_actions = [
+            Action("O", "exit orphan artifacts view", ActionCategory.KEYBOARD, {"orphans"}),
+        ]
+
+        # Neighborhood graph — V toggles back out (and ESC also pops to
+        # the previous view via the global handler).
+        neighborhood_actions = [
+            Action("V", "exit cluster-reach view", ActionCategory.KEYBOARD, {"neighborhood graph", "pinned neighborhood graph"}),
+        ]
+
         # Add all actions together
-        self.actions = global_actions + base_actions + cluster_actions + graph_actions + search_actions + boundary_actions
+        self.actions = global_actions + base_actions + cluster_actions + graph_actions + search_actions + boundary_actions + orphan_actions + neighborhood_actions
 
         self._help_cache: Dict[Tuple[str, int], List[str]] = {}
 

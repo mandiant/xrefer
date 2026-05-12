@@ -106,6 +106,14 @@ class XReferView(idaapi.simplecustviewer_t):
                 (self.xrefer_obj.table_names[3], 1),  # INDIRECT STRING XREFS
                 (self.xrefer_obj.table_names[4], 1),  # INDIRECT CAPA XREFS
                 ("DIRECT XREFS", 1),
+                # Orphan-view tables. Same expand/collapse machinery
+                # (handle_key_e, the [+]/[-] click handler, get_parent_table)
+                # all key off membership in this dict, so registering them
+                # here is enough — no separate state-tracking dicts needed.
+                ("ORPHAN IMPORTS", 1),
+                ("ORPHAN LIBRARIES", 1),
+                ("ORPHAN STRINGS", 1),
+                ("ORPHAN CAPA RULES", 1),
             ]
         )
         # HACK: Bring back color_tags just for IDA. We removed this from the core because we didn't want to keep IDA specific logic in core. However, to bring back the coloring in the IDA plugin, we directly
@@ -116,7 +124,37 @@ class XReferView(idaapi.simplecustviewer_t):
                 self.xrefer_obj.table_names[4]: ida_lines.SCOLOR_CODNAME, # "INDIRECT CAPA XREFS"
             }
 
-        self.table_names: List[str] = list(self.table_states.keys())
+        # Per-function tables that participate in the rotating
+        # base-view loop. Orphan tables live in the same ``table_states``
+        # dict (so the [+]/[-] click handler "just works") but are NOT
+        # iterated as part of per-function rendering — that loop must
+        # see only the original 5 entries.
+        self.table_names: List[str] = [
+            self.xrefer_obj.table_names[2],
+            self.xrefer_obj.table_names[1],
+            self.xrefer_obj.table_names[3],
+            self.xrefer_obj.table_names[4],
+            "DIRECT XREFS",
+        ]
+        # Orphan-view tables in display order. Used by ``draw_orphans``
+        # and by ``get_parent_table`` (which accepts either the per-
+        # function names or these orphan names as parents of a "(+)" /
+        # "(-)" sub-toggle line).
+        self.orphan_table_names: List[str] = [
+            "ORPHAN IMPORTS",
+            "ORPHAN LIBRARIES",
+            "ORPHAN STRINGS",
+            "ORPHAN CAPA RULES",
+        ]
+        # Maps orphan table name -> EntityType id (1=lib, 2=import,
+        # 3=string, 4=capa) so the renderer can pick the right color
+        # tag and source list.
+        self._orphan_table_to_type: Dict[str, int] = {
+            "ORPHAN IMPORTS": 2,
+            "ORPHAN LIBRARIES": 1,
+            "ORPHAN STRINGS": 3,
+            "ORPHAN CAPA RULES": 4,
+        }
         self.subtable_states: Dict[str, Dict[str, bool]] = {}
         self.api_expansion_state = defaultdict(lambda: defaultdict(lambda: {"direct": False, "indirect": False}))
         self.xref_coverage_dict: Dict[int, Dict[int, bool]] = {}
@@ -128,7 +166,7 @@ class XReferView(idaapi.simplecustviewer_t):
         self.func_ea: Optional[int] = None
         self.state_machine: XReferStateMachine = XReferStateMachine()
         self.table_index_offset: int = 4  # default state starts from direct xrefs
-        self.table_count: int = len(self.table_states)
+        self.table_count: int = len(self.table_names)
         # 8 spaces aligns expanded-table row content with the heading text that
         # follows the "----" continuation marker; see draw_function_context_table_heading.
         # Used to be OS-conditional (4 on macOS, 8 on Win/Linux) which produced
@@ -847,6 +885,7 @@ class XReferView(idaapi.simplecustviewer_t):
 
     def handle_key_specific_actions(self, vkey: int, shift: bool) -> bool:
         key_actions: Dict[int, Callable[[bool], bool]] = {
+            ord("A"): self.handle_key_a,
             ord("B"): self.handle_key_b,
             ord("C"): self.handle_key_c,
             ord("D"): self.handle_key_d,
@@ -856,12 +895,15 @@ class XReferView(idaapi.simplecustviewer_t):
             ord("I"): self.handle_key_i,
             ord("J"): self.handle_key_j,
             ord("L"): self.handle_key_l,
+            ord("M"): self.handle_key_m,
             ord("N"): self.handle_key_n,
+            ord("O"): self.handle_key_o,
             ord("P"): self.handle_key_p,
             ord("R"): self.handle_key_r,
             ord("S"): self.handle_key_s,
             ord("T"): self.handle_key_t,
             ord("U"): self.handle_key_u,
+            ord("V"): self.handle_key_v,
             ord("X"): self.handle_key_x,
             13: self.handle_key_enter,
             27: self.handle_key_escape,
@@ -968,7 +1010,9 @@ class XReferView(idaapi.simplecustviewer_t):
         """
         Handle 'e' key press for expand/collapse.
 
-        Toggles expansion state of current table section.
+        Toggles expansion state of current table section. Active in the
+        ``base`` xrefs view and in the ``orphans`` view, since both use
+        the same ``table_states`` / ``subtable_states`` machinery.
 
         Args:
             shift (bool): Whether shift key is pressed
@@ -976,7 +1020,7 @@ class XReferView(idaapi.simplecustviewer_t):
         Returns:
             bool: True if expansion state was toggled, False otherwise
         """
-        if self.state_machine.current_state == self.state_machine.base:
+        if self.state_machine.current_state in (self.state_machine.base, self.state_machine.orphans):
             table_name: Optional[str] = self.get_parent_table()
             try:
                 val: bool = not list(self.subtable_states[table_name].values())[0]
@@ -1120,17 +1164,220 @@ class XReferView(idaapi.simplecustviewer_t):
 
     def handle_key_l(self, shift: bool) -> bool:
         """
-        Handle 'l' key press for last boundary results.
+        Handle 'l' key press.
 
-        Shows results from most recent boundary method scan.
+        Context-sensitive:
+            * In ``clusters`` / ``cluster graphs`` / ``pinned cluster graphs``
+              states, toggles whether library clusters are hidden in the
+              cluster table and relationship graph.
+            * Elsewhere, falls through to the original behavior of showing
+              the most recent boundary scan results.
 
         Args:
             shift (bool): Whether shift key is pressed
 
         Returns:
-            bool: True if last results were shown
+            bool: True if the view should be redrawn
         """
+        if self.state_machine.toggle_hide_library_clusters():
+            return True
         return self.state_machine.start_last_boundary_results()
+
+    def handle_key_o(self, shift: bool) -> bool:
+        """Handle 'o' key press for the orphan-artifacts view.
+
+        ``O`` is a toggle but is intentionally only wired up in two states:
+
+        * From ``base`` it transitions into ``orphans`` (and the dispatcher
+          calls :meth:`draw_orphans`).
+        * From ``orphans`` it transitions back to ``base``.
+
+        From any other state ``O`` is a no-op so the user doesn't end up
+        opening the orphans table from inside a graph / cluster / search
+        flow they're in the middle of.
+
+        ESC continues to work as a generic "go back" via the state
+        history, so the user has two ways to exit the table.
+        """
+        if self.state_machine.current_state == self.state_machine.base:
+            return self.state_machine.start_orphans()
+        if self.state_machine.current_state == self.state_machine.orphans:
+            return self.state_machine.to_base()
+        return False
+
+    def _exit_intermediate_view_with_undo(self) -> bool:
+        """Close the intermediate sub-view and roll back everything M
+        did to open it.
+
+        M may have (a) just flipped the flag in place, (b) pushed a
+        cluster onto the cluster_manager stack (when opened from the
+        cluster_graphs overview), and/or (c) transitioned state from
+        base / clusters / neighborhood into cluster_graphs (cross-
+        view jump). The bookkeeping flags
+        ``intermediate_view_pushed_cluster`` /
+        ``intermediate_view_transitioned_state`` recorded which of
+        those happened. Reading them before the flip is important —
+        the flip clears them.
+
+        Used by both M (exit toggle) and ESC so the two exit paths
+        are symmetric.
+        """
+        sm = self.state_machine
+        if sm.intermediate_view_func_ea is None:
+            return False
+        if sm.current_state not in (sm.cluster_graphs, sm.pinned_cluster_graphs):
+            return False
+
+        pushed = sm.intermediate_view_pushed_cluster
+        transitioned = sm.intermediate_view_transitioned_state
+
+        if not sm.flip_intermediate_view(None):
+            return False
+
+        if pushed:
+            sm.cluster_manager.pop_cluster()
+
+        cursor_pos: Optional[Tuple[int, int, int]] = None
+        if transitioned:
+            success, cursor_pos = sm.go_back()
+            # go_back failure isn't fatal — caller still gets a redraw
+            # of whatever state we ended up in.
+
+        self._explicit_cluster_click = True
+        if cursor_pos:
+            self.Jump(*cursor_pos)
+        return True
+
+    def handle_key_m(self, shift: bool) -> bool:
+        """Handle 'm' key — open / close the intermediate-paths view.
+
+        Behaviour:
+
+        * **Already inside the intermediate sub-view** (any cluster-
+          graph state) → M closes the sub-view and rolls back every
+          side-effect M had when opening it (cluster push and state
+          transition, when applicable). Mirrors ESC.
+        * **Otherwise**, when the cursor is on a function that is
+          intermediate of at least one cluster, M opens the sub-view.
+          The handler will (a) push that cluster onto the cluster
+          stack if no cluster is currently in view (covers the
+          cluster_graphs *overview* state too — without this push,
+          ``draw_cluster_graph`` falls through to the overview header
+          and the intermediate flag is invisible), and (b) transition
+          state to ``cluster_graphs`` from base / clusters /
+          neighborhood / pinned_neighborhood.
+        * **Anywhere else** M is a no-op so it doesn't collide with
+          disasm / search / orphan flows.
+        """
+        sm = self.state_machine
+        current = sm.current_state
+
+        if sm.intermediate_view_func_ea is not None:
+            return self._exit_intermediate_view_with_undo()
+
+        # Open path. Eligible source states are those where the banner
+        # hint advertises M.
+        eligible = (
+            sm.cluster_graphs,
+            sm.pinned_cluster_graphs,
+            sm.base,
+            sm.clusters,
+            sm.neighborhood_graph,
+            sm.pinned_neighborhood_graph,
+        )
+        if current not in eligible:
+            return False
+        if not self.func_ea:
+            return False
+
+        # Cursor must be intermediate of something — reuse the same
+        # classifier the Status row uses so the target cluster matches
+        # what the analyst sees in the banner.
+        status_kind, owner_ids = self._classify_cursor_relative_to_clusters(None)
+        if status_kind != "intermediate" or not owner_ids:
+            return False
+        target_cluster_id = owner_ids[0]
+
+        # Ensure a cluster is pushed so draw_individual_cluster_graph
+        # is the dispatch target — without a pushed cluster,
+        # draw_cluster_graph renders the overview header and never
+        # checks the intermediate flag. Reuse an existing push if it
+        # matches the target so we don't double-stack.
+        pushed_now = False
+        current_pushed = sm.cluster_manager.get_current_cluster()
+        if current_pushed is None or current_pushed.cluster_id != target_cluster_id:
+            sm.cluster_manager.push_cluster(target_cluster_id)
+            pushed_now = True
+
+        # Transition to cluster_graphs if we came from elsewhere.
+        transitioned = current not in (sm.cluster_graphs, sm.pinned_cluster_graphs)
+        if transitioned:
+            if not sm.start_cluster_graphs():
+                if pushed_now:
+                    sm.cluster_manager.pop_cluster()
+                return False
+
+        if not sm.flip_intermediate_view(self.func_ea):
+            if pushed_now:
+                sm.cluster_manager.pop_cluster()
+            return False
+
+        # Record bookkeeping AFTER the flip — flip_intermediate_view
+        # clears these on exit, so setting them post-entry guarantees
+        # the next exit reads accurate values.
+        sm.intermediate_view_pushed_cluster = pushed_now
+        sm.intermediate_view_transitioned_state = transitioned
+
+        self._explicit_cluster_click = True
+        return True
+
+    def handle_key_a(self, shift: bool) -> bool:
+        """Handle 'a' key press — toggle scope of the intermediate view.
+
+        Only meaningful while the intermediate sub-view is active.
+        Flips between "current cluster only" (default — keeps the
+        spider graph small and contextual) and "all clusters" (the
+        previous global behaviour).
+        """
+        if self.state_machine.intermediate_view_func_ea is None:
+            return False
+        return self.state_machine.flip_intermediate_scope()
+
+    def handle_key_v(self, shift: bool) -> bool:
+        """Handle 'v' key — toggle the cursor neighborhood graph view.
+
+        Available wherever the cluster context banner appears (base,
+        clusters, cluster_graphs, paths_graph). Renders a focused
+        asciinet graph with the cursor function in the centre and
+        every adjacent cluster's gateway function around it; ESC
+        returns to the previous view.
+
+        Pressing V while already in the neighborhood view exits back
+        the same way ESC would, so the same key both opens and
+        closes the view.
+        """
+        sm = self.state_machine
+        current = sm.current_state
+
+        if current in (sm.neighborhood_graph, sm.pinned_neighborhood_graph):
+            sm.go_back()
+            return True
+
+        eligible = (
+            sm.base,
+            sm.clusters,
+            sm.cluster_graphs,
+            sm.pinned_cluster_graphs,
+            sm.graph,
+            sm.simplified_graph,
+            sm.pinned_graph,
+            sm.pinned_simplified_graph,
+        )
+        if current not in eligible:
+            return False
+        if not self.func_ea:
+            return False
+        return sm.start_neighborhood_graph()
 
     def handle_key_n(self, shift: bool) -> bool:
         """
@@ -1354,6 +1601,17 @@ class XReferView(idaapi.simplecustviewer_t):
             bool: True if handled, False if not
         """
         if self.state_machine.current_state in (self.state_machine.cluster_graphs, self.state_machine.pinned_cluster_graphs):
+            # If the intermediate sub-view is active, ESC first closes
+            # *that* and rolls back every side-effect M had when
+            # opening it (cluster push, state transition). M and ESC
+            # are symmetric exits — pressing ESC inside the sub-view
+            # takes the analyst back to where M was pressed in one
+            # keystroke. Subsequent ESC presses then continue the
+            # normal cluster-pop unwinding.
+            if self._exit_intermediate_view_with_undo():
+                self.update(True)
+                return True
+
             cluster_manager = self.state_machine.cluster_manager
 
             # Store current position before navigation
@@ -1719,6 +1977,159 @@ class XReferView(idaapi.simplecustviewer_t):
         else:
             self.AddLine(f"{header_indent}NO INTERESTING COMPLETELY ORPHANED ARTIFACTS FOUND")
 
+    def draw_orphans(self) -> None:
+        """Draw the orphan-artifacts view.
+
+        One table per entity type (imports, libraries, strings, capa
+        rules), each rendered with the same colored heading + ``[-]`` /
+        ``[+]`` expand markers and ``(-)`` / ``(+)`` per-group sub-toggle
+        used by the per-function xref tables, so the layout is visually
+        identical to the rest of xrefer. Every row carries the artifact
+        name in the first column followed by every address that
+        references it (``self.entity_xrefs[idx]``), matching the
+        address-after-name layout of the regular xrefs tables.
+
+        Expand/collapse keys re-use ``self.table_states`` and
+        ``self.subtable_states``, so ``[+]`` / ``[-]`` clicks, ``(+)`` /
+        ``(-)`` clicks, and the ``E`` shortcut all work without any
+        bespoke wiring.
+        """
+        self.ClearLines()
+        self.print_ribbon()
+
+        INDENT = "    "
+        orphan_groups = self.xrefer_obj.collect_orphan_entities()
+        type_label = {
+            1: "LIBRARIES",
+            2: "IMPORTS",
+            3: "STRINGS",
+            4: "CAPA RULES",
+        }
+        total = sum(len(orphan_groups.get(t, [])) for t in (1, 2, 3, 4))
+
+        header = f"ORPHAN ARTIFACTS DISCOVERED → {ida_lines.COLSTR(str(total), ida_lines.SCOLOR_VOIDOP)}"
+        self.AddLine(f"{INDENT}{ida_lines.COLSTR(header, ida_lines.SCOLOR_DATNAME)}")
+        self.AddLine("")
+
+        breakdown_parts: List[str] = []
+        for type_id in (2, 1, 3, 4):  # match orphan_table_names display order
+            count = len(orphan_groups.get(type_id, []))
+            count_str = ida_lines.COLSTR(str(count), ida_lines.SCOLOR_VOIDOP)
+            breakdown_parts.append(f"{type_label[type_id]}: {count_str}")
+        self.AddLine(f"{INDENT}{ida_lines.COLSTR(' • '.join(breakdown_parts), ida_lines.SCOLOR_VOIDOP)}")
+        self.AddLine("")
+
+        if total == 0:
+            self.AddLine(f"{INDENT}NO ORPHAN ARTIFACTS FOUND")
+            return
+
+        # Build and render one table per orphan type.
+        for table_name in self.orphan_table_names:
+            type_id = self._orphan_table_to_type[table_name]
+            indices = orphan_groups.get(type_id, [])
+            if not indices:
+                continue
+            built = self._build_orphan_table(table_name, type_id, indices)
+            if built is None:
+                continue
+            self._draw_orphan_table(table_name, built)
+
+    def _build_orphan_table(self, table_name: str, type_id: int, entity_indices: List[int]) -> Optional[Dict[str, Any]]:
+        """Group entities by ``entity[0]`` (namespace / category) and
+        produce a colored table ready to render.
+
+        Returns ``{"heading": [head_line, sep_line], "rows": OrderedDict[group: List[str]]}``
+        in the same shape as ``self.xrefer_obj.table_data[func_ea][...]``,
+        so the renderer can share logic with the per-function tables.
+        """
+        # Group by namespace/category (entity[0]). Stable insertion order.
+        string_storage = getattr(self.xrefer_obj, "string_storage_addrs", {}) or {}
+        groups: "OrderedDict[str, List[List[Any]]]" = OrderedDict()
+        for idx in entity_indices:
+            entity = self.xrefer_obj.entities[idx]
+            category = entity[0] or "uncategorized"
+            row: List[Any] = [entity[1]]
+            # Append every address this entity is referenced from. Sorted
+            # so the table is deterministic across runs.
+            addrs = sorted(self.xrefer_obj.entity_xrefs.get(idx, set()))
+            # String fallback: if no code use site was statically
+            # resolvable (very common for Rust strings referenced via
+            # const slice structs), surface the data-section storage
+            # address so the row isn't blank and the user can still
+            # navigate to where the string lives.
+            if not addrs and type_id == 3:
+                addrs = sorted(string_storage.get(idx, set()))
+            row.extend(addrs)
+            groups.setdefault(category, []).append(row)
+
+        if not groups:
+            return None
+
+        # Sort groups alphabetically and rows within each group by name
+        # for predictable navigation.
+        sorted_groups: "OrderedDict[str, List[List[Any]]]" = OrderedDict()
+        for category in sorted(groups.keys(), key=lambda s: s.lower()):
+            rows = sorted(groups[category], key=lambda r: (r[0] or "").lower())
+            sorted_groups[category] = rows
+
+        flat_rows: List[List[Any]] = []
+        for rows in sorted_groups.values():
+            flat_rows.extend(rows)
+
+        color_tag = self.xrefer_obj.color_tags[self.xrefer_obj.table_names[type_id]]
+        colored_table = create_xrefs_table_colored(table_name, flat_rows, color_tag)
+        # Layout mirrors finalize_table in analyzer.py: index 1 = heading
+        # text, index 2 = separator dashes, index 3+ = row data.
+        heading = colored_table[1:3] if len(colored_table) >= 3 else []
+
+        per_group_rows: "OrderedDict[str, List[str]]" = OrderedDict()
+        offset = 3
+        for category, rows in sorted_groups.items():
+            n = len(rows)
+            per_group_rows[category] = colored_table[offset : offset + n]
+            offset += n
+
+        return {"heading": heading, "rows": per_group_rows}
+
+    def _draw_orphan_table(self, table_name: str, built: Dict[str, Any]) -> None:
+        """Render a single orphan table honouring the top-level expand
+        state in ``self.table_states[table_name]`` and the per-group
+        state in ``self.subtable_states[table_name]``."""
+        self.current_table = table_name
+        is_expanded = bool(self.table_states.get(table_name, 1))
+        # Top-level heading line with [+] / [-] marker — same format as
+        # draw_function_context_table_heading.
+        fmt = "[-] %s" if is_expanded else "[+] %s"
+        head_text = built["heading"][0] if built["heading"] else table_name
+        self.AddLine(ida_lines.COLSTR(fmt % head_text, ida_lines.SCOLOR_DATNAME))
+
+        if not is_expanded:
+            self.AddLine("")
+            return
+
+        # Separator line with the "----" continuation that visually
+        # extends the dash from the [-] marker on the line above.
+        if len(built["heading"]) > 1:
+            sep = built["heading"][1]
+            self.AddLine(ida_lines.COLSTR(f"    ----{sep}", ida_lines.SCOLOR_DATNAME))
+
+        subtable_states: Dict[str, bool] = self.subtable_states.setdefault(table_name, {})
+        for group_key, group_rows in built["rows"].items():
+            sub_expanded = subtable_states.setdefault(group_key, False)
+            if sub_expanded:
+                self.AddLine(ida_lines.COLSTR("    %s %s" % (ida_lines.COLSTR("(-)", ida_lines.SCOLOR_DATNAME), group_key), ida_lines.SCOLOR_ASMDIR))
+                # Rows are already colored via create_xrefs_table_colored;
+                # AddLine directly so we don't drag in print_xref_item's
+                # per-function coverage-coloring path (it dereferences
+                # ``xref_coverage_dict[self.func_ea]`` which isn't
+                # populated for the orphans view).
+                for line in group_rows:
+                    self.AddLine(f"{self.indent}{line}")
+            else:
+                self.AddLine(ida_lines.COLSTR("    %s %s" % (ida_lines.COLSTR("(+)", ida_lines.SCOLOR_DATNAME), group_key), ida_lines.SCOLOR_ASMDIR))
+
+        self.AddLine("")
+
     def _print_artifact_list(self, artifacts: List[Tuple[int, str]]) -> None:
         """
         Print formatted list of artifacts with appropriate coloring.
@@ -1746,12 +2157,16 @@ class XReferView(idaapi.simplecustviewer_t):
         LINE_WIDTH = 85  # Consistent width for all text blocks
         INDENT = "    "  # Standard 4-space indent
 
-        # Count total clusters and functions
+        # Count total clusters and functions, respecting the
+        # hide-library toggle so the header reflects what is shown.
         total_functions = set()
         total_clusters = 0
+        hide_library = self.state_machine.hide_library_clusters
 
         def count_cluster_stats(cluster):
             nonlocal total_clusters, total_functions
+            if hide_library and getattr(cluster, "is_library", False):
+                return
             total_clusters += 1
             total_functions.update(cluster.nodes)
             for subcluster in cluster.subclusters:
@@ -1823,7 +2238,12 @@ class XReferView(idaapi.simplecustviewer_t):
         self.AddLine("")
 
         # Get formatted lines from helper
-        lines = draw_cluster_hierarchy(self.xrefer_obj.clusters, cluster_analysis, self.xrefer_obj.paths)
+        lines = draw_cluster_hierarchy(
+            self.xrefer_obj.clusters,
+            cluster_analysis,
+            self.xrefer_obj.paths,
+            hide_library=self.state_machine.hide_library_clusters,
+        )
 
         # Add lines to view
         for line in lines:
@@ -1832,12 +2252,16 @@ class XReferView(idaapi.simplecustviewer_t):
         self.Jump(0, 0)
         self.Refresh()
 
-    def _get_intermediate_paths_containing_function(self, func_ea: int) -> List[Tuple[int, List[int], int]]:
+    def _get_intermediate_paths_containing_function(self, func_ea: int, scope_cluster_id: Optional[int] = None) -> List[Tuple[int, List[int], int]]:
         """
-        Find all intermediate paths containing a specific function.
+        Find intermediate paths containing a specific function.
 
         Args:
-            func_ea: Address of function to find in intermediate paths
+            func_ea: Address of function to find in intermediate paths.
+            scope_cluster_id: When provided, restrict the search to the
+                given cluster and its subclusters, ignoring paths from
+                unrelated clusters. ``None`` means "search every
+                cluster" (the prior global behaviour).
 
         Returns:
             List of tuples (source_node, path, target_node) where:
@@ -1845,7 +2269,8 @@ class XReferView(idaapi.simplecustviewer_t):
             - path: Complete path including intermediates
             - target_node: Address of target cluster node/interesting function
         """
-        paths_with_func = []
+        paths_with_func: List[Tuple[int, List[int], int]] = []
+        seen: Set[Tuple[int, Tuple[int, ...], int]] = set()
 
         # Search all clusters for relevant intermediate paths
         def search_cluster(cluster):
@@ -1853,15 +2278,23 @@ class XReferView(idaapi.simplecustviewer_t):
                 for path in paths:
                     # Check if function is in this path (but not as source/target)
                     if func_ea in path and func_ea != path[0] and func_ea != path[-1]:
+                        key = (source, tuple(path), target)
+                        if key in seen:
+                            continue
+                        seen.add(key)
                         paths_with_func.append((source, list(path), target))
 
             # Search subclusters recursively
             for subcluster in cluster.subclusters:
                 search_cluster(subcluster)
 
-        # Search all root clusters
-        for cluster in self.xrefer_obj.clusters:
-            search_cluster(cluster)
+        if scope_cluster_id is not None:
+            scope_root = self.xrefer_obj.find_cluster_by_id(scope_cluster_id)
+            if scope_root is not None:
+                search_cluster(scope_root)
+        else:
+            for cluster in self.xrefer_obj.clusters:
+                search_cluster(cluster)
 
         return paths_with_func
 
@@ -1872,13 +2305,29 @@ class XReferView(idaapi.simplecustviewer_t):
         connecting it to interesting nodes in both directions, with special handling
         for multi-cluster (shared) functions.
 
-        If we encounter a multi-cluster function or any interesting node that isn't a single-cluster
-        node, we keep searching along the path until we find a final single-cluster node.
-        If none is found, we omit that path.
+        Scope follows ``state_machine.intermediate_view_show_all``: when
+        False (default), only paths within the cluster the user came
+        from are rendered, keeping the spider graph tight and
+        contextual. When True, every cluster's intermediate paths are
+        merged (the previous global behaviour). The A key flips this
+        toggle while the view is active.
         """
-        # Get all paths containing this function
-        containing_paths = self._get_intermediate_paths_containing_function(func_ea)
+        # Establish scope. Default = current cluster only.
+        current_cluster = self.state_machine.cluster_manager.get_current_cluster()
+        current_id = current_cluster.cluster_id if current_cluster else None
+        show_all = self.state_machine.intermediate_view_show_all
+        scope_for_query = None if show_all else current_id
+
+        containing_paths = self._get_intermediate_paths_containing_function(func_ea, scope_cluster_id=scope_for_query)
+        # If a scoped query produced nothing but a global one would,
+        # fall back to global so the user never sees an empty view —
+        # but flag the scope mismatch in the banner so they know.
+        scoped_was_empty = (not containing_paths) and (scope_for_query is not None)
+        if scoped_was_empty:
+            containing_paths = self._get_intermediate_paths_containing_function(func_ea, scope_cluster_id=None)
         if not containing_paths:
+            self.ClearLines()
+            self.print_ribbon()
             self.AddLine("    No intermediate paths found containing this function")
             return
 
@@ -1886,9 +2335,51 @@ class XReferView(idaapi.simplecustviewer_t):
         self.ClearLines()
         self.print_ribbon()
 
-        header = f"INTERMEDIATE FUNCTION PATHS (0x{func_ea:x})"
+        # Header — describe what the view actually shows in plain
+        # terms (the chains where this function sits between two
+        # cluster members) instead of relying on insider vocabulary
+        # like "intermediate" or zoom metaphors. Scope marker covers
+        # single cluster, all clusters, and the empty-scope fallback.
+        if show_all:
+            scope_marker = "across all clusters"
+        elif current_id is not None and not scoped_was_empty:
+            scope_marker = f"in cluster.id.{current_id:04d}"
+        elif scoped_was_empty:
+            scope_marker = f"in cluster.id.{current_id:04d} (no matches → showing all clusters)"
+        else:
+            scope_marker = "across all clusters"
+        header = f"PATHS BETWEEN CLUSTER MEMBERS THAT GO THROUGH THIS FUNCTION ({scope_marker})"
         self.AddLine(f"    \x01{ida_lines.SCOLOR_DATNAME}{header}\x02{ida_lines.SCOLOR_DATNAME}")
         self.AddLine(f"    {'-' * len(header)}")
+        # Sub-heading: explain the role + how to zoom back out. Avoid
+        # the "zoomed-in chain" framing — describe the role plainly so
+        # the analyst doesn't need to translate.
+        zoom_hint = ida_lines.COLSTR(
+            "(this function acts as a bridge linking two cluster members on each chain — press V to zoom out to the cluster overview, ESC to leave)",
+            ida_lines.SCOLOR_DSTR,
+        )
+        self.AddLine(f"    {zoom_hint}")
+        # Sticky context banner — show the cluster the user came from
+        # (if any) so they know this view didn't replace their cluster
+        # context, just augmented it.
+        for line in self._build_cluster_context_banner(current_id):
+            self.AddLine(line)
+
+        # Scope status — explicit so the analyst always knows whether
+        # the spider is scoped to the cluster they came from or merged
+        # across every cluster.
+        if show_all:
+            scope_text = f"Scope: ALL CLUSTERS — press A to scope to current cluster, M to exit"
+        elif current_id is not None and not scoped_was_empty:
+            scope_text = f"Scope: cluster.id.{current_id:04d} only — press A to expand to all clusters, M to exit"
+        elif scoped_was_empty:
+            scope_text = (
+                f"Scope: cluster.id.{current_id:04d} had no matching paths — falling back to ALL CLUSTERS. "
+                f"Press A or M to dismiss."
+            )
+        else:
+            scope_text = "Scope: ALL CLUSTERS (no current cluster context) — press M to exit"
+        self.AddLine(f"    \x01{ida_lines.SCOLOR_DNAME}{scope_text}\x02{ida_lines.SCOLOR_DNAME}")
         self.AddLine("")
 
         # Recursively gather all nodes from clusters and subclusters
@@ -1935,7 +2426,8 @@ class XReferView(idaapi.simplecustviewer_t):
 
         def format_node_label(addr: int) -> str:
             """Format node label with cluster information if available."""
-            name = idc.get_func_name(addr)
+            # IDA 9.x SWIG bindings reject non-strict ea_t — wrap.
+            name = idc.get_func_name(ida_idaapi.ea_t(int(addr)))
             if len(name) > 25:
                 name = name[:22] + "..."
 
@@ -2223,6 +2715,15 @@ class XReferView(idaapi.simplecustviewer_t):
         for cluster in self.xrefer_obj.clusters:
             count_cluster_stats(cluster)
 
+        # If a specific cluster is selected, hand off before printing
+        # the overview header / banner so the individual-cluster view
+        # owns the banner alone (avoids stacking two banners).
+        cluster_manager = self.state_machine.cluster_manager
+        current_view = cluster_manager.get_current_cluster()
+        if current_view:
+            self.draw_individual_cluster_graph(current_view.cluster_id)
+            return
+
         # Add main heading with enhanced statistics
         header = (
             f"CLUSTER GRAPH VIEW → {ida_lines.COLSTR(str(total_clusters), ida_lines.SCOLOR_VOIDOP)} "
@@ -2230,6 +2731,8 @@ class XReferView(idaapi.simplecustviewer_t):
         )
         self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_DATNAME}{header}\x02{ida_lines.SCOLOR_DATNAME}")
         self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_DATNAME}{'=' * LINE_WIDTH}\x02{ida_lines.SCOLOR_DATNAME}")
+        for line in self._build_cluster_context_banner(None):
+            self.AddLine(line)
         self.AddLine("")
 
         if self.print_llm_disclaimer():
@@ -2240,15 +2743,6 @@ class XReferView(idaapi.simplecustviewer_t):
         cluster_analysis = self.xrefer_obj.cluster_analysis
         if not cluster_analysis:
             self.AddLine(f"{INDENT}NO CLUSTER ANALYSIS AVAILABLE")
-            return
-
-        # Check for individual cluster view
-        cluster_manager = self.state_machine.cluster_manager
-        current_view = cluster_manager.get_current_cluster()
-
-        if current_view:
-            # Handle individual cluster view with enhanced dual-purpose support
-            self.draw_individual_cluster_graph(current_view.cluster_id)
             return
 
         # Print binary analysis with enhanced formatting
@@ -2286,7 +2780,12 @@ class XReferView(idaapi.simplecustviewer_t):
         self.AddLine("")
 
         try:
-            graph = create_cluster_relationship_graph(self.xrefer_obj.clusters, self.xrefer_obj.cluster_analysis)
+            graph = create_cluster_relationship_graph(
+                self.xrefer_obj.clusters,
+                self.xrefer_obj.cluster_analysis,
+                paths=self.xrefer_obj.paths,
+                hide_library=self.state_machine.hide_library_clusters,
+            )
 
             if not graph:
                 self.AddLine(f"{INDENT}FAILED TO CREATE CLUSTER GRAPH")
@@ -2317,6 +2816,10 @@ class XReferView(idaapi.simplecustviewer_t):
                     self.AddLine(f"{self.INDENT}\x01{ida_lines.SCOLOR_SEGNAME}- Press J to disable cluster sync (currently ON - following function navigation)\x02{ida_lines.SCOLOR_SEGNAME}")
                 else:
                     self.AddLine(f"{self.INDENT}\x01{ida_lines.SCOLOR_SEGNAME}- Press J to enable cluster sync (currently OFF)\x02{ida_lines.SCOLOR_SEGNAME}")
+                if self.state_machine.hide_library_clusters:
+                    self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_SEGNAME}- Press L to show library clusters (currently hidden)\x02{ida_lines.SCOLOR_SEGNAME}")
+                else:
+                    self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_SEGNAME}- Press L to hide library clusters (currently shown)\x02{ida_lines.SCOLOR_SEGNAME}")
                 self.AddLine(f"    \x01{ida_lines.SCOLOR_SEGNAME}- Press ESC to return to previous view\x02{ida_lines.SCOLOR_SEGNAME}")
 
             except Exception as e:
@@ -2386,6 +2889,637 @@ class XReferView(idaapi.simplecustviewer_t):
         )
 
         return colored_line
+
+    def _cluster_short_label(self, cluster_id: int) -> str:
+        """Return a short LLM-supplied label for a cluster, or an empty
+        string if no analysis exists. Used to keep banner lines compact."""
+        analysis = self.xrefer_obj.cluster_analysis or {}
+        data = find_cluster_analysis(analysis, cluster_id) or {}
+        return (data.get("label") or "").strip()
+
+    def _func_to_cluster_ids(self) -> Dict[int, Set[int]]:
+        """Build (lazily) a mapping ``func_ea → {cluster_ids}`` covering
+        every function that is a member (``nodes`` or ``root_node``) of
+        any cluster or subcluster. Cached on the view because clusters
+        do not change for the life of an analysis session.
+
+        Used by the cursor classifier to find clusters that don't
+        formally contain the cursor function but DO contain a direct
+        caller / callee — i.e. clusters the function is callgraph-
+        adjacent to. Without this, a util function only ever shows up
+        under the one cluster the analyzer happens to have decomposed
+        it into, even when xrefs make it obvious that other clusters
+        also depend on it.
+        """
+        cache = getattr(self, "_func_to_cluster_ids_cache", None)
+        if cache is not None:
+            return cache
+        cache = defaultdict(set)
+
+        def walk(c: "FunctionalCluster") -> None:
+            cache[c.root_node].add(c.id)
+            for n in c.nodes:
+                cache[n].add(c.id)
+            for sc in c.subclusters:
+                walk(sc)
+
+        for top in self.xrefer_obj.clusters or []:
+            walk(top)
+        self._func_to_cluster_ids_cache = cache
+        return cache
+
+    def _ensure_callgraph_indices(self) -> None:
+        """Lazily build forward / reverse function-call indices off
+        ``xrefer_obj.caller_xrefs_cache``.
+
+        Why not query IDA on every cursor move:
+
+        * The analyzer's ``create_xref_mapping`` (in ``core/analyzer``)
+          already walks every instruction in every basic block via the
+          backend abstraction and populates ``caller_xrefs_cache`` with
+          every cross-function reference, jumps included. Re-running
+          equivalent logic from view code per cursor move duplicates
+          work the analyzer already did.
+        * Reading the same source guarantees the banner's adjacency /
+          nearest-cluster picture matches what cluster decomposition,
+          path walks and orphan classification all see. No drift.
+        * Eliminates per-cursor SWIG roundtrips into IDA — these are
+          plain dict lookups after the first build.
+        * Sidesteps the "``XrefsFrom(func_start)`` only sees the
+          prologue" foot-gun the previous version stepped on with
+          thunks.
+
+        We still touch IDA once per (parent, child) entry at build
+        time to drop targets that aren't function starts (the cache
+        contains every outgoing reference, including data refs to
+        ``.rdata`` etc.). That's a one-shot O(refs) pass on first
+        access, then everything below is pure-Python.
+
+        IDA-API usage is intentionally confined to ``view.py`` (the
+        IDA-side GUI code). The analyzer stays on the backend
+        abstraction.
+        """
+        if getattr(self, "_callgraph_callees_cache", None) is not None:
+            return
+        callees: Dict[int, List[Tuple[int, int]]] = {}
+        callers: Dict[int, List[Tuple[int, int]]] = {}
+        raw_cache = getattr(self.xrefer_obj, "caller_xrefs_cache", {}) or {}
+        for parent_ea, child_map in raw_cache.items():
+            try:
+                parent_int = int(parent_ea)
+            except Exception:
+                continue
+            for child_ea, source_addrs in child_map.items():
+                try:
+                    child_int = int(child_ea)
+                except Exception:
+                    continue
+                if child_int == parent_int:
+                    continue  # self-recursion isn't useful for callgraph hops
+                try:
+                    tgt_func = ida_funcs.get_func(ida_idaapi.ea_t(child_int))
+                except Exception:
+                    tgt_func = None
+                if tgt_func is None or tgt_func.start_ea != child_int:
+                    continue  # not a function start — skip data refs, jump-table entries, etc.
+                for addr in source_addrs:
+                    try:
+                        addr_int = int(addr)
+                    except Exception:
+                        continue
+                    callees.setdefault(parent_int, []).append((child_int, addr_int))
+                    callers.setdefault(child_int, []).append((parent_int, addr_int))
+        self._callgraph_callees_cache = callees
+        self._callgraph_callers_cache = callers
+
+    def _iter_callees(self, func_ea: int) -> Iterator[Tuple[int, int]]:
+        """Yield ``(callee_func_start, call_site_addr)`` for every
+        unique function called or jumped to from anywhere inside
+        ``func_ea`` — sourced from the analyzer's pre-built call
+        graph (``caller_xrefs_cache``), not a fresh IDA query.
+
+        See :meth:`_ensure_callgraph_indices` for why we read from the
+        cache rather than asking IDA per cursor move.
+        """
+        self._ensure_callgraph_indices()
+        seen: Set[int] = set()
+        for callee_ea, addr in self._callgraph_callees_cache.get(int(func_ea), ()):
+            if callee_ea in seen:
+                continue
+            seen.add(callee_ea)
+            yield (callee_ea, addr)
+
+    def _iter_callers(self, func_ea: int) -> Iterator[Tuple[int, int]]:
+        """Yield ``(caller_func_start, call_site_addr)`` for every
+        unique function that calls or jumps to ``func_ea`` — sourced
+        from the lazily-built reverse index off
+        ``caller_xrefs_cache``.
+
+        See :meth:`_ensure_callgraph_indices` for the rationale.
+        """
+        self._ensure_callgraph_indices()
+        seen: Set[int] = set()
+        for caller_ea, addr in self._callgraph_callers_cache.get(int(func_ea), ()):
+            if caller_ea in seen:
+                continue
+            seen.add(caller_ea)
+            yield (caller_ea, addr)
+
+    def _nearest_clusters_via_callgraph(self, max_depth: int = 3, max_results: int = 3) -> List[Tuple[int, int, int, str]]:
+        """BFS the call graph (callers first, then callees) outward
+        from the cursor function until cluster members are found.
+
+        Used by the banner when the cursor is on an unclassified
+        function so the analyst gets an actionable "nearest cluster"
+        hint instead of the dead-end ``not in any cluster`` message.
+        Direct (1-hop) neighbours are already surfaced by
+        ``_adjacent_clusters_for_cursor`` — this method extends the
+        reach a couple more hops so functions that are deep in
+        glue / boilerplate code still resolve to a useful navigation
+        anchor.
+
+        Caller direction is searched first (an analyst landing on a
+        function usually wants to know "who called me into this
+        thicket"). Callee direction is searched second as a fallback.
+
+        Returns up to ``max_results`` entries
+        ``(cluster_id, hop_count, gateway_func_ea, direction)``
+        where ``direction`` is either ``"caller"`` or ``"callee"`` and
+        ``gateway_func_ea`` is the cluster-member function that was
+        hit.
+        """
+        if not self.func_ea or max_depth < 1:
+            return []
+        func_to_clusters = self._func_to_cluster_ids()
+        found: Dict[int, Tuple[int, int, str]] = {}
+
+        def walk(direction: str) -> None:
+            if len(found) >= max_results:
+                return
+            seen: Set[int] = {self.func_ea}
+            frontier: List[Tuple[int, int]] = [(self.func_ea, 0)]
+            while frontier and len(found) < max_results:
+                ea, depth = frontier.pop(0)
+                if depth >= max_depth:
+                    continue
+                neighbours = self._iter_callers(ea) if direction == "caller" else self._iter_callees(ea)
+                for neighbor_ea, edge_addr in neighbours:
+                    if neighbor_ea in seen:
+                        continue
+                    seen.add(neighbor_ea)
+                    clusters_here = func_to_clusters.get(neighbor_ea, ())
+                    landed = False
+                    for cid in clusters_here:
+                        if cid not in found:
+                            found[cid] = (depth + 1, neighbor_ea, direction)
+                            landed = True
+                    if not landed:
+                        frontier.append((neighbor_ea, depth + 1))
+
+        walk("caller")
+        walk("callee")
+        return sorted(
+            ((cid, depth, gateway_ea, direction) for cid, (depth, gateway_ea, direction) in found.items()),
+            key=lambda t: (t[1], t[0]),  # nearest first, then deterministic by cluster id
+        )
+
+    def _adjacent_clusters_for_cursor(self, exclude_ids: Set[int]) -> List[Tuple[int, int, int, str]]:
+        """Find clusters that contain a direct caller or callee of the
+        function under the cursor — a 1-hop callgraph neighbor that
+        belongs to a cluster not already accounted for by the
+        member / intermediate tiers.
+
+        Returns ``[(cluster_id, neighbor_func_ea, edge_addr, direction), …]``
+        where ``direction`` is ``"caller"`` (a function in that cluster
+        calls cursor) or ``"callee"`` (cursor calls a function in that
+        cluster). At most one entry per cluster — the first
+        relationship discovered, preferring callers (callers are the
+        more useful direction for navigation).
+        """
+        if not self.func_ea:
+            return []
+
+        func_to_clusters = self._func_to_cluster_ids()
+        seen: Dict[int, Tuple[int, int, str]] = {}
+
+        # Callers first: callers naturally reference the function's
+        # entry point, so a single XrefsTo on the start address (via
+        # _iter_callers) finds them all.
+        for caller_ea, edge_addr in self._iter_callers(self.func_ea):
+            for cid in func_to_clusters.get(caller_ea, ()):
+                if cid in exclude_ids or cid in seen:
+                    continue
+                seen[cid] = (caller_ea, edge_addr, "caller")
+
+        # Callees second: must walk every instruction inside the
+        # function (via _iter_callees) — the JMP/CALL we're after sits
+        # on a non-prologue instruction and is invisible to a single
+        # XrefsFrom(start). Without this, thunks like
+        # ``push/mov/pop/jmp clustered_func`` show up as having no
+        # callee adjacency at all.
+        for callee_ea, edge_addr in self._iter_callees(self.func_ea):
+            for cid in func_to_clusters.get(callee_ea, ()):
+                if cid in exclude_ids or cid in seen:
+                    continue
+                seen[cid] = (callee_ea, edge_addr, "callee")
+
+        return [(cid, neighbor, addr, direction) for cid, (neighbor, addr, direction) in seen.items()]
+
+    def _intermediate_gateways_for_cursor(self) -> List[Tuple[int, int, int, str]]:
+        """For each cluster the cursor is an *intermediate of*, find
+        the closest path endpoint (a member of that cluster) and
+        return it as a gateway.
+
+        The 1-hop ``_adjacent_clusters_for_cursor`` query misses
+        intermediate-of relationships because the path from cursor to
+        a cluster member typically routes through other intermediate
+        functions (``member → intermediate_A → cursor → intermediate_B
+        → member``), so cursor's direct neighbors aren't members.
+        This method walks ``cluster.intermediate_paths`` (path tuples
+        include endpoints — see
+        ``ClusterManager.simplify_path_with_intermediates``) and picks
+        the closer of the two endpoints per cluster.
+
+        Returns ``[(cluster_id, gateway_func_ea, hops, direction), …]``
+        where ``hops`` is the number of edges between cursor and the
+        gateway, and ``direction`` is ``"caller"`` if the gateway is
+        upstream from cursor (path source) or ``"callee"`` if
+        downstream (path target).
+        """
+        if not self.func_ea:
+            return []
+
+        # cluster_id → (gateway_ea, hops, direction) — keep the closest
+        # endpoint when the same cursor appears in multiple paths under
+        # the same cluster.
+        best: Dict[int, Tuple[int, int, str]] = {}
+
+        def consider(cluster_id: int, gateway_ea: int, hops: int, direction: str) -> None:
+            existing = best.get(cluster_id)
+            if existing is None or hops < existing[1]:
+                best[cluster_id] = (gateway_ea, hops, direction)
+
+        def walk(cluster: "FunctionalCluster") -> None:
+            for (_src, _tgt), paths in (cluster.intermediate_paths or {}).items():
+                for path in paths:
+                    try:
+                        idx = path.index(self.func_ea)
+                    except ValueError:
+                        continue
+                    if idx <= 0 or idx >= len(path) - 1:
+                        # Endpoint, not intermediate — skip.
+                        continue
+                    src_hops = idx                  # cursor → … → path[0]
+                    tgt_hops = len(path) - 1 - idx  # cursor → … → path[-1]
+                    if src_hops <= tgt_hops:
+                        consider(cluster.id, path[0], src_hops, "caller")
+                    else:
+                        consider(cluster.id, path[-1], tgt_hops, "callee")
+            for sub in cluster.subclusters or []:
+                walk(sub)
+
+        for top in self.xrefer_obj.clusters or []:
+            walk(top)
+
+        return [(cid, gw, hops, direction) for cid, (gw, hops, direction) in best.items()]
+
+    def _classify_cursor_relative_to_clusters(self, current_cluster_id: Optional[int]) -> Tuple[str, List[int]]:
+        """Decide what status to show for ``self.func_ea`` relative to the
+        cluster the user is currently viewing.
+
+        Returns ``(status_kind, cluster_ids)``:
+
+        * ``"in_current"``: the cursor is in ``current_cluster_id``.
+          ``cluster_ids`` is ``[current_cluster_id]``.
+        * ``"in_other"``: the cursor is in some other cluster(s).
+          ``cluster_ids`` lists every cluster (sorted) that contains the
+          function — useful for surfacing multi-cluster ``xutil_``
+          membership in step D.
+        * ``"intermediate"``: the cursor isn't in any cluster's nodes
+          but appears in one or more cluster intermediate paths.
+          ``cluster_ids`` lists those cluster ids.
+        * ``"unclassified"``: the cursor isn't in any cluster or
+          intermediate path. ``cluster_ids`` is empty.
+        * ``"no_function"``: the cursor isn't on a recognised function
+          at all (or func_ea is unset).
+        """
+        if not self.func_ea:
+            return ("no_function", [])
+        func = ida_funcs.get_func(ida_idaapi.ea_t(int(self.func_ea)))
+        if func is None:
+            return ("no_function", [])
+
+        containing: List[int] = []
+
+        def walk(c: "FunctionalCluster") -> None:
+            if self.func_ea in c.nodes or self.func_ea == c.root_node:
+                containing.append(c.id)
+            for sc in c.subclusters:
+                walk(sc)
+
+        for top in self.xrefer_obj.clusters or []:
+            walk(top)
+
+        if containing:
+            unique_ids = sorted(set(containing))
+            if current_cluster_id is not None and current_cluster_id in unique_ids:
+                return ("in_current", unique_ids)
+            return ("in_other", unique_ids)
+
+        # Not in any cluster's nodes — check intermediate paths.
+        intermediate_owners: List[int] = []
+
+        def walk_intermediate(c: "FunctionalCluster") -> None:
+            for (_src, _tgt), paths in c.intermediate_paths.items():
+                for path in paths:
+                    if self.func_ea in path:
+                        intermediate_owners.append(c.id)
+                        return
+            for sc in c.subclusters:
+                walk_intermediate(sc)
+
+        for top in self.xrefer_obj.clusters or []:
+            walk_intermediate(top)
+
+        if intermediate_owners:
+            return ("intermediate", sorted(set(intermediate_owners)))
+        return ("unclassified", [])
+
+    def _format_cluster_chip(self, cluster_id: int, is_current: bool = False) -> str:
+        """Format a single cluster as a compact, *pre-coloured* chip
+        suitable for inline use in the banner.
+
+        Output: ``★ cluster.id.NNNN - Label`` in ``SCOLOR_DEMNAME``
+        (the same color used for cluster IDs in ``print_cluster_xrefs``
+        and ``print_cluster_membership``), with an optional dimmed
+        ``(this view)`` suffix in ``SCOLOR_VOIDOP`` when the chip
+        refers to the cluster currently being rendered.
+
+        ``cluster.id.NNNN`` is intentionally written in the same shape
+        used by the other views so the existing ``parse_cluster_id``
+        click handler navigates from these chips for free.
+        """
+        label = self._cluster_short_label(cluster_id)
+        body = f"★ cluster.id.{cluster_id:04d}"
+        if label:
+            body += f" - {label}"
+        out = ida_lines.COLSTR(body, ida_lines.SCOLOR_DEMNAME)
+        if is_current:
+            out += " " + ida_lines.COLSTR("(this view)", ida_lines.SCOLOR_VOIDOP)
+        return out
+
+    # Banner indentation + label-column width chosen so that values
+    # line up vertically across rows and match the four-space indent
+    # used by every other section in the cluster view (see
+    # _print_cluster_header / print_cluster_xrefs).
+    _BANNER_INDENT = "    "
+    _BANNER_LABEL_WIDTH = 11  # max label "Adjacent: " padded to 11 chars
+
+    def _banner_field(self, label: str, value: str, continuation: Optional[List[str]] = None) -> List[str]:
+        """Render a banner row as ``Label:    value`` plus any
+        continuation lines indented to the value column.
+
+        Labels are coloured ``SCOLOR_DNAME`` (matching the
+        ``Description:`` / ``Binary Category:`` style used by the
+        cluster header section). Values are passed through verbatim so
+        the caller controls cluster-chip / address / count colouring.
+        """
+        padded = label.ljust(self._BANNER_LABEL_WIDTH)
+        label_str = ida_lines.COLSTR(padded, ida_lines.SCOLOR_DNAME)
+        out: List[str] = [f"{self._BANNER_INDENT}{label_str}{value}"]
+        if continuation:
+            cont_indent = " " * self._BANNER_LABEL_WIDTH
+            for cont in continuation:
+                out.append(f"{self._BANNER_INDENT}{cont_indent}{cont}")
+        return out
+
+    def _format_status_value(self, status_kind: str, cluster_ids: List[int], current_cluster_id: Optional[int]) -> Tuple[str, Optional[List[str]]]:
+        """Return ``(value, continuation_lines_or_None)`` for the
+        Status banner row, given the cursor's classification.
+
+        Continuation lines are dimmed hint text or actionable
+        prompts (e.g. ``press M to view paths``); the primary value
+        carries the high-signal info.
+        """
+        # Centralised colour helpers — keeps row-by-row code compact.
+        def count_chip(text: str) -> str:
+            return ida_lines.COLSTR(text, ida_lines.SCOLOR_VOIDOP)
+
+        def hint(text: str) -> str:
+            return ida_lines.COLSTR(text, ida_lines.SCOLOR_DSTR)
+
+        def action(text: str) -> str:
+            return ida_lines.COLSTR(text, ida_lines.SCOLOR_SEGNAME)
+
+        if status_kind == "in_current":
+            if len(cluster_ids) == 1:
+                return ida_lines.COLSTR("in this cluster", ida_lines.SCOLOR_DEMNAME), None
+            others = len(cluster_ids) - 1
+            value = (
+                ida_lines.COLSTR("xutil", ida_lines.SCOLOR_DATNAME)
+                + " — in this cluster + "
+                + count_chip(f"{others} other(s)")
+            )
+            return value, [hint("see Roles section below for full list")]
+
+        if status_kind == "in_other":
+            if len(cluster_ids) == 1:
+                chip = self._format_cluster_chip(cluster_ids[0])
+                return f"in {chip}", None
+            value = (
+                ida_lines.COLSTR("xutil", ida_lines.SCOLOR_DATNAME)
+                + " — in "
+                + count_chip(f"{len(cluster_ids)} clusters")
+            )
+            return value, [hint("see Roles section below for full list")]
+
+        if status_kind == "intermediate":
+            # Only advertise M when the current state actually wires
+            # the key — otherwise the hint is misleading (the analyst
+            # presses M and nothing happens). M is bound from
+            # cluster_graphs / pinned_cluster_graphs (in-place toggle)
+            # and from base / clusters / neighborhood states (cross-
+            # view jump that lands inside cluster_graphs with the
+            # intermediate sub-view auto-activated).
+            sm = self.state_machine
+            m_states = (
+                sm.cluster_graphs,
+                sm.pinned_cluster_graphs,
+                sm.base,
+                sm.clusters,
+                sm.neighborhood_graph,
+                sm.pinned_neighborhood_graph,
+            )
+            m_active = sm.current_state in m_states
+            m_hint = action("press M to see which cluster members this function bridges") if m_active else None
+            if len(cluster_ids) == 1:
+                chip = self._format_cluster_chip(cluster_ids[0], is_current=(cluster_ids[0] == current_cluster_id))
+                cont = [m_hint] if m_hint else None
+                return f"intermediate of {chip}", cont
+            value = "intermediate of " + count_chip(f"{len(cluster_ids)} clusters")
+            cont = [hint("see Roles section below for full list")]
+            if m_hint:
+                cont.append(m_hint)
+            return value, cont
+
+        # unclassified
+        nearest = self._nearest_clusters_via_callgraph(max_depth=3, max_results=1)
+        if nearest:
+            cid, hops, gateway_ea, direction = nearest[0]
+            chip = self._format_cluster_chip(cid, is_current=(cid == current_cluster_id))
+            arrow = ida_lines.COLSTR("←" if direction == "caller" else "→", ida_lines.SCOLOR_VOIDOP)
+            try:
+                gateway_name = idc.get_func_name(ida_idaapi.ea_t(int(gateway_ea))) or ""
+            except Exception:
+                gateway_name = ""
+            via = ida_lines.COLSTR(f"0x{gateway_ea:x}", ida_lines.SCOLOR_DEMNAME)
+            if gateway_name:
+                via += f" ({gateway_name})"
+            hop_text = count_chip(f"{hops} hop{'s' if hops != 1 else ''}")
+            value = ida_lines.COLSTR("not in any cluster", ida_lines.SCOLOR_DSTR)
+            cont = [f"↳ nearest: {chip} {arrow} {via}  ({hop_text})"]
+            return value, cont
+        return (
+            ida_lines.COLSTR("not in any cluster", ida_lines.SCOLOR_DSTR),
+            [hint("(no nearby cluster within 3 hops)")],
+        )
+
+    def _build_cluster_context_banner(
+        self,
+        current_cluster_id: Optional[int],
+        view_label: Optional[str] = None,
+        show_sync: bool = True,
+    ) -> List[str]:
+        """Build the colored banner shown at the top of various views.
+
+        Layout — one field per line, label-aligned, coloured to match
+        the rest of the cluster UI:
+
+        ::
+
+            View:       ★ cluster.id.NNNN - Label   sync: ON
+            Cursor:     0x...  func_name
+            Status:     <classification>
+                        ↳ contextual hint
+            Adjacent:
+                        ↳ ★ cluster.id.AAAA - … ← 0x...
+                        ↳ ★ cluster.id.BBBB - … → 0x...
+
+        Field labels use ``SCOLOR_DNAME`` (matching ``Description:`` /
+        ``Binary Category:`` in the cluster header), cluster chips use
+        ``SCOLOR_DEMNAME`` (matching ``print_cluster_xrefs`` and the
+        Roles section), counts use ``SCOLOR_VOIDOP`` (matching the
+        cluster-graph and orphan-table headers), hints are dimmed in
+        ``SCOLOR_DSTR``, and actionable prompts (``press M …``) use
+        ``SCOLOR_SEGNAME``.
+
+        Args:
+            current_cluster_id: When set and ``view_label`` is None,
+                the View row renders the cluster chip for that id.
+                Also threaded into the cursor-classification logic so
+                ``(this view)`` annotations resolve correctly.
+            view_label: Optional plain text to use as the View row
+                value, overriding the auto-generated cluster chip.
+                Used by non-cluster views (base xrefs, paths graph,
+                etc.) where the View row should describe what the
+                analyst is actually looking at, not "cluster
+                relationship overview" by default.
+            show_sync: When False, the View row omits the
+                ``sync: ON/OFF`` chip entirely. Sync state is only
+                meaningful inside cluster-graph states; non-cluster
+                callers should pass False to avoid misleading the
+                analyst about behavior that doesn't apply.
+        """
+        out: List[str] = []
+
+        # ── View row ────────────────────────────────────────────────
+        sync_chip = ""
+        if show_sync:
+            sync_on = self.state_machine.cluster_sync_enabled
+            sync_color = ida_lines.SCOLOR_VOIDOP if sync_on else ida_lines.SCOLOR_DSTR
+            sync_chip = "   " + ida_lines.COLSTR(f"sync: {'ON' if sync_on else 'OFF'}", sync_color)
+        if view_label is not None:
+            view_value = ida_lines.COLSTR(view_label, ida_lines.SCOLOR_DSTR) + sync_chip
+        elif current_cluster_id is not None:
+            view_value = self._format_cluster_chip(current_cluster_id) + sync_chip
+        else:
+            view_value = (
+                ida_lines.COLSTR("cluster relationship overview", ida_lines.SCOLOR_DSTR)
+                + sync_chip
+            )
+        out.extend(self._banner_field("View:", view_value))
+
+        # ── Cursor row ─────────────────────────────────────────────
+        try:
+            on_func = ida_funcs.get_func(ida_idaapi.ea_t(int(self.func_ea))) is not None if self.func_ea else False
+        except Exception:
+            on_func = False
+        if not self.func_ea or not on_func:
+            cursor_value = ida_lines.COLSTR("(not inside a recognised function)", ida_lines.SCOLOR_DSTR)
+            out.extend(self._banner_field("Function:", cursor_value))
+            return out
+
+        try:
+            fname = idc.get_func_name(ida_idaapi.ea_t(int(self.func_ea))) or ""
+        except Exception:
+            fname = ""
+        addr_chip = ida_lines.COLSTR(f"0x{self.func_ea:x}", ida_lines.SCOLOR_DEMNAME)
+        name_part = f"  {ida_lines.COLSTR(fname, ida_lines.SCOLOR_LIBNAME)}" if fname else ""
+        out.extend(self._banner_field("Function:", f"{addr_chip}{name_part}"))
+
+        # ── Status row ─────────────────────────────────────────────
+        # Both the M and V discoverability hints live as continuation
+        # lines of the Status row so they share a single indentation
+        # column — no separate "Hint:" label that would make the two
+        # cross-promotion hints look asymmetric.
+        status_kind, cluster_ids = self._classify_cursor_relative_to_clusters(current_cluster_id)
+        if status_kind == "no_function":
+            return out  # already short-circuited above; defensive
+
+        # Compute the 1-hop adjacency once — it feeds both the
+        # Adjacent row below and the V-hint applicability check.
+        adj = self._adjacent_clusters_for_cursor(exclude_ids=set(cluster_ids))
+
+        # V hint applies whenever the neighborhood view would actually
+        # have something to draw (1-hop adjacency, intermediate-of, or
+        # a BFS hit). Suppressed inside the neighborhood view itself.
+        sm = self.state_machine
+        v_hint: Optional[str] = None
+        if sm.current_state not in (sm.neighborhood_graph, sm.pinned_neighborhood_graph):
+            v_has_content = (
+                bool(adj)
+                or bool(self._intermediate_gateways_for_cursor())
+                or bool(self._nearest_clusters_via_callgraph(max_depth=3, max_results=1))
+            )
+            if v_has_content:
+                v_hint = ida_lines.COLSTR(
+                    "press V to see which clusters this function can reach",
+                    ida_lines.SCOLOR_SEGNAME,
+                )
+
+        status_value, status_cont = self._format_status_value(status_kind, cluster_ids, current_cluster_id)
+        all_cont: List[str] = list(status_cont) if status_cont else []
+        if v_hint:
+            all_cont.append(v_hint)
+        out.extend(self._banner_field("Status:", status_value, all_cont if all_cont else None))
+
+        # ── Adjacent row (call-graph 1-hop, only when non-empty) ───
+        if adj:
+            adj.sort(key=lambda t: t[0])
+            shown = adj[:5]
+            cont: List[str] = []
+            for cid, _neighbor_ea, edge_addr, direction in shown:
+                chip = self._format_cluster_chip(cid)
+                arrow = ida_lines.COLSTR("←" if direction == "caller" else "→", ida_lines.SCOLOR_VOIDOP)
+                edge = ida_lines.COLSTR(f"0x{edge_addr:x}", ida_lines.SCOLOR_DEMNAME)
+                cont.append(f"↳ {chip} {arrow} {edge}")
+            if len(adj) > len(shown):
+                cont.append(ida_lines.COLSTR(f"↳ …and {len(adj) - len(shown)} more", ida_lines.SCOLOR_DSTR))
+            # Empty primary value — the meaningful content is in the
+            # continuation chips, presented as a clean nested list.
+            out.extend(self._banner_field("Adjacent:", "", cont))
+
+        return out
 
     def find_function_in_clusters(self, func_ea: int, current_cluster_id: Optional[int] = None) -> Optional[Tuple[int, bool]]:
         """
@@ -2524,21 +3658,41 @@ class XReferView(idaapi.simplecustviewer_t):
             cluster_info = format_cluster_info(cluster.id)
 
             # First check if function is root node
+            is_member_here = False
             if func_ea == cluster.root_node:
                 root_memberships.append((cluster_info, parent_id))
+                is_member_here = True
             # Check if function is regular node (but not root node)
             elif func_ea in cluster.nodes:  # Only add as regular node if not root
                 direct_memberships.append((cluster_info, parent_id))
+                is_member_here = True
 
-            found_intermediate = False
-            for _, paths in cluster.intermediate_paths.items():
-                if found_intermediate:
-                    break
-                for path in paths:
-                    if func_ea in path and func_ea != path[0] and func_ea != path[-1]:
-                        intermediate_memberships.append((cluster_info, parent_id))
-                        found_intermediate = True
+            # Only classify as "intermediary in this cluster" when the
+            # function is *not* already a member of this cluster, AND
+            # the path's endpoints are themselves direct members of
+            # this cluster.
+            #
+            # The endpoint-membership check filters out paths that
+            # were copied up from subclusters by ``extract_cluster``
+            # (clusters.py:585-586 / :592-593). Those paths' endpoints
+            # are subcluster members, not parent members, so calling
+            # the cursor function "intermediary in the parent" would
+            # be misleading — the path doesn't actually connect any
+            # of the parent's own member functions.
+            if not is_member_here:
+                found_intermediate = False
+                for (src, tgt), paths in cluster.intermediate_paths.items():
+                    if found_intermediate:
                         break
+                    src_is_member = (src == cluster.root_node) or (src in cluster.nodes)
+                    tgt_is_member = (tgt == cluster.root_node) or (tgt in cluster.nodes)
+                    if not (src_is_member and tgt_is_member):
+                        continue
+                    for path in paths:
+                        if func_ea in path and func_ea != path[0] and func_ea != path[-1]:
+                            intermediate_memberships.append((cluster_info, parent_id))
+                            found_intermediate = True
+                            break
 
             # Recursively check subclusters
             for subcluster in cluster.subclusters:
@@ -2589,15 +3743,24 @@ class XReferView(idaapi.simplecustviewer_t):
                 self.AddLine(cluster_text)
             self.AddLine("")
 
-        # Print intermediate memberships if any
+        # Intermediate memberships are demoted to a one-line summary.
+        # The intermediary role is structurally weaker than membership
+        # (the function is just on a call path between two cluster
+        # members, not itself an "interesting" member) and listing
+        # every intermediary cluster usually adds noise without
+        # changing what the analyst does next. The count + first label
+        # gives enough signal that this function is connective tissue
+        # in N clusters; the cluster relationship graph and the
+        # intermediate-paths drill-down view (M key) are where you'd
+        # go for detail.
         if intermediate_memberships:
-            self.AddLine(f"    \x01{ida_lines.SCOLOR_ALTOP}As intermediary node in:\x02{ida_lines.SCOLOR_ALTOP}")
-            for info, parent_id in intermediate_memberships:
-                prefix = "└──" if parent_id else "●"
-                cluster_text = f"    {prefix} \x01{ida_lines.SCOLOR_ALTOP}{info}\x02{ida_lines.SCOLOR_ALTOP}"
-                if parent_id:
-                    cluster_text += f" \x01{ida_lines.SCOLOR_DSTR}(subcluster)\x02{ida_lines.SCOLOR_DSTR}"
-                self.AddLine(cluster_text)
+            count = len(intermediate_memberships)
+            sample_info = intermediate_memberships[0][0]
+            if count == 1:
+                summary = f"Also intermediary in {sample_info}"
+            else:
+                summary = f"Also intermediary in {count} cluster(s) — including {sample_info}"
+            self.AddLine(f"    \x01{ida_lines.SCOLOR_ALTOP}{summary}\x02{ida_lines.SCOLOR_ALTOP}")
 
         # Add final spacing
         self.AddLine("")
@@ -2654,40 +3817,72 @@ class XReferView(idaapi.simplecustviewer_t):
             for top_c in self.xrefer_obj.clusters:
                 gather_all_cluster_nodes(top_c, global_all_nodes)
 
-            # If cluster sync is on, see if current func belongs here
-            if self.state_machine.cluster_sync_enabled and self.func_ea:
-                if self.func_ea not in all_nodes:
-                    if self.func_ea not in global_all_nodes:
-                        # Possibly an intermediate function
-                        containing_paths = self._get_intermediate_paths_containing_function(self.func_ea)
-                        if containing_paths:
-                            # Show specialized intermediate function graph
-                            self.draw_intermediate_function_graph(self.func_ea)
-                            return
+            # If the user has explicitly entered the intermediate-paths
+            # sub-view (M key), render that instead of the cluster's
+            # node graph. Replaces the previous auto-trigger that fired
+            # whenever cursor sync landed on a function outside any
+            # cluster — that auto-trigger was disorienting because the
+            # view morphed silently. Now it only fires on deliberate
+            # opt-in.
+            if self.state_machine.intermediate_view_func_ea is not None:
+                self.draw_intermediate_function_graph(self.state_machine.intermediate_view_func_ea)
+                return
 
-                    # If we reach here, the function is not recognized in the new cluster
-                    # Decide if we skip or show "FUNCTION NOT FOUND"
-
-                    if self._explicit_cluster_click:
-                        # We specifically clicked on this cluster's ID, so we skip "not found"
-                        # and proceed to show the cluster. Then reset the flag for next time.
-                        self._explicit_cluster_click = False
-                    else:
-                        # We are just browsing around with cluster sync on
-                        self.AddLine("")
-                        self.AddLine(f"{self.INDENT}FUNCTION NOT FOUND IN ANY DISCOVERED CLUSTERS OR INTERMEDIATE NODES")
-                        return
+            # We used to dead-end here with "FUNCTION NOT FOUND IN ANY
+            # DISCOVERED CLUSTERS OR INTERMEDIATE NODES" whenever
+            # cluster sync's cursor moved to a function not in this
+            # cluster's nodes. That message paired with the old
+            # auto-trigger of the intermediate view: if the function
+            # was intermediate, the auto-trigger fired BEFORE this
+            # check; if it wasn't, the dead-end was the result.
+            #
+            # Now that the intermediate view is opt-in via M (Step G),
+            # falling through to "FUNCTION NOT FOUND" leaves the
+            # analyst with a useless dead-end on every xint_ cursor
+            # landing. Instead, just render the current cluster and
+            # let the banner above explain where the cursor actually
+            # lives ("intermediate of cluster X — press M to view
+            # paths", "in cluster Y", "not in any cluster", etc.).
+            #
+            # The ``_explicit_cluster_click`` reset below is preserved
+            # because some callers expect the flag to be cleared after
+            # a draw, even though we no longer branch on it.
+            if self._explicit_cluster_click:
+                self._explicit_cluster_click = False
 
             # If we get here, either the function is recognized or user explicitly clicked.
             # Proceed to show the cluster as normal.
 
-            # 1) Print the cluster's header
+            # Cursor-related information up top, then cluster-level
+            # information, then the graph itself. This keeps the
+            # analyst's eye flowing from "where am I?" → "what is
+            # this cluster?" → "how is it shaped?" without splitting
+            # cursor info across two separated sections.
+
+            # 1) Banner — compact cursor summary + view context.
+            for line in self._build_cluster_context_banner(cluster_id):
+                self.AddLine(line)
+            self.AddLine("")
+
+            # 2) Detailed cursor role breakdown (root / regular /
+            #    intermediary) across every cluster + subcluster, so
+            #    the analyst doesn't have to ESC back to the base
+            #    xrefs view to see it. Empty when the cursor isn't on
+            #    a function with any cluster ties.
+            if self.func_ea:
+                self.print_cluster_membership(self.func_ea)
+
+            # 3) Cluster-level header — description, label, LLM
+            #    relationships. Stable per cluster, doesn't change as
+            #    the cursor moves.
             self._print_cluster_header(cluster, cluster_data)
 
-            # 2) Print cross-references to cluster root
+            # 4) Cluster connectivity — which other clusters call into
+            #    this cluster's root. Also cluster-level, not cursor-
+            #    related.
             self.print_cluster_xrefs(cluster, self.INDENT)
 
-            # 3) Draw cluster's internal graph and subclusters
+            # 5) The graph itself.
             self._draw_cluster_nodes(cluster, self.func_ea)
 
         except Exception as e:
@@ -2998,6 +4193,10 @@ class XReferView(idaapi.simplecustviewer_t):
             self.AddLine(f"{self.INDENT}\x01{ida_lines.SCOLOR_SEGNAME}- Press J to enable cluster sync (currently OFF)\x02{ida_lines.SCOLOR_SEGNAME}")
 
         self.AddLine(f"{self.INDENT}\x01{ida_lines.SCOLOR_SEGNAME}- Press C to toggle between cluster table and cluster graph view\x02{ida_lines.SCOLOR_SEGNAME}")
+        if self.state_machine.hide_library_clusters:
+            self.AddLine(f"{self.INDENT}\x01{ida_lines.SCOLOR_SEGNAME}- Press L to show library clusters (currently hidden)\x02{ida_lines.SCOLOR_SEGNAME}")
+        else:
+            self.AddLine(f"{self.INDENT}\x01{ida_lines.SCOLOR_SEGNAME}- Press L to hide library clusters (currently shown)\x02{ida_lines.SCOLOR_SEGNAME}")
         self.AddLine(f"{self.INDENT}\x01{ida_lines.SCOLOR_SEGNAME}- Press R to go back to cluster relationship graph\x02{ida_lines.SCOLOR_SEGNAME}")
         self.AddLine(f"{self.INDENT}\x01{ida_lines.SCOLOR_SEGNAME}- ESC to navigate back\x02{ida_lines.SCOLOR_SEGNAME}")
 
@@ -3389,9 +4588,12 @@ class XReferView(idaapi.simplecustviewer_t):
             self.state_machine.boundary_results: self.draw_boundary_scan_results,
             self.state_machine.last_boundary_results: self.draw_last_boundary_scan_results,
             self.state_machine.interesting_artifacts: self.draw_interesting_artifacts,
+            self.state_machine.orphans: self.draw_orphans,
             self.state_machine.clusters: self.draw_clusters,
             self.state_machine.cluster_graphs: self.draw_cluster_graph,
             self.state_machine.pinned_cluster_graphs: self.draw_cluster_graph,
+            self.state_machine.neighborhood_graph: self.draw_neighborhood_graph,
+            self.state_machine.pinned_neighborhood_graph: self.draw_neighborhood_graph,
             self.state_machine.trace_scope_function: self.handle_trace_scope_function,
             self.state_machine.trace_scope_path: self.handle_trace_scope_path,
             self.state_machine.trace_scope_full: self.handle_trace_scope_full,
@@ -3493,6 +4695,19 @@ class XReferView(idaapi.simplecustviewer_t):
 
         if ida_funcs.get_func(self.func_ea):
             if self.func_ea in self.xrefer_obj.global_xrefs:
+                # Sticky context banner — same one used by the cluster
+                # graph view so the analyst gets a consistent "where
+                # am I" anchor across the whole xrefer UI. Sync state
+                # is hidden here because it only governs cluster-graph
+                # behavior; surfacing it in the base view would imply
+                # functionality that doesn't exist in this context.
+                for line in self._build_cluster_context_banner(
+                    current_cluster_id=None,
+                    view_label="function context (xrefs)",
+                    show_sync=False,
+                ):
+                    self.AddLine(line)
+                self.AddLine("")
                 self.print_cluster_membership(self.func_ea)
                 self.draw_function_context_tables(self.func_ea)
             else:
@@ -3934,6 +5149,7 @@ class XReferView(idaapi.simplecustviewer_t):
 
         # Update heading based on graph type
         is_simplified = self.state_machine.is_simplified_graph()
+        is_pinned = self.state_machine.is_pinned_graph()
         graph_type = "SIMPLIFIED " if is_simplified else ""
         heading: str = f"    \x01{ida_lines.SCOLOR_DEMNAME}{graph_type}PATHS (entry_point(s) -> {colored_entity})\x02{ida_lines.SCOLOR_DEMNAME}"
 
@@ -4061,6 +5277,25 @@ class XReferView(idaapi.simplecustviewer_t):
         self.AddLine(heading)
         self.AddLine(heading_underline)
 
+        # Sticky context banner — same shape as the cluster graph view
+        # so the analyst keeps a consistent "where am I" anchor while
+        # following an artifact path. View label describes this view
+        # explicitly (paths-to-artifact, possibly simplified / pinned)
+        # rather than a cluster context. Sync hidden because cluster
+        # sync only governs cluster-graph behavior.
+        paths_view_label = "artifact path graph"
+        if is_simplified:
+            paths_view_label = "simplified " + paths_view_label
+        if is_pinned:
+            paths_view_label += " (pinned)"
+        for line in self._build_cluster_context_banner(
+            current_cluster_id=None,
+            view_label=paths_view_label,
+            show_sync=False,
+        ):
+            self.AddLine(line)
+        self.AddLine("")
+
         # Add node reduction info if in simplified mode
         if is_simplified and num_original_nodes > num_simplified_nodes:
             reduction = (num_original_nodes - num_simplified_nodes) / num_original_nodes * 100
@@ -4076,6 +5311,207 @@ class XReferView(idaapi.simplecustviewer_t):
             line = wrap_substring_with_string(line, func_ea, "\x01\x12", "\x02\x12", case=True)
             line = wrap_substring_with_string(line, entity_content, entity_wrap_start, entity_wrap_end, True)
             self.AddLine(f"        {line}")
+
+        self.Refresh()
+
+    # ── Neighborhood graph ─────────────────────────────────────────
+    # Cursor-centric mini-graph that visualises 1-hop call-graph
+    # adjacency to other clusters (and falls back to the BFS-discovered
+    # nearest clusters when the cursor has no direct neighbours). It's
+    # the visual companion to the ``Adjacent:`` row in the context
+    # banner — instead of reading a list of "you can reach cluster X
+    # via Y", the analyst sees the wiring all at once with cursor in
+    # the middle.
+
+    _NEIGHBORHOOD_NAME_TRUNC = 16  # max func-name chars in a node label
+
+    def _format_neighborhood_func_name(self, ea: int) -> str:
+        """Return a fixed-width-friendly function name for a node label."""
+        try:
+            fname = idc.get_func_name(ida_idaapi.ea_t(int(ea))) or ""
+        except Exception:
+            fname = ""
+        if not fname:
+            fname = f"sub_{ea:x}"
+        if len(fname) > self._NEIGHBORHOOD_NAME_TRUNC:
+            fname = fname[: self._NEIGHBORHOOD_NAME_TRUNC - 2] + ".."
+        return fname
+
+    def _make_neighborhood_node_label(self, header: str, ea: int) -> str:
+        """Build a 3-line centred asciinet node label.
+
+        ``header`` is the top line (``[CURSOR]`` for the centre,
+        ``cluster.id.NNNN`` or ``cluster.id.NNNN (3h)`` for gateways);
+        the address and function name follow. All three lines are
+        centre-padded to the longest line's width so asciinet draws a
+        proportionate box.
+        """
+        lines = [header, f"0x{ea:x}", self._format_neighborhood_func_name(ea)]
+        width = max(len(l) for l in lines)
+        return "\n".join(f"{l:^{width}}" for l in lines)
+
+    def _build_neighborhood_graph_data(self) -> Optional[Dict[str, Any]]:
+        """Collect everything needed to render the cursor neighborhood.
+
+        Returns a dict with::
+
+            cursor_ea: int
+            cursor_clusters: List[int]   # cursor's own cluster memberships
+            adjacent: List[(cid, neighbor_ea, edge_addr, direction)]
+            nearest:  List[(cid, hops, gateway_ea, direction)]
+                       # populated only when adjacent is empty, so the
+                       # graph still has something to show
+
+        Returns ``None`` when the cursor isn't on a function — the
+        caller renders an explanatory message instead.
+        """
+        if not self.func_ea:
+            return None
+        try:
+            on_func = ida_funcs.get_func(ida_idaapi.ea_t(int(self.func_ea))) is not None
+        except Exception:
+            on_func = False
+        if not on_func:
+            return None
+
+        func_to_clusters = self._func_to_cluster_ids()
+        cursor_clusters = sorted(func_to_clusters.get(self.func_ea, ()))
+
+        adjacent = self._adjacent_clusters_for_cursor(exclude_ids=set(cursor_clusters))
+        adjacent.sort(key=lambda t: t[0])
+
+        # Intermediate-of relationships are multi-hop and invisible to
+        # the strict 1-hop adjacency query above. Surfacing them here
+        # is what closes the "Status says intermediate of cluster X but
+        # X isn't in the graph" gap. Skip clusters already covered by
+        # the 1-hop tier so we never render the same cluster twice.
+        adj_cids = {t[0] for t in adjacent}
+        intermediate = [
+            t for t in self._intermediate_gateways_for_cursor() if t[0] not in adj_cids
+        ]
+        intermediate.sort(key=lambda t: (t[2], t[0]))  # nearest first, then deterministic
+
+        nearest: List[Tuple[int, int, int, str]] = []
+        if not adjacent and not intermediate:
+            # Fall back to the 3-hop BFS so the view still has content
+            # — same data the Status row's "nearest cluster" hint uses.
+            nearest = self._nearest_clusters_via_callgraph(max_depth=3, max_results=5)
+
+        return {
+            "cursor_ea": self.func_ea,
+            "cursor_clusters": cursor_clusters,
+            "adjacent": adjacent,
+            "intermediate": intermediate,
+            "nearest": nearest,
+        }
+
+    def draw_neighborhood_graph(self) -> None:
+        """Render the cursor-centric neighborhood graph view.
+
+        Layout: heading → context banner → ascii graph (cursor in the
+        middle, gateway nodes for each adjacent / nearest cluster
+        around it).
+        """
+        self.ClearLines()
+        self.print_ribbon()
+
+        is_pinned = self.state_machine.current_state == self.state_machine.pinned_neighborhood_graph
+        title = "CLUSTERS THIS FUNCTION CAN REACH"
+        heading = f"    \x01{ida_lines.SCOLOR_DEMNAME}{title}\x02{ida_lines.SCOLOR_DEMNAME}"
+        underline = f"    \x01{ida_lines.SCOLOR_DEMNAME}{'-' * len(title)}\x02{ida_lines.SCOLOR_DEMNAME}"
+        self.AddLine(heading)
+        self.AddLine(underline)
+        # Sub-heading: explain the view's role plainly and tell the
+        # analyst how to drill into any one cluster's actual chains.
+        zoom_hint = ida_lines.COLSTR(
+            "(each surrounding box is a cluster the current function calls into, is called from, or bridges as an intermediate — press M to see the full chains for any (intermediate) cluster, ESC to leave)",
+            ida_lines.SCOLOR_DSTR,
+        )
+        self.AddLine(f"    {zoom_hint}")
+
+        view_label = "clusters this function reaches" + (" (pinned)" if is_pinned else "")
+        for line in self._build_cluster_context_banner(
+            current_cluster_id=None,
+            view_label=view_label,
+            show_sync=False,
+        ):
+            self.AddLine(line)
+        self.AddLine("")
+
+        data = self._build_neighborhood_graph_data()
+        if data is None:
+            self.AddLine(f"    \x01{ida_lines.SCOLOR_DSTR}Not inside a recognised function.\x02{ida_lines.SCOLOR_DSTR}")
+            self.Refresh()
+            return
+        if not data["adjacent"] and not data["intermediate"] and not data["nearest"]:
+            self.AddLine(
+                f"    \x01{ida_lines.SCOLOR_DSTR}No adjacent or nearby clusters within 3 hops.\x02{ida_lines.SCOLOR_DSTR}"
+            )
+            self.Refresh()
+            return
+
+        # Build the asciinet graph: cursor centre + one gateway per
+        # neighbouring cluster, edge direction encodes caller/callee.
+        cursor_label = self._make_neighborhood_node_label("[CURRENT FN]", data["cursor_ea"])
+        graph = nx.DiGraph()
+        graph.add_node(cursor_label)
+
+        seen_labels: Set[str] = {cursor_label}
+
+        def add_gateway(cid: int, ea: int, header: str, direction: str) -> None:
+            label = self._make_neighborhood_node_label(header, ea)
+            # Disambiguate node-label collisions (different clusters
+            # sharing the exact same gateway display string) by
+            # appending invisible marker — asciinet treats labels as
+            # node identity, so true duplicates would silently merge.
+            tag = 1
+            unique = label
+            while unique in seen_labels:
+                tag += 1
+                unique = f"{label}\n#{tag}"
+            seen_labels.add(unique)
+            if direction == "caller":
+                graph.add_edge(unique, cursor_label)
+            else:
+                graph.add_edge(cursor_label, unique)
+
+        for cid, neighbor_ea, _edge_addr, direction in data["adjacent"]:
+            header = f"cluster.id.{cid:04d}"
+            add_gateway(cid, neighbor_ea, header, direction)
+
+        # Intermediate-of clusters: closest path endpoint, hop count
+        # annotates how many edges the analyst would walk to land on a
+        # member. Always rendered when present — they're the multi-hop
+        # relationship the 1-hop tier structurally cannot see.
+        for cid, gateway_ea, hops, direction in data["intermediate"]:
+            hop_text = "hop" if hops == 1 else "hops"
+            header = f"cluster.id.{cid:04d} (intermediate, {hops} {hop_text})"
+            add_gateway(cid, gateway_ea, header, direction)
+
+        # Hop-annotated BFS gateways only when both adjacent and
+        # intermediate are empty (handled by the data builder).
+        for cid, hops, gateway_ea, direction in data["nearest"]:
+            hop_text = "hop" if hops == 1 else "hops"
+            header = f"cluster.id.{cid:04d} ({hops} {hop_text} away)"
+            add_gateway(cid, gateway_ea, header, direction)
+
+        try:
+            graph_lines = asciinet.graph_to_ascii(graph).splitlines()
+        except Exception as e:
+            log(f"[-] Error rendering neighborhood graph: {e}")
+            self.AddLine(
+                f"    \x01{ida_lines.SCOLOR_DSTR}Graph too large to draw.\x02{ida_lines.SCOLOR_DSTR}"
+            )
+            self.Refresh()
+            return
+
+        cursor_addr = f"0x{data['cursor_ea']:x}"
+        for line in graph_lines:
+            colored = self.format_graph_line(line)
+            # Highlight cursor address in the rendered graph so the
+            # centre node stands out from the gateways.
+            colored = wrap_substring_with_string(colored, cursor_addr, "\x01\x12", "\x02\x12", case=True)
+            self.AddLine(f"    {colored}")
 
         self.Refresh()
 
@@ -4155,7 +5591,7 @@ class XReferView(idaapi.simplecustviewer_t):
                 return None
             line = result[0]
             candidate = line[6:-2].strip()
-            if candidate in self.table_names:
+            if candidate in self.table_names or candidate in self.orphan_table_names:
                 return candidate
             lineno -= 1
         return None

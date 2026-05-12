@@ -14,11 +14,282 @@
 
 """DSPy modules with structured inputs and Pydantic outputs."""
 
-from typing import Any, Dict, List
 import enum
+import re
+from typing import Any, Dict, List
 
 import dspy
-from pydantic import BaseModel, Field, model_serializer, model_validator
+from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
+
+
+# ── Constants used by the BinaryReport validators ─────────────────────
+# Bare TTP-category headings are banned under ## Behavior subsections —
+# they require reachability / intent inference that xrefer's evidence
+# base (artifacts + call flows, no source) cannot honestly support.
+# Allowed shapes are evidence-descriptive verb-phrases naming the
+# concrete artifact + action observed.
+_BANNED_HEADING_RE = re.compile(
+    r"^\s*(Persistence|Defense\s+Evasion|Anti[-\s]?Analysis|"
+    r"Credential\s+(Theft|Access)|C2(\s+Communication)?|"
+    r"Command\s+and\s+Control|Lateral\s+Movement|"
+    r"Privilege\s+Escalation|Reconnaissance|Discovery|"
+    r"Exfiltration|Execution|Initial\s+Access|Impact|"
+    r"Collection)\s*$",
+    re.IGNORECASE,
+)
+
+# Substrings banned anywhere in the BinaryReport body. Marketing
+# adjectives bias the prose toward unfounded authority; hedge tokens
+# bias toward speculation that the evidence base can't justify; the
+# ``cluster.id.`` form belongs in per-cluster ``relationships``, not in
+# the cross-cluster narrative.
+_BANNED_TOKENS = (
+    # marketing adjectives
+    "sophisticated", "advanced", "powerful", "comprehensive", "extensive",
+    "highly optimized", "highly advanced", "robust", "complex",
+    "specialized", "distinctive",
+    # hedges
+    "likely", "appears to", "may ", "possibly", "presumably",
+    "seems", "suggesting", "suggests",
+    # cross-cluster leak
+    "cluster.id.",
+)
+
+
+class IoCLabel(str, enum.Enum):
+    """Enumerated categories for ``ObservedArtifact.label``.
+
+    Framing is literal: each entry names a category of *observable* that
+    appears in the binary's artifacts. The list is deliberately finite
+    so the LLM cannot invent ad-hoc labels.
+    """
+
+    DOMAIN = "Domain"
+    IP = "IP"
+    URL = "URL"
+    URL_PATH = "URL Path"
+    USER_AGENT = "User-Agent"
+    MUTEX = "Mutex"
+    REGISTRY_KEY = "Registry Key"
+    FILE_PATH = "File Path"
+    FILE_EXTENSION = "File Extension"
+    COMMAND = "Command"
+    SERVICE_NAME = "Service Name"
+    SCHEDULED_TASK = "Scheduled Task"
+    COM_OBJECT = "COM Object"
+    LIBRARY = "Library"
+    OTHER = "Other"
+
+
+class ObservedArtifact(BaseModel):
+    """A concrete observable extracted from the binary's artifacts.
+
+    Framing is literal: the value is a string that appears in the
+    binary's artifacts (strings, imported library names, CAPA-matched
+    paths). It is NOT a claim that the value is known to be malicious —
+    that classification is out of scope for what xrefer's evidence can
+    support, and the renderer's existing disclaimer positions the report
+    as triage-grade.
+    """
+
+    label: IoCLabel = Field(
+        ...,
+        description=(
+            "Category of the observable. Must be one of the IoCLabel "
+            "enum members."
+        ),
+    )
+    value: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "The literal observable as it appears in the binary's "
+            "artifacts (a path, domain, mutex name, registry key, "
+            "command line, etc.). API and syscall names MUST NOT appear "
+            "here — those are imports, not runtime observables."
+        ),
+    )
+
+
+class BehaviorSection(BaseModel):
+    """One coherent group of observed behaviors under ``## Behavior``."""
+
+    heading: str = Field(
+        ...,
+        min_length=1,
+        max_length=120,
+        description=(
+            "Evidence-descriptive verb-phrase heading naming what was "
+            "observed. Examples of GOOD headings: 'Registry writes to "
+            "startup-related keys', 'HTTP exfiltration to a remote "
+            "endpoint', 'Screen-capture operations via GDI handles'. "
+            "The heading MUST NOT be a bare TTP category name like "
+            "'Persistence', 'Defense Evasion', 'Credential Theft', "
+            "'C2 Communication', 'Lateral Movement', 'Privilege "
+            "Escalation', 'Reconnaissance', 'Discovery', 'Exfiltration', "
+            "'Execution', 'Initial Access', 'Impact', or 'Collection' — "
+            "those require reachability/intent inference that xrefer "
+            "does not supply. Rephrase to name the concrete artifact + "
+            "action observed."
+        ),
+    )
+    body: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Prose description of the observed behavior. Active voice. "
+            "No hedging tokens (likely, appears to, may, possibly, "
+            "seems). No marketing adjectives (sophisticated, advanced, "
+            "robust, comprehensive, extensive). Prefer capability "
+            "('captures the desktop') over API symbol naming ('calls "
+            "BitBlt'). Use backticks for technical tokens (paths, "
+            "registry keys, library names, CLI flags). If listing 3+ "
+            "items sharing the same shape, use the bullets field "
+            "instead of inline prose."
+        ),
+    )
+    bullets: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional bulleted list, for 3+ items sharing the same "
+            "shape (commands, paths, registry keys). For 1-2 items, "
+            "keep them in the body instead. Each bullet may use "
+            "backticks for technical tokens, and bold (**Label**: "
+            "value) only when the bullet has a label-prefix shape."
+        ),
+    )
+
+    @field_validator("heading")
+    @classmethod
+    def _no_bare_ttp_heading(cls, v: str) -> str:
+        if _BANNED_HEADING_RE.match(v):
+            raise ValueError(
+                f"heading {v!r} is a bare TTP category; xrefer's "
+                "evidence doesn't support confident categorical "
+                "attribution. Rephrase to name the concrete artifact + "
+                "action observed (e.g. instead of 'Persistence', use "
+                "'Registry writes to startup-related keys')."
+            )
+        return v
+
+
+class BinaryReport(BaseModel):
+    """Structured binary report.
+
+    Serializes to a markdown string for downstream consumers via
+    ``to_markdown()`` — the renderer at ``data/report_tmpl.html``
+    and the IDA-side surfaces both consume the field as a string, so
+    the outer ``ClusterAnalysisResponse`` serializer flattens this
+    model on ``model_dump()``.
+    """
+
+    overview: str = Field(
+        ...,
+        min_length=200,
+        max_length=500,
+        description=(
+            "One paragraph, 200-500 characters. MUST open with 'The "
+            "binary is ' or 'This binary is '. States what the binary "
+            "is and the single strongest takeaway in one or two "
+            "sentences. No bullets. Code spans (`like this`) are "
+            "permitted; no other markdown."
+        ),
+    )
+    behavior: List[BehaviorSection] = Field(
+        ...,
+        min_length=1,
+        description=(
+            "One or more BehaviorSection entries describing observed "
+            "behaviors. Group related artifacts into one section each; "
+            "one section per coherent behavioral cluster. Each "
+            "section's heading must be evidence-descriptive verb-phrase "
+            "form, not a bare TTP category (see BehaviorSection.heading "
+            "description)."
+        ),
+    )
+    observed_artifacts: List[ObservedArtifact] = Field(
+        default_factory=list,
+        description=(
+            "Concrete observables extracted from the binary's "
+            "artifacts — domains, paths, mutexes, registry keys, "
+            "commands, etc. The framing is literal: these strings "
+            "appear in the binary; this is NOT a claim that any value "
+            "is known to be malicious. An empty list is fine and "
+            "renders to a 'No observable artifacts were extracted' "
+            "fallback in markdown."
+        ),
+    )
+
+    @field_validator("overview")
+    @classmethod
+    def _opener(cls, v: str) -> str:
+        if not (v.startswith("The binary is ") or v.startswith("This binary is ")):
+            raise ValueError(
+                "overview must open with 'The binary is ' or "
+                "'This binary is '"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _no_banned_tokens(self) -> "BinaryReport":
+        def _scan(text: str, where: str) -> None:
+            lower = text.lower()
+            for tok in _BANNED_TOKENS:
+                if tok.lower() in lower:
+                    raise ValueError(
+                        f"{where} contains banned token {tok!r}. "
+                        "Replace marketing adjectives with concrete "
+                        "facts ('32 file extensions' not 'comprehensive "
+                        "list'). Drop hedges entirely. Cluster "
+                        "cross-references belong in the per-cluster "
+                        "`relationships` field, not in binary_report."
+                    )
+
+        _scan(self.overview, "overview")
+        for i, sec in enumerate(self.behavior):
+            _scan(sec.heading, f"behavior[{i}].heading")
+            _scan(sec.body, f"behavior[{i}].body")
+            for j, b in enumerate(sec.bullets):
+                _scan(b, f"behavior[{i}].bullets[{j}]")
+        for i, a in enumerate(self.observed_artifacts):
+            _scan(a.value, f"observed_artifacts[{i}].value")
+        return self
+
+    @model_validator(mode="after")
+    def _length_budget(self) -> "BinaryReport":
+        n = len(self.to_markdown())
+        if not 1500 <= n <= 4500:
+            raise ValueError(
+                f"binary_report rendered length is {n} chars; must be "
+                "1500-4500. Trim or expand to fit. Per-section caps "
+                "are intentionally not enforced — distribute prose "
+                "across overview, behavior sections, and "
+                "observed_artifacts."
+            )
+        return self
+
+    def to_markdown(self) -> str:
+        """Render this BinaryReport back to the markdown subset the
+        renderer already parses.
+        """
+        lines = ["## Overview", "", self.overview, "", "## Behavior", ""]
+        for sec in self.behavior:
+            lines.extend([f"### {sec.heading}", "", sec.body])
+            if sec.bullets:
+                lines.append("")
+                lines.extend(f"- {b}" for b in sec.bullets)
+            lines.append("")
+        lines.extend(["## Observed Artifacts", ""])
+        if self.observed_artifacts:
+            lines.extend(
+                f"- **{a.label.value}**: `{a.value}`"
+                for a in self.observed_artifacts
+            )
+        else:
+            lines.append(
+                "No observable artifacts were extracted from the analyzed data."
+            )
+        return "\n".join(lines).rstrip() + "\n"
 
 
 class CategoryAssignment(BaseModel):
@@ -237,6 +508,52 @@ class ArtifactAnalyzerModule(dspy.Module):
         return result.analysis
 
 
+class MitreAttackTechnique(BaseModel):
+    """Single MITRE ATT&CK technique mapping for a cluster.
+
+    Each entry must be grounded in observable artifacts (APIs, strings,
+    CAPA capabilities, call patterns) — the rationale field exists to
+    force that grounding and let analysts audit the mapping.
+    """
+
+    id: str = Field(
+        ...,
+        description=(
+            "MITRE ATT&CK Enterprise technique ID in canonical form. "
+            "Use sub-technique when applicable (e.g. 'T1059.003'); otherwise the parent technique id "
+            "(e.g. 'T1027'). One ID per entry; do not concatenate multiple techniques."
+        ),
+    )
+    tactic: str = Field(
+        ...,
+        description=(
+            "MITRE ATT&CK tactic name the technique falls under, written exactly as MITRE names it "
+            "(e.g. 'Execution', 'Defense Evasion', 'Command and Control', 'Impact'). "
+            "If the technique appears under multiple tactics, pick the one most aligned with the observed "
+            "behavior of THIS cluster."
+        ),
+    )
+    name: str = Field(
+        ...,
+        description=(
+            "Human-readable technique name as MITRE publishes it (e.g. 'Windows Command Shell'). "
+            "For sub-techniques include the parent name and sub-name when natural, e.g. "
+            "'Command and Scripting Interpreter: Windows Command Shell'."
+        ),
+    )
+    rationale: str = Field(
+        ...,
+        description=(
+            "1-2 sentence justification that cites the SPECIFIC artifacts or behaviors in THIS cluster "
+            "that support the mapping (e.g. 'invokes cmd.exe via CreateProcessW with the /c flag observed "
+            "in cluster strings'). Avoid generic restatements of the technique definition — the rationale "
+            "must reference what was observed, not what the technique generally means. "
+            "If you cannot construct a rationale grounded in this cluster's actual artifacts, OMIT the "
+            "mapping rather than including a speculative one."
+        ),
+    )
+
+
 class ClusterAnalysis(BaseModel):
     """Analysis for a single function cluster."""
 
@@ -245,6 +562,20 @@ class ClusterAnalysis(BaseModel):
     relationships: str = Field(..., description="How this cluster relates to other clusters. Always follow the format cluster.id.xxxx when referring to other clusters (Machine friendly IDs). ")
     function_prefix: str = Field(..., description="Suggested prefix for renaming functions in this cluster. Concise, descriptive, and ideally one word.")
     library_or_runtime: int = Field(default=0, description="1 if cluster is likely library/runtime code, 0 if application code")
+    mitre_attack: List[MitreAttackTechnique] = Field(
+        default_factory=list,
+        description=(
+            "MITRE ATT&CK Enterprise techniques the cluster's observed behaviors map to. "
+            "ONLY include techniques actually supported by the cluster's artifacts (APIs, strings, "
+            "CAPA hits, call patterns); do NOT speculate. Empty list is valid and expected for "
+            "pure utility / library / runtime clusters that don't implement adversary behavior. "
+            "Order entries by tactic kill-chain position (Reconnaissance → Resource Development → "
+            "Initial Access → Execution → Persistence → Privilege Escalation → Defense Evasion → "
+            "Credential Access → Discovery → Lateral Movement → Collection → Command and Control → "
+            "Exfiltration → Impact). Within a single tactic, order by descending evidence strength "
+            "(strongest-grounded mapping first)."
+        ),
+    )
 
 
 class ClusterAnalysisItem(ClusterAnalysis):
@@ -299,9 +630,17 @@ class ClusterAnalysisResponse(BaseModel):
     """Response model for cluster analysis."""
 
     clusters: List[ClusterAnalysisItem] = Field(..., description="List of cluster analyses with their identifiers")
-    binary_description: str = Field(..., description="Overall description of the binary's functionality")
+    binary_description: str = Field(..., description="Overall description of the binary's functionality. Plain prose only — do NOT use markdown formatting (no headings, no bullet lists, no asterisks for emphasis).")
     binary_category: BinaryCategory = Field(..., description="Classification of the binary")
-    binary_report: str = Field(default="", description="Detailed analysis report for the binary")
+    binary_report: BinaryReport = Field(
+        ...,
+        description=(
+            "Structured analysis report. See BinaryReport docstring for "
+            "shape; serialized to a markdown string on model_dump() for "
+            "downstream consumers (analyzer.generate_report_data, "
+            "view.py cluster header, etc.)."
+        ),
+    )
 
     @model_validator(mode="before")
     def _coerce_legacy_clusters(cls, value: Dict[str, Any]) -> Dict[str, Any]:
@@ -322,6 +661,13 @@ class ClusterAnalysisResponse(BaseModel):
             cluster_id = str(entry.pop("cluster_id"))
             cluster_map[cluster_id] = entry
         data["clusters"] = cluster_map
+        # Flatten binary_report to its rendered markdown string so the
+        # rest of the codebase (analyzer.generate_report_data, the IDA
+        # cluster header, the HTML report) keeps treating it as a
+        # string. The structured form lives only inside the LLM/DSPy
+        # boundary.
+        if isinstance(self.binary_report, BinaryReport):
+            data["binary_report"] = self.binary_report.to_markdown()
         return data
 
 
@@ -329,61 +675,100 @@ class ClusterAnalyzerSignature(dspy.Signature):
     """
     Analyze function clusters to understand binary functionality.
 
-    You will be given a hierarchical structure of function clusters with their associated
-    artifacts (API calls, strings, CAPA capabilities) and call flows.
+    You will be given a hierarchical structure of function clusters with
+    their associated artifacts (API calls, strings, libraries, CAPA
+    capabilities) and call flows.
 
-    Your task is to:
-    Analyze each cluster (starting with the deepest subclusters and working up) and:
-    1. Provide a descriptive label for each cluster
-    2. Explain what each cluster does based on its functions and artifacts
-       - Description: Short summary of what the cluster appears to do. Do NOT mention function addresses or names.
-       - The description should not just be reflective of the cluster's own functionality, but also of the functionality of ALL of it's subclusters or referenced clusters.
-       - Is it IMPORTANT that when referring to other clusters in relationships, use formatting like cluster.id.xxxx such that if you're refering to cluster 1 it would read as cluster.id.0001.
-    3. Describe how clusters relate to each other
-       - Relationships: How it interacts with referenced clusters (if applicable). Defer mentioning specific cluster IDs (cluster.id.xxxx) to this instead of Description. Do NOT mention function addresses or names.
-    4. Suggest a function naming prefix for renaming
-    5. Identify if the cluster is likely library/runtime code
-    6. Provide an overall binary description and category
-    7. Generate a comprehensive analysis report
+    For each cluster, working from deepest subclusters upward, produce:
+      - `label`: short descriptive name
+      - `description`: what the cluster does (no function addresses,
+        no cluster IDs — cluster IDs go in `relationships`). Should
+        reflect the functionality of subclusters and referenced
+        clusters too.
+      - `relationships`: how this cluster interacts with referenced
+        clusters; this is the ONLY field where `cluster.id.NNNN` form
+        is allowed.
+      - `function_prefix`: one-word prefix for renaming functions
+      - `library_or_runtime`: 1 for library/runtime code, 0 otherwise
+      - `mitre_attack`: MITRE ATT&CK Enterprise technique mappings.
+        ONLY include techniques SUPPORTED by the cluster's actual
+        artifacts (APIs, strings, CAPA hits, call patterns). Each entry
+        has `id` (canonical MITRE form, sub-technique when applicable
+        e.g. `T1059.003`), `tactic` (kill-chain phase, exactly as
+        MITRE names it), `name`, and `rationale` (1-2 sentences citing
+        specific observed artifacts/behaviors — not generic technique
+        definitions). The rationale must cite what was observed in
+        THIS cluster (e.g. "uses CreateProcessW with the /c cmd.exe
+        pattern visible in strings"); if you can't construct such a
+        rationale, OMIT the mapping. Bias STRONGLY toward omitting
+        marginal mappings — a cluster with 2 well-grounded mappings is
+        more useful than 8 thinly-supported ones. Use the rationale's
+        own language as the test: if you'd need hedging phrases like
+        "may indicate", "could suggest", "is consistent with",
+        "potentially used for", "appears to be related to", or "likely
+        involved in", the evidence is too weak; OMIT the mapping
+        instead. Empty list is the CORRECT answer for pure utility /
+        library / runtime / parsing / math clusters. Order by ATT&CK
+        kill-chain position; use the LATEST MITRE ATT&CK Enterprise
+        matrix; if unsure of a sub-technique ID, return the parent
+        technique ID rather than guessing.
 
-    This report should be objective, should not assume anything, only state facts and use technical terminology where applicable.
+    Then produce binary-level outputs:
+      - `binary_description`: one-paragraph plain-prose summary (no
+        markdown — that's reserved for `binary_report`).
+      - `binary_category`: one of the BinaryCategory enum values.
+      - `binary_report`: a STRUCTURED BinaryReport (NOT a free-form
+        string). Read each field's description carefully. Three
+        required sections: an `overview` paragraph (200-500 chars,
+        opens with "The binary is" or "This binary is"), a list of
+        `behavior` sections (each with an evidence-descriptive
+        verb-phrase heading, never a bare TTP category name), and an
+        `observed_artifacts` list (label + value pairs from the
+        IoCLabel enum).
 
-    Focus on:
-    - Technical behaviors revealed by artifacts
-    - How functions work together within each cluster
-    - How clusters build upon each other's functionality
-    - Common malware patterns and techniques
+    Evidence basis: your input is the artifacts (strings, APIs,
+    libraries, CAPA matches) and call flows shown above — NOT the
+    binary's source code. Confine claims in `binary_report` (and in
+    `mitre_attack` rationales) to what those artifacts directly
+    support. Describe what was observed; do not attribute confident
+    TTP categories from ambiguous evidence. Examples:
+      - GOOD behavior heading: "Registry writes to startup-related keys"
+      - BAD  behavior heading: "Persistence"
+      - GOOD body: "Captures the desktop using GDI handles and stages
+        the bitmap in a memory buffer."
+      - BAD  body: "Likely uses a sophisticated screen-capture
+        technique for surveillance purposes." (banned tokens +
+        speculation)
+
+    Avoid the banned token list documented in the BinaryReport field
+    descriptions (marketing adjectives like 'sophisticated' /
+    'advanced' / 'robust' / 'comprehensive', hedging words like
+    'likely' / 'appears to' / 'may', and the substring 'cluster.id.').
+    Prefer concrete numbers and concrete artifact names over vague
+    descriptors ('32 file extensions' not 'comprehensive list').
+
+    Worked example of a BinaryReport for a credential-stealer style
+    binary:
+      overview: "The binary is a credential stealer that harvests
+        system information and application configuration data,
+        exfiltrating results to a remote HTTP endpoint."
+      behavior[0].heading: "System and user discovery via Windows API"
+      behavior[0].body:    "Queries computer name, current user, OS
+        version, and physical memory status. Enumerates logical drives
+        and maps standard system folders to locate target files."
+      behavior[1].heading: "Registry queries against application data
+        paths"
+      behavior[1].body:    "Reads registry values under wallet, mail,
+        VPN, and gaming-client subtrees."
+      behavior[2].heading: "HTTP POSTs to a fixed endpoint via WinHttp"
+      behavior[2].body:    "Sends collected data via POST. The
+        user-agent string mimics a macOS Chrome browser."
+      observed_artifacts:
+        - Domain: tastedata.shop
+        - URL Path: /ag-ap.php
+        - Mutex: filemanager1
+        - User-Agent: Mozilla/5.0 (Macintosh; ...)
     """
-    # """
-    # You are a malware analyst examining a binary.
-    # You will analyze clusters of functions containing suspicious behaviors.
-    # Each cluster shows functions, their artifacts (APIs and their corresponding calls (if available), strings, library names, CAPA static analysis tool results etc.), and call relationships.
-
-    # Please analyze each cluster (starting with the deepest subclusters and working up) and provide:
-    # 1. Label: A short name indicating the cluster's functionality.
-    #     a. The label should not just be reflective of the cluster's own functionality, but also of the functionality of ALL of it's subclusters or referenced clusters.
-    #     b. Try and identify the main orchestrator cluster of most if not all functionality of the binary and reflect that in the corresponding label as well (where applicable).
-    # 2. Description: Short summary of what the cluster appears to do. Do NOT mention function addresses or names.
-    #     a. The description should not just be reflective of the cluster's own functionality, but also of the functionality of ALL of it's subclusters or referenced clusters.
-    # 3. Relationships: How it interacts with referenced clusters (if applicable). Defer mentioning specific cluster IDs (cluster.id.xxxx) to this instead of Description. Do NOT mention function addresses or names.
-    # 4. Function Prefix: A one word prefix that can be added to the functions of this cluster, and that captures the functionality of this cluster as best possible.
-
-    # After analyzing all clusters, please provide:
-    # 4. Provide an overall description of the binary based on your analysis on the above point
-    # 6. A report with general formatting (not markdown) that includes as much detail as available about all of the malware's capabilities and provides an extensive overview of how it functions.
-    #     a. This report should be objective, should not assume anything, only state facts and use technical terminology where applicable.
-    #     b. If any list of items (functionalities, commands, paths etc) is to be mentioned, the full list should be provided and nothing should be left out.
-    #     c. This report should NOT have mentions of cluster IDs.
-    #     d. This report should NOT mention APIs or syscalls by name while describing functionality.
-    #     e. This report should include any relevant and unique IoCs (Indicatos of Compromise) such as file paths, URLs, domains, IPs/ports, commands executed, registry keys/values and COM objects.
-    #     f. This report should explicitly include any persistence mechanisms, if discovered.
-
-    # Focus on:
-    # - Technical behaviors revealed by artifacts
-    # - How functions work together within each cluster
-    # - How clusters build upon each other's functionality
-    # - Common malware patterns and techniques
-    # """
     cluster_data: str = dspy.InputField(description="Raw cluster hierarchy with functions and artifacts (for reference)")
     analysis: ClusterAnalysisResponse = dspy.OutputField(description="Complete cluster analysis with per-cluster metadata and binary-level insights")
 

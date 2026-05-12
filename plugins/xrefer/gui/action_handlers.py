@@ -649,6 +649,41 @@ class ClusterRenameHandler(idaapi.action_handler_t):
             return idaapi.AST_DISABLE
 
 
+class GenerateHtmlReportHandler(idaapi.action_handler_t):
+    """
+    Handler for generating the standalone HTML report.
+
+    Enabled only once cluster analysis has produced both clusters and
+    cluster_analysis (matches the gating used by the auto-trigger in
+    XRefer.analyze_clusters). Writes the report to <binary_path>_report.html
+    and logs the destination via the IDA Output window.
+    """
+
+    def activate(self, ctx: Any) -> bool:
+        from xrefer.plugin import plugin_instance
+
+        try:
+            plugin_instance.xrefer_view.xrefer_obj.generate_html_report()
+            return True
+        except Exception as e:
+            log(f"[-] Error generating HTML report: {str(e)}")
+            import traceback
+
+            traceback.print_exc()
+            return False
+
+    def update(self, ctx: Any) -> int:
+        from xrefer.plugin import plugin_instance
+
+        if (
+            plugin_instance.xrefer_view
+            and plugin_instance.xrefer_view.xrefer_obj.clusters
+            and plugin_instance.xrefer_view.xrefer_obj.cluster_analysis
+        ):
+            return idaapi.AST_ENABLE_ALWAYS
+        return idaapi.AST_DISABLE
+
+
 class SyncImageBaseHandler(idaapi.action_handler_t):
     """
     Handler for synchronizing image base addresses.

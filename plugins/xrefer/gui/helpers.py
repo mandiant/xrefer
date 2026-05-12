@@ -17,7 +17,7 @@ import re
 import time
 from functools import wraps
 from time import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import asciinet
 import ida_bytes
@@ -869,10 +869,161 @@ def create_interesting_artifacts_table(headings, rows, color):
     return formatted_rows
 
 
-def create_cluster_relationship_graph(clusters: List["FunctionalCluster"], analysis: Dict) -> Optional[nx.DiGraph]:
-    """Create graph respecting merge hierarchy and hiding merged nodes."""
+def _collect_library_cluster_ids(clusters: List["FunctionalCluster"]) -> Set[int]:
+    """Walk a cluster forest and return the IDs of every cluster (or
+    subcluster, recursively) marked ``is_library``. Used by the cluster
+    rendering helpers to skip library nodes when the user has them
+    hidden via the ``L`` toggle.
+    """
+    ids: Set[int] = set()
+
+    def walk(c: "FunctionalCluster") -> None:
+        if getattr(c, "is_library", False):
+            ids.add(c.id)
+        for sub in c.subclusters:
+            walk(sub)
+
+    for c in clusters:
+        walk(c)
+    return ids
+
+
+def _lifted_descendants(
+    cluster_or_list: Any,
+    trimmed_ids: Set[int],
+) -> List["FunctionalCluster"]:
+    """Return the effective list of clusters to render under (or in
+    place of) the given parent / list, lifting non-trimmed descendants
+    out of trimmed ancestors.
+
+    Given a top-level list or a single cluster's ``subclusters``, walk
+    the children: keep each non-trimmed child as-is, and replace each
+    trimmed child with the recursive lift of its own ``subclusters``.
+    The recursion preserves any non-trimmed cluster whose only
+    structural parent chain runs through trimmed library clusters —
+    without it those user-code clusters would silently disappear when
+    their library parent is hidden by either the L toggle or the
+    boot-prefix trim.
+
+    ``cluster_refs`` are deliberately NOT walked here: they point to
+    sibling clusters that already appear elsewhere in the forest, so
+    lifting through them would risk double-rendering.
+    """
+    out: List["FunctionalCluster"] = []
+    if isinstance(cluster_or_list, list):
+        roots = cluster_or_list
+    else:
+        roots = cluster_or_list.subclusters
+
+    for child in roots:
+        if child.id not in trimmed_ids:
+            out.append(child)
+        else:
+            out.extend(_lifted_descendants(child.subclusters, trimmed_ids))
+    return out
+
+
+def _collect_boot_prefix_cluster_ids(
+    clusters: List["FunctionalCluster"],
+    paths: Optional[Dict[int, Any]],
+) -> Set[int]:
+    """Find the leading non-user (library) cluster prefix at each entry
+    point.
+
+    Rationale: the first few clusters reached from any analyzed EP are
+    almost always boot/CRT/runtime plumbing — initialization, argv
+    setup, runtime bootstrap — and add noise to the cluster relationship
+    graph without telling the analyst anything actionable. This helper
+    identifies those clusters so the renderer can hide them, regardless
+    of whether the user has the L (hide-library) toggle on.
+
+    The walk:
+
+    1. Index every cluster by id (recursing through ``subclusters`` so
+       nested clusters are reachable by id).
+    2. For each EP in ``paths``, find the top-level cluster that
+       contains the EP function in its ``nodes``. That is this EP's
+       root cluster.
+    3. BFS downstream from each root cluster following BOTH
+       ``subclusters`` and ``cluster_refs``. While the current cluster
+       is library, add it to the trimmed set and keep traversing. The
+       moment we hit a non-library cluster on a branch, stop traversing
+       that branch — anything past it (even later library clusters in
+       the middle / tail) is preserved.
+
+    Returns:
+        Set of cluster IDs that should be hidden as boot prefix.
+        Always a subset of all library cluster IDs.
+    """
+    if not clusters or not paths:
+        return set()
+
+    cluster_by_id: Dict[int, "FunctionalCluster"] = {}
+
+    def index(cluster: "FunctionalCluster") -> None:
+        cluster_by_id[cluster.id] = cluster
+        for sub in cluster.subclusters:
+            index(sub)
+
+    for cluster in clusters:
+        index(cluster)
+
+    ep_set = set(paths.keys())
+    root_ids: List[int] = []
+    for cluster in clusters:
+        if any(ep in cluster.nodes for ep in ep_set):
+            root_ids.append(cluster.id)
+
+    trimmed: Set[int] = set()
+    for root_id in root_ids:
+        queue: List[int] = [root_id]
+        seen: Set[int] = set()
+        while queue:
+            cid = queue.pop(0)
+            if cid in seen:
+                continue
+            seen.add(cid)
+
+            cluster = cluster_by_id.get(cid)
+            if cluster is None:
+                continue
+            if not getattr(cluster, "is_library", False):
+                # First user-code cluster on this branch — stop.
+                continue
+
+            trimmed.add(cid)
+            # Continue downstream along both decomposition (subclusters)
+            # and call-flow (cluster_refs) edges.
+            for sub in cluster.subclusters:
+                queue.append(sub.id)
+            for ref_id in cluster.cluster_refs.values():
+                queue.append(ref_id)
+
+    return trimmed
+
+
+def create_cluster_relationship_graph(
+    clusters: List["FunctionalCluster"],
+    analysis: Dict,
+    paths: Optional[Dict[int, Any]] = None,
+    hide_library: bool = False,
+) -> Optional[nx.DiGraph]:
+    """Create graph respecting merge hierarchy and hiding merged nodes.
+
+    When ``hide_library`` is True, every cluster (and its subclusters /
+    references) marked ``is_library`` is omitted from the graph. When
+    ``hide_library`` is False, only the *boot prefix* — the leading
+    library clusters at each EP, up to the first user-code cluster — is
+    omitted. Either way, the EP-rooted boot/CRT noise is suppressed and
+    the graph starts at the first meaningful user cluster.
+    """
     if not clusters:
         return None
+
+    if hide_library:
+        library_ids = _collect_library_cluster_ids(clusters)
+    else:
+        library_ids = _collect_boot_prefix_cluster_ids(clusters, paths)
 
     try:
         graph = nx.DiGraph()
@@ -933,51 +1084,60 @@ def create_cluster_relationship_graph(clusters: List["FunctionalCluster"], analy
             graph.add_edge(source, target)
             return True
 
-        # Recursively process clusters so subclusters at any depth are added
-        # to the graph (the table view in create_cluster_rows already recurses).
-        # Without this, only top-level clusters and their direct children show up,
-        # and any deeper subcluster is silently dropped.
-        def _process(cluster, parent_text=None):
+        # Process multiple clusters case — iterate the lifted top-level
+        # set so user clusters orphaned by trimmed library ancestors
+        # are still rendered as roots.
+        for cluster in _lifted_descendants(clusters, library_ids):
+            cluster_id = f"cluster.id.{cluster.id:04d}"
             if cluster.id in merged_nodes:
-                return  # Skip merged nodes
+                continue  # Skip merged nodes
 
+            # Get cluster data
             cluster_data = find_cluster_analysis(analysis, cluster.id)
             if not cluster_data:
-                return
+                continue
 
-            cluster_id = f"cluster.id.{cluster.id:04d}"
             label = cluster_data.get("label", "").strip()
             if not add_valid_node(cluster_id, label):
-                return
+                continue
 
             node_text = f"{cluster_id}\n{label}" if label else cluster_id
 
-            # Edge from the (already-added) parent in the recursion chain.
-            if parent_text:
-                add_valid_edge(parent_text, node_text)
+            # Process relationships respecting merges
+            if cluster.parent_cluster_id and cluster.parent_cluster_id not in library_ids:
+                parent_data = find_cluster_analysis(analysis, cluster.parent_cluster_id)
+                if parent_data:
+                    parent_id = f"cluster.id.{cluster.parent_cluster_id:04d}"
+                    parent_label = parent_data.get("label", "").strip()
+                    if add_valid_node(parent_id, parent_label):
+                        parent_text = f"{parent_id}\n{parent_label}" if parent_label else parent_id
+                        add_valid_edge(parent_text, node_text)
 
-            # Subclusters — recurse so multi-level hierarchies are fully drawn.
-            for subcluster in cluster.subclusters:
-                _process(subcluster, parent_text=node_text)
+            # Handle subclusters — same lift so a deeper user cluster
+            # nested under a trimmed library subcluster surfaces as a
+            # direct child here (with a parent edge from this cluster
+            # rather than the trimmed intermediate).
+            for subcluster in _lifted_descendants(cluster.subclusters, library_ids):
+                sub_data = find_cluster_analysis(analysis, subcluster.id)
+                if sub_data and subcluster.id not in merged_nodes:
+                    sub_id = f"cluster.id.{subcluster.id:04d}"
+                    sub_label = sub_data.get("label", "").strip()
+                    if add_valid_node(sub_id, sub_label):
+                        sub_text = f"{sub_id}\n{sub_label}" if sub_label else sub_id
+                        add_valid_edge(node_text, sub_text)
 
-            # Cluster references — these point at clusters whose root replaced
-            # one of our nodes during decomposition. Add the referenced cluster
-            # as a node and an edge from us to it (no recursion: the referenced
-            # cluster is already reachable via its own subcluster chain).
+            # Handle cluster references
             for _, ref_id in cluster.cluster_refs.items():
-                if ref_id in merged_nodes:
+                if ref_id in library_ids:
                     continue
-                ref_data = find_cluster_analysis(analysis, ref_id)
-                if not ref_data:
-                    continue
-                ref_id_str = f"cluster.id.{ref_id:04d}"
-                ref_label = ref_data.get("label", "").strip()
-                if add_valid_node(ref_id_str, ref_label):
-                    ref_text = f"{ref_id_str}\n{ref_label}" if ref_label else ref_id_str
-                    add_valid_edge(node_text, ref_text)
-
-        for cluster in clusters:
-            _process(cluster, parent_text=None)
+                if ref_id not in merged_nodes:  # Skip refs to merged nodes
+                    ref_data = find_cluster_analysis(analysis, ref_id)
+                    if ref_data:
+                        ref_id_str = f"cluster.id.{ref_id:04d}"
+                        ref_label = ref_data.get("label", "").strip()
+                        if add_valid_node(ref_id_str, ref_label):
+                            ref_text = f"{ref_id_str}\n{ref_label}" if ref_label else ref_id_str
+                            add_valid_edge(node_text, ref_text)
 
         return graph
 
@@ -1058,7 +1218,7 @@ def calculate_first_column_width(clusters, analysis_data):
     return max_width + 15  # minimum space for arrow
 
 
-def create_cluster_rows(cluster, analysis, column_width, paths):
+def create_cluster_rows(cluster, analysis, column_width, paths, library_ids: Optional[Set[int]] = None):
     """
     Create properly aligned rows for a cluster with visual indicators for entry points.
     Dynamically arranges description and function list in parallel, with properly colored separator.
@@ -1068,10 +1228,15 @@ def create_cluster_rows(cluster, analysis, column_width, paths):
         analysis: Dictionary containing analysis for this cluster
         column_width: Width for consistent alignment
         paths: Dictionary of paths to check for entry points
+        library_ids: Optional set of cluster IDs to skip during subcluster
+            recursion (used by ``draw_cluster_hierarchy`` to hide library
+            clusters). ``None`` is equivalent to no filtering.
 
     Returns:
         List[List[str]]: Formatted rows for display
     """
+    if library_ids is None:
+        library_ids = set()
     rows = []
 
     # Get cluster info
@@ -1189,12 +1354,14 @@ def create_cluster_rows(cluster, analysis, column_width, paths):
 
             rows.append([left_col, right_col])
 
-    # Add subclusters
-    for subcluster in cluster.subclusters:
+    # Add subclusters — lift non-trimmed grandchildren out of any
+    # trimmed direct subclusters so user-code nested under library
+    # ancestors still surfaces.
+    for subcluster in _lifted_descendants(cluster.subclusters, library_ids):
         # Add exactly one empty row before each subcluster
         rows.append(["", ""])
 
-        sub_rows = create_cluster_rows(subcluster, analysis, column_width, paths)
+        sub_rows = create_cluster_rows(subcluster, analysis, column_width, paths, library_ids=library_ids)
         # Remove the trailing empty row that comes with sub_rows to avoid accumulation
         if sub_rows and not sub_rows[-1][0] and not sub_rows[-1][1]:
             sub_rows.pop()
@@ -1205,7 +1372,7 @@ def create_cluster_rows(cluster, analysis, column_width, paths):
     return rows
 
 
-def draw_cluster_hierarchy(clusters, analysis, paths):
+def draw_cluster_hierarchy(clusters, analysis, paths, hide_library: bool = False):
     """
     Draw all clusters in a hierarchical table format with proper sorting.
 
@@ -1213,6 +1380,10 @@ def draw_cluster_hierarchy(clusters, analysis, paths):
         clusters: List of clusters to display
         analysis: Dictionary containing analysis data for clusters
         paths: Dictionary of paths to check for entry points
+        hide_library: When True, every cluster (and subcluster,
+            recursively) marked ``is_library`` is omitted. When False,
+            only the leading boot/CRT prefix at each EP is omitted —
+            middle/tail library clusters are kept.
 
     Returns:
         List[str]: Formatted lines ready for display
@@ -1220,8 +1391,20 @@ def draw_cluster_hierarchy(clusters, analysis, paths):
     if not clusters:
         return ["    NO CLUSTERS TO DISPLAY"]
 
+    if hide_library:
+        library_ids = _collect_library_cluster_ids(clusters)
+    else:
+        library_ids = _collect_boot_prefix_cluster_ids(clusters, paths)
+
+    # Lift non-trimmed user-code clusters out of trimmed ancestors so
+    # they aren't accidentally hidden when their only parent is being
+    # filtered (e.g. user code nested inside a CRT library cluster).
+    visible_clusters = _lifted_descendants(clusters, library_ids)
+    if not visible_clusters:
+        return ["    NO NON-LIBRARY CLUSTERS — press L to show library clusters"]
+
     # Sort clusters
-    sorted_clusters = sort_clusters(clusters, paths)
+    sorted_clusters = sort_clusters(visible_clusters, paths)
 
     # Calculate required column width based on all clusters
     column_width = calculate_first_column_width(sorted_clusters, analysis)
@@ -1236,7 +1419,7 @@ def draw_cluster_hierarchy(clusters, analysis, paths):
         if first_non_ep_cluster and cluster.parent_cluster_id is None and not any(ep in cluster.nodes for ep in paths):
             first_non_ep_cluster = False
 
-        cluster_rows = create_cluster_rows(cluster, analysis, column_width, paths)
+        cluster_rows = create_cluster_rows(cluster, analysis, column_width, paths, library_ids=library_ids)
         all_rows.extend(cluster_rows)
 
         # Add spacing between primary clusters
