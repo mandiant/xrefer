@@ -805,16 +805,19 @@ class ClusterAnalyzerSignature(dspy.Signature):
         "potentially used for", "appears to be related to", or "likely
         involved in", the evidence is too weak; OMIT the mapping
         instead. Empty list is the CORRECT answer for pure utility /
-        library / runtime / parsing / math clusters that do not
-        implement adversary behavior — AND for every cluster in a
-        benign binary (compilers, archivers, legitimate compression /
-        encryption tools, antivirus products, debuggers, etc.).
-        ATT&CK is a malicious-behavior taxonomy: do not invent
-        mappings for legitimate operations that happen to share
-        artifact patterns with adversary techniques. Order by ATT&CK
-        kill-chain position; use the LATEST MITRE ATT&CK Enterprise
-        matrix; if unsure of a sub-technique ID, return the parent
-        technique ID rather than guessing.
+        library / runtime / parsing / math / string-handling clusters
+        that do not implement any technique-shaped behavior. The same
+        mapping standard applies regardless of the binary's eventual
+        `binary_category`: map when the artifact evidence directly
+        supports the technique, omit when it doesn't. Benign software
+        that genuinely performs operations matching an ATT&CK
+        technique (an installer that spawns a shell, a backup tool
+        that takes a shadow copy, an archiver that compresses files)
+        should still get the mapping — ATT&CK is used here as a
+        behavioral lens, not as a malicious/benign verdict. Order by
+        ATT&CK kill-chain position; use the LATEST MITRE ATT&CK
+        Enterprise matrix; if unsure of a sub-technique ID, return
+        the parent technique ID rather than guessing.
 
     Then produce binary-level outputs:
       - `binary_description`: one-paragraph plain-prose summary (no
@@ -881,9 +884,9 @@ class ClusterAnalyzerSignature(dspy.Signature):
 
     Worked example #2 — a BinaryReport for a benign binary (a
     command-line compression utility). Note the empty
-    `observed_artifacts` and empty `mitre_attack` — both are CORRECT
-    when the artifacts do not support adversary classification, and
-    do not need to be padded:
+    `observed_artifacts` — CORRECT when the binary exposes no
+    runtime observables (no C2 domains, no fixed mutex names, no
+    hardcoded paths), and does not need to be padded:
       overview: "The binary is a command-line file-compression
         utility that reads input from disk, applies a configurable
         compression algorithm, and writes the result to a
@@ -898,8 +901,13 @@ class ClusterAnalyzerSignature(dspy.Signature):
         and verbosity flags via the standard CRT argument parser."
       observed_artifacts: []
       (For this binary, `binary_category` is `Utility` or
-      `Undetermined`, NOT a malicious category, and every cluster's
-      `mitre_attack` is an empty list.)
+      `Undetermined`, NOT a malicious category. Per-cluster
+      `mitre_attack` lists are populated only when a cluster's
+      specific operations match a documented ATT&CK technique —
+      e.g. the compression cluster would honestly map to T1560.001
+      'Archive via Utility' because that technique describes the
+      observed behavior. ATT&CK mappings reflect behaviors, not
+      malicious/benign verdicts.)
     """
     cluster_data: str = dspy.InputField(description="Raw cluster hierarchy with functions and artifacts (for reference)")
     analysis: ClusterAnalysisResponse = dspy.OutputField(description="Complete cluster analysis with per-cluster metadata and binary-level insights")
