@@ -15,179 +15,63 @@
 """DSPy modules with structured inputs and Pydantic outputs."""
 
 import enum
-import re
 from typing import Any, ClassVar, Dict, List
 
 import dspy
 from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 
 
-# ── Constants used by the BinaryReport validators ─────────────────────
-# Bare TTP-category headings are banned under ## Behavior subsections —
-# they require reachability / intent inference that xrefer's evidence
-# base (artifacts + call flows, no source) cannot honestly support.
-# Allowed shapes are evidence-descriptive verb-phrases naming the
-# concrete artifact + action observed.
-_BANNED_HEADING_RE = re.compile(
-    r"^\s*(Persistence|Defense\s+Evasion|Anti[-\s]?Analysis|"
-    r"Credential\s+(Theft|Access)|C2(\s+Communication)?|"
-    r"Command\s+and\s+Control|Lateral\s+Movement|"
-    r"Privilege\s+Escalation|Reconnaissance|Discovery|"
-    r"Exfiltration|Execution|Initial\s+Access|Impact|"
-    r"Collection)\s*$",
-    re.IGNORECASE,
-)
-
-# Substrings banned anywhere in the BinaryReport body. Marketing
-# adjectives bias the prose toward unfounded authority; hedge tokens
-# bias toward speculation that the evidence base can't justify; the
-# ``cluster.id.`` form belongs in per-cluster ``relationships``, not in
-# the cross-cluster narrative.
+# Substrings banned anywhere in BinaryReport text fields. Marketing
+# adjectives bias the prose toward unfounded authority — concrete
+# facts ('32 file extensions' rather than 'comprehensive list') carry
+# the information without the puffery. The ``cluster.id.`` form
+# belongs in per-cluster ``relationships``, not in the binary-level
+# narrative.
+#
+# Hedging tokens (likely / appears to / may / possibly / seems /
+# suggesting / suggests / presumably) are INTENTIONALLY NOT banned.
+# Both origin/main and origin/gsoc_2025 use hedge tokens in their own
+# instructions (main: "what the cluster appears to do"; gsoc: "likely
+# library/runtime code"), and analyst-grade triage prose uses them
+# to honestly signal inference-vs-observation. Banning hedges forces
+# either omission of useful inferences or restatement as false
+# certainty — neither serves the analyst.
 _BANNED_TOKENS = (
-    # marketing adjectives
+    # marketing adjectives (vibes, not facts)
     "sophisticated", "advanced", "powerful", "comprehensive", "extensive",
     "highly optimized", "highly advanced", "robust", "complex",
     "specialized", "distinctive",
-    # hedges
-    "likely", "appears to", "may ", "possibly", "presumably",
-    "seems", "suggesting", "suggests",
-    # cross-cluster leak
+    # cross-cluster leak — structural, not stylistic
     "cluster.id.",
 )
 
 
-class IoCLabel(str, enum.Enum):
-    """Enumerated categories for ``ObservedArtifact.label``.
-
-    Framing is literal: each entry names a category of *observable* that
-    appears in the binary's artifacts. The list is deliberately finite
-    so the LLM cannot invent ad-hoc labels.
-    """
-
-    DOMAIN = "Domain"
-    IP = "IP"
-    URL = "URL"
-    URL_PATH = "URL Path"
-    USER_AGENT = "User-Agent"
-    MUTEX = "Mutex"
-    REGISTRY_KEY = "Registry Key"
-    FILE_PATH = "File Path"
-    FILE_EXTENSION = "File Extension"
-    COMMAND = "Command"
-    SERVICE_NAME = "Service Name"
-    SCHEDULED_TASK = "Scheduled Task"
-    COM_OBJECT = "COM Object"
-    LIBRARY = "Library"
-    OTHER = "Other"
-
-
-class ObservedArtifact(BaseModel):
-    """A concrete observable extracted from the binary's artifacts.
-
-    Framing is literal: the value is a string that appears in the
-    binary's artifacts (strings, imported library names, CAPA-matched
-    paths). It is NOT a claim that the value is known to be malicious —
-    that classification is out of scope for what xrefer's evidence can
-    support, and the renderer's existing disclaimer positions the report
-    as triage-grade.
-    """
-
-    label: IoCLabel = Field(
-        ...,
-        description=(
-            "Category of the observable. Must be one of the IoCLabel "
-            "enum members."
-        ),
-    )
-    value: str = Field(
-        ...,
-        min_length=1,
-        description=(
-            "The literal observable as it appears in the binary's "
-            "artifacts (a path, domain, mutex name, registry key, "
-            "command line, etc.). API and syscall names MUST NOT appear "
-            "here — those are imports, not runtime observables."
-        ),
-    )
-
-
-class BehaviorSection(BaseModel):
-    """One coherent group of observed behaviors under ``## Behavior``."""
-
-    heading: str = Field(
-        ...,
-        min_length=1,
-        description=(
-            "Evidence-descriptive verb-phrase heading naming what was "
-            "observed. Examples of GOOD headings: 'Registry writes to "
-            "startup-related keys', 'HTTP exfiltration to a remote "
-            "endpoint', 'Screen-capture operations via GDI handles'. "
-            "Typically a short verb-phrase (rule of thumb: under ~120 "
-            "characters), but length is NOT validated — substance wins "
-            "over brevity. The heading MUST NOT be a bare TTP category "
-            "name like 'Persistence', 'Defense Evasion', 'Credential "
-            "Theft', 'C2 Communication', 'Lateral Movement', 'Privilege "
-            "Escalation', 'Reconnaissance', 'Discovery', 'Exfiltration', "
-            "'Execution', 'Initial Access', 'Impact', or 'Collection' — "
-            "those require reachability/intent inference that xrefer "
-            "does not supply. Rephrase to name the concrete artifact + "
-            "action observed."
-        ),
-    )
-    body: str = Field(
-        ...,
-        min_length=1,
-        description=(
-            "Prose description of the observed behavior. Active voice. "
-            "No hedging tokens (likely, appears to, may, possibly, "
-            "seems). No marketing adjectives (sophisticated, advanced, "
-            "robust, comprehensive, extensive). Prefer capability "
-            "('captures the desktop') over API symbol naming ('calls "
-            "BitBlt'). Use backticks for technical tokens (paths, "
-            "registry keys, library names, CLI flags). If listing 3+ "
-            "items sharing the same shape, use the bullets field "
-            "instead of inline prose."
-        ),
-    )
-    bullets: List[str] = Field(
-        default_factory=list,
-        description=(
-            "Optional bulleted list, for 3+ items sharing the same "
-            "shape (commands, paths, registry keys, file extensions). "
-            "For 1-2 items, keep them in the body instead. Each "
-            "bullet may use backticks for technical tokens, and bold "
-            "(**Label**: value) only when the bullet has a "
-            "label-prefix shape. "
-            "EXHAUSTIVENESS: when 3+ items of the same kind are "
-            "present in the cluster's artifacts (commands, paths, "
-            "registry keys, file extensions, IoCs, etc.), enumerate "
-            "ALL of them — do NOT summarise with 'and others', '...', "
-            "'such as', or any truncation. Partial lists hide the "
-            "evidence the analyst is relying on."
-        ),
-    )
-
-    @field_validator("heading")
-    @classmethod
-    def _no_bare_ttp_heading(cls, v: str) -> str:
-        if _BANNED_HEADING_RE.match(v):
-            raise ValueError(
-                f"heading {v!r} is a bare TTP category; xrefer's "
-                "evidence doesn't support confident categorical "
-                "attribution. Rephrase to name the concrete artifact + "
-                "action observed (e.g. instead of 'Persistence', use "
-                "'Registry writes to startup-related keys')."
-            )
-        return v
-
-
 class BinaryReport(BaseModel):
-    """Structured binary report.
+    """Binary-level analysis report rendered as markdown for the
+    analyst.
+
+    INTENTIONALLY MINIMAL SHAPE — just two top-level fields:
+
+    - ``overview``: a paragraph stating what the binary is.
+    - ``details``: free-form markdown for the rest of the analysis.
+
+    The earlier schema enforced ``behavior: List[BehaviorSection]``
+    with narrow verb-phrase headings, plus a separate ``observed
+    artifacts`` list with a fixed enum-typed label. That structure
+    pushed the LLM toward narrow per-section observations and
+    suppressed the comprehensive synthesizing narrative style that
+    analyst-grade triage reports actually use. The fix is to keep the
+    fixed top-level structure (Overview + Details) and let the LLM
+    pick its own ``###`` sub-headings inside Details, driven by what
+    the binary actually does. When the data contains observable
+    indicators of compromise, they go as a final ``### Indicators of
+    Compromise`` sub-section inside Details (see signature docstring
+    for format).
 
     Serializes to a markdown string for downstream consumers via
-    ``to_markdown()`` — the renderer at ``data/report_tmpl.html``
-    and the IDA-side surfaces both consume the field as a string, so
-    the outer ``ClusterAnalysisResponse`` serializer flattens this
+    ``to_markdown()`` — the renderer at ``data/report_tmpl.html`` and
+    the IDA-side surfaces both consume ``binary_report`` as a string,
+    so the outer ``ClusterAnalysisResponse`` serializer flattens this
     model on ``model_dump()``.
     """
 
@@ -198,35 +82,51 @@ class BinaryReport(BaseModel):
             "binary is '. States what the binary is and the single "
             "strongest takeaway in one or two sentences. No bullets. "
             "Code spans (`like this`) are permitted; no other markdown. "
-            "Length is NOT validated and is intentionally permissive — "
-            "a small, simple binary may need only a sentence ('The "
-            "binary is a CRC32 utility that prints the checksum of "
-            "its argument.'), while a complex one may merit two or "
-            "three. Match the binary; do not pad to hit a target."
+            "Length is NOT validated — match the binary; do not pad to "
+            "hit a target."
         ),
     )
-    behavior: List[BehaviorSection] = Field(
+    details: str = Field(
         ...,
-        min_length=1,
         description=(
-            "One or more BehaviorSection entries describing observed "
-            "behaviors. Group related artifacts into one section each; "
-            "one section per coherent behavioral cluster. Each "
-            "section's heading must be evidence-descriptive verb-phrase "
-            "form, not a bare TTP category (see BehaviorSection.heading "
-            "description)."
-        ),
-    )
-    observed_artifacts: List[ObservedArtifact] = Field(
-        default_factory=list,
-        description=(
-            "Concrete observables extracted from the binary's "
-            "artifacts — domains, paths, mutexes, registry keys, "
-            "commands, etc. The framing is literal: these strings "
-            "appear in the binary; this is NOT a claim that any value "
-            "is known to be malicious. An empty list is fine and "
-            "renders to a 'No observable artifacts were extracted' "
-            "fallback in markdown."
+            "Comprehensive technical analysis as free-form markdown. "
+            "Organize with `###` sub-headings driven by what THIS "
+            "binary actually does — examples drawn from real reports "
+            "include 'Execution and Orchestration', 'Information "
+            "Stealing and Data Collection', 'Screen Capture Utility', "
+            "'Network Communication and Exfiltration', 'Defense "
+            "Evasion and Infrastructure', 'Privilege Escalation and "
+            "Evasion', 'File Processing and Encryption Pipeline', "
+            "'Reporting and User Interface'. The LLM picks the sub-"
+            "headings; the schema does NOT prescribe a list. \n"
+            "\n"
+            "REPORT COMPREHENSIVELY. Every cluster, every interesting "
+            "artifact, every behavior visible in the cluster_data MUST "
+            "be mentioned somewhere in the report. Do NOT summarize "
+            "away information. If the cluster_data shows 32 file "
+            "extensions, list all 32. If five distinct evasion "
+            "techniques, describe each. Hedging language ('likely', "
+            "'appears to', 'may') is fine and signals inference; "
+            "missing information is the worst failure mode. \n"
+            "\n"
+            "When the cluster_data contains observable indicators of "
+            "compromise — concrete strings that appear in the binary "
+            "such as domains, IPs, URLs / URL paths, user-agents, "
+            "mutexes, registry keys, file paths, file extensions, "
+            "commands, service names, scheduled tasks, COM objects, "
+            "or library names — include them as the FINAL sub-section "
+            "under `### Indicators of Compromise (IoCs)` formatted as "
+            "a bulleted list: ``- **<Label>**: `<value>` ``. The "
+            "framing is literal (these strings appear in the binary), "
+            "not interpretive (they are known to be malicious). Omit "
+            "the IoC sub-section entirely when no observables apply.\n"
+            "\n"
+            "Allowed markdown inside details: `###` (sub-headings, "
+            "this is the only level — the top-level `##` structure is "
+            "fixed by `to_markdown()`), `####` (sub-sub-headings if "
+            "needed), `-` bulleted lists, `**bold**`, `` `inline "
+            "code` ``. No code fences, no `##`, no tables, no images. "
+            "Length is NOT validated — match the binary's substance."
         ),
     )
 
@@ -250,19 +150,14 @@ class BinaryReport(BaseModel):
                         f"{where} contains banned token {tok!r}. "
                         "Replace marketing adjectives with concrete "
                         "facts ('32 file extensions' not 'comprehensive "
-                        "list'). Drop hedges entirely. Cluster "
-                        "cross-references belong in the per-cluster "
-                        "`relationships` field, not in binary_report."
+                        "list'). Cluster cross-references belong in "
+                        "the per-cluster `relationships` field, not in "
+                        "binary_report. (Hedging tokens like 'likely' "
+                        "or 'appears to' are intentionally allowed.)"
                     )
 
         _scan(self.overview, "overview")
-        for i, sec in enumerate(self.behavior):
-            _scan(sec.heading, f"behavior[{i}].heading")
-            _scan(sec.body, f"behavior[{i}].body")
-            for j, b in enumerate(sec.bullets):
-                _scan(b, f"behavior[{i}].bullets[{j}]")
-        for i, a in enumerate(self.observed_artifacts):
-            _scan(a.value, f"observed_artifacts[{i}].value")
+        _scan(self.details, "details")
         return self
 
     # Length is INTENTIONALLY NOT validated. Earlier iterations had a
@@ -288,26 +183,16 @@ class BinaryReport(BaseModel):
 
     def to_markdown(self) -> str:
         """Render this BinaryReport back to the markdown subset the
-        renderer already parses.
+        renderer parses. Top-level structure is fixed: `## Overview`
+        then `## Details`. Sub-structure inside Details is whatever
+        the LLM emitted.
         """
-        lines = ["## Overview", "", self.overview, "", "## Behavior", ""]
-        for sec in self.behavior:
-            lines.extend([f"### {sec.heading}", "", sec.body])
-            if sec.bullets:
-                lines.append("")
-                lines.extend(f"- {b}" for b in sec.bullets)
-            lines.append("")
-        lines.extend(["## Observed Artifacts", ""])
-        if self.observed_artifacts:
-            lines.extend(
-                f"- **{a.label.value}**: `{a.value}`"
-                for a in self.observed_artifacts
-            )
-        else:
-            lines.append(
-                "No observable artifacts were extracted from the analyzed data."
-            )
-        return "\n".join(lines).rstrip() + "\n"
+        return (
+            "## Overview\n\n"
+            f"{self.overview.rstrip()}\n\n"
+            "## Details\n\n"
+            f"{self.details.rstrip()}\n"
+        )
 
 
 class CategoryAssignment(BaseModel):
@@ -834,97 +719,164 @@ class ClusterAnalyzerSignature(dspy.Signature):
       - `binary_description`: one-paragraph plain-prose summary (no
         markdown — that's reserved for `binary_report`).
       - `binary_category`: one of the BinaryCategory enum values.
-      - `binary_report`: a STRUCTURED BinaryReport (NOT a free-form
-        string). Read each field's description carefully. Three
-        required sections: an `overview` paragraph (opens with "The
-        binary is" or "This binary is"), a list of `behavior`
-        sections (each with an evidence-descriptive verb-phrase
-        heading, never a bare TTP category name), and an
-        `observed_artifacts` list (label + value pairs from the
-        IoCLabel enum). LENGTH TARGETS (not validated, advisory
-        only): overview ≈ 200-500 chars; total rendered markdown
-        ≈ 1500-4500 chars. Match the binary you're analyzing — a
-        small, simple binary may need substantially less, and a
-        large, complex one may merit more. Do NOT pad with filler
-        to hit a target, and do NOT truncate substantive content
-        to fit one.
+      - `binary_report`: a BinaryReport with exactly two fields:
+        `overview` (paragraph that opens with "The binary is" /
+        "This binary is") and `details` (free-form markdown with
+        `###` sub-headings the LLM picks based on what the binary
+        actually does). The schema does NOT prescribe a list of
+        sub-section names — you organize Details however the
+        binary's behavior calls for. When the data contains
+        observable indicators of compromise, end Details with a
+        `### Indicators of Compromise (IoCs)` sub-section formatted
+        as bulleted ``- **<Label>**: `<value>` `` lines. See the
+        BinaryReport.overview and BinaryReport.details field
+        descriptions for full guidance. LENGTH TARGETS (advisory,
+        not validated): overview ≈ 200-500 chars; total rendered
+        markdown ≈ 1500-4500 chars. Match the binary — a small or
+        simple binary may need substantially less; a large or
+        complex one may merit more. Do NOT pad to hit a target;
+        do NOT truncate substantive content to fit one.
+
+    REPORT COMPREHENSIVELY. The most common failure mode of earlier
+    iterations was reporting only one or two narrow observations and
+    leaving the rest of the binary undescribed. Every cluster, every
+    interesting artifact, every behavior visible in the cluster_data
+    MUST be mentioned somewhere in `details`. If 32 file extensions
+    are observed, list all 32. If five distinct evasion techniques,
+    describe each. Hedging language ('likely', 'appears to', 'may')
+    is FINE — it honestly signals inference vs. direct observation,
+    and the originals (origin/main, origin/gsoc_2025) use these
+    tokens in their own framing. Missing information is the worst
+    failure mode.
 
     Evidence basis: your input is the artifacts (strings, APIs,
     libraries, CAPA matches) and call flows shown above — NOT the
     binary's source code. Confine claims in `binary_report` (and in
     `mitre_attack` rationales) to what those artifacts directly
-    support. Describe what was observed; do not attribute confident
-    TTP categories from ambiguous evidence, and do not infer intent
-    that the artifacts do not show. Examples:
-      - GOOD behavior heading: "Registry writes to startup-related keys"
-      - BAD  behavior heading: "Persistence"
-      - GOOD body: "Captures the desktop using GDI handles and stages
+    support. You can use hedges to mark inference, but you should
+    not state observations the artifacts don't contain.
+      - GOOD: "Captures the desktop using GDI handles and stages
         the bitmap in a memory buffer."
-      - BAD  body (hedge + marketing adjective + speculation): "Likely
-        uses a sophisticated screen-capture technique for surveillance
-        purposes."
-      - BAD  body (presumes malice without artifact support):
+      - GOOD: "Likely facilitates execution of dynamically loaded
+        code by adjusting page protections."  (hedge marks inference)
+      - BAD  (marketing adjectives + filler instead of facts):
+        "Uses a sophisticated screen-capture technique for
+        comprehensive surveillance." Replace with concrete facts.
+      - BAD  (presumes malice without artifact support):
         "Compresses files for exfiltration to attacker-controlled
         servers." — the "exfiltration" claim names a network
         destination the artifacts do not show. If the cluster
         compresses files and there is no observed network call,
         describe only the compression.
 
-    Avoid the banned token list documented in the BinaryReport field
-    descriptions (marketing adjectives like 'sophisticated' /
-    'advanced' / 'robust' / 'comprehensive', hedging words like
-    'likely' / 'appears to' / 'may', and the substring 'cluster.id.').
-    Prefer concrete numbers and concrete artifact names over vague
-    descriptors ('32 file extensions' not 'comprehensive list').
+    Avoid the banned-token list (marketing adjectives like
+    'sophisticated' / 'advanced' / 'robust' / 'comprehensive' /
+    'extensive', and the substring 'cluster.id.'). Use concrete
+    numbers and concrete artifact names — '32 file extensions',
+    not 'comprehensive list'.
 
-    Worked example #1 — a BinaryReport for a credential-stealer style
-    binary (a clearly-malicious binary):
-      overview: "The binary is a credential stealer that harvests
-        system information and application configuration data,
-        exfiltrating results to a remote HTTP endpoint."
-      behavior[0].heading: "System and user discovery via Windows API"
-      behavior[0].body:    "Queries computer name, current user, OS
-        version, and physical memory status. Enumerates logical drives
-        and maps standard system folders to locate target files."
-      behavior[1].heading: "Registry queries against application data
-        paths"
-      behavior[1].body:    "Reads registry values under wallet, mail,
-        VPN, and gaming-client subtrees."
-      behavior[2].heading: "HTTP POSTs to a fixed endpoint via WinHttp"
-      behavior[2].body:    "Sends collected data via POST. The
-        user-agent string mimics a macOS Chrome browser."
-      observed_artifacts:
-        - Domain: tastedata.shop
-        - URL Path: /ag-ap.php
-        - Mutex: filemanager1
-        - User-Agent: Mozilla/5.0 (Macintosh; ...)
+    Worked example #1 — a BinaryReport for a credential-stealer
+    style binary. Demonstrates the rich, comprehensive style and
+    the IoC sub-section format:
+
+      overview: "The binary is a credential stealer that
+        systematically harvests environment information, captures
+        user activity via screenshots, and pulls credentials from
+        installed applications, exfiltrating the results to a
+        remote HTTP server. It uses standard Windows APIs for data
+        collection and the WinHttp library for exfiltration."
+
+      details: |
+        ### Execution and Orchestration
+
+        The binary's execution begins with an orchestration layer
+        that initialises the environment and manages the transition
+        between primary modules. It establishes exception handling
+        routines and uses a mutex named `filemanager1` to ensure
+        only a single instance runs on the host.
+
+        ### Information Stealing and Data Collection
+
+        The core functionality lives in a dedicated data-collection
+        engine that performs:
+
+        - **System Discovery**: Retrieves the computer name,
+          current username, OS version, and physical memory status
+          via `GetComputerNameW`, `GetUserNameW`, and
+          `GlobalMemoryStatusEx`.
+        - **Storage and Environment Enumeration**: Identifies all
+          logical drives and maps standard system folders (Desktop,
+          AppData) to locate target files.
+        - **Application Targeting**: Searches the registry for
+          configuration data tied to high-value applications:
+          - Cryptocurrency Wallets: Bitcoin-Qt, Monero core wallets
+          - Communication: Microsoft Outlook profiles
+          - Remote Access: WinSCP sessions, OpenVPN configurations
+          - Gaming: Valve Steam account information
+
+        ### Screen Capture Utility
+
+        A specialised module leverages the GDI+ library to capture
+        the desktop window. It uses `BitBlt` to copy the display
+        context into a bitmap, which is then encoded and saved to
+        a stream for exfiltration.
+
+        ### Network Communication and Exfiltration
+
+        Exfiltration runs over HTTP via the WinHttp library. The
+        malware communicates with the domain `tastedata.shop`,
+        POSTing collected data to the PHP endpoint `/ag-ap.php`.
+        Requests use a hardcoded User-Agent string mimicking a
+        macOS Chrome browser.
+
+        ### Defense Evasion and Infrastructure
+
+        Several defensive behaviours are present:
+
+        - **DLL Unhooking**: Reads `ntdll.dll` directly from
+          `C:\\windows\\system32\\` — a common technique to bypass
+          EDR/AV hooks by loading a clean library copy.
+        - **Dynamic API Resolution**: Resolves critical functions
+          at runtime via `LoadLibraryA` and `GetProcAddress`,
+          hindering static analysis.
+        - **Memory Protection**: Uses `VirtualProtect` to modify
+          memory-page permissions, likely to facilitate execution
+          of dynamically loaded code or protect sensitive buffers.
+
+        ### Indicators of Compromise (IoCs)
+
+        - **Domain**: `tastedata.shop`
+        - **URL Path**: `/ag-ap.php`
+        - **Mutex**: `filemanager1`
+        - **User-Agent**: `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36`
 
     Worked example #2 — a BinaryReport for a benign binary (a
-    command-line compression utility). Note the empty
-    `observed_artifacts` — CORRECT when the binary exposes no
-    runtime observables (no C2 domains, no fixed mutex names, no
-    hardcoded paths), and does not need to be padded:
-      overview: "The binary is a command-line file-compression
-        utility that reads input from disk, applies a configurable
-        compression algorithm, and writes the result to a
-        user-specified output."
-      behavior[0].heading: "File compression via DEFLATE / LZMA backends"
-      behavior[0].body:    "Reads input files in chunks, compresses
-        each chunk via the selected backend, and writes the encoded
-        bytes to the output path."
-      behavior[1].heading: "Command-line argument parsing for
-        compression flags"
-      behavior[1].body:    "Accepts compression level, output path,
-        and verbosity flags via the standard CRT argument parser."
-      observed_artifacts: []
-      (For this binary, `binary_category` is `Utility` or
-      `Undetermined`, NOT a malicious category. Per-cluster
-      `mitre_attack` lists are populated only when a cluster's
-      specific operations match a documented ATT&CK technique —
-      e.g. the compression cluster would honestly map to T1560.001
-      'Archive via Utility' because that technique describes the
-      observed behavior. ATT&CK mappings reflect behaviors, not
-      malicious/benign verdicts.)
+    small CRC32 command-line utility). Demonstrates that the same
+    schema accommodates a terse binary — there are no IoCs, the
+    details body is short, and `binary_category` is `Utility` or
+    `Undetermined`, NOT a malicious category. Match the binary's
+    actual substance.
+
+      overview: "The binary is a command-line CRC32 utility that
+        reads input bytes (from stdin or from a path supplied as
+        an argument), computes the CRC32 checksum, and prints the
+        result. It performs no network I/O, registry access, or
+        process spawning."
+
+      details: |
+        ### CRC32 Computation Pipeline
+
+        Reads input bytes either from stdin or from the file path
+        supplied as the first argument. Computes the CRC32
+        checksum using a precomputed table-based reflection of the
+        IEEE 802.3 polynomial. Prints the result in lowercase hex.
+
+        ### Command-line Argument Handling
+
+        Accepts a single optional positional argument: a file path
+        to checksum. With no argument, reads bytes from stdin
+        until EOF. Errors during file open are reported to stderr
+        and the process exits with a non-zero status.
     """
     cluster_data: str = dspy.InputField(description="Raw cluster hierarchy with functions and artifacts (for reference)")
     analysis: ClusterAnalysisResponse = dspy.OutputField(description="Complete cluster analysis with per-cluster metadata and binary-level insights")
