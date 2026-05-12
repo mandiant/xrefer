@@ -152,10 +152,17 @@ class BehaviorSection(BaseModel):
         default_factory=list,
         description=(
             "Optional bulleted list, for 3+ items sharing the same "
-            "shape (commands, paths, registry keys). For 1-2 items, "
-            "keep them in the body instead. Each bullet may use "
-            "backticks for technical tokens, and bold (**Label**: "
-            "value) only when the bullet has a label-prefix shape."
+            "shape (commands, paths, registry keys, file extensions). "
+            "For 1-2 items, keep them in the body instead. Each "
+            "bullet may use backticks for technical tokens, and bold "
+            "(**Label**: value) only when the bullet has a "
+            "label-prefix shape. "
+            "EXHAUSTIVENESS: when 3+ items of the same kind are "
+            "present in the cluster's artifacts (commands, paths, "
+            "registry keys, file extensions, IoCs, etc.), enumerate "
+            "ALL of them — do NOT summarise with 'and others', '...', "
+            "'such as', or any truncation. Partial lists hide the "
+            "evidence the analyst is relying on."
         ),
     )
 
@@ -557,7 +564,17 @@ class MitreAttackTechnique(BaseModel):
 class ClusterAnalysis(BaseModel):
     """Analysis for a single function cluster."""
 
-    label: str = Field(..., description="Short, descriptive label for the cluster")
+    label: str = Field(
+        ...,
+        description=(
+            "Short, descriptive label for the cluster. The label "
+            "should reflect the functionality of ALL of the cluster's "
+            "subclusters or referenced clusters too — not just its "
+            "direct functionality. When a cluster appears to be the "
+            "primary orchestrator of most or all of the binary's "
+            "behavior, reflect that orchestrator role in its label."
+        ),
+    )
     description: str = Field(..., description="Detailed description of cluster functionality. Do NOT mention function addresses or names. The description should not just be reflective of the cluster's own functionality, but also of the functionality of ALL of it's subclusters or referenced clusters.")
     relationships: str = Field(..., description="How this cluster relates to other clusters. Always follow the format cluster.id.xxxx when referring to other clusters (Machine friendly IDs). ")
     function_prefix: str = Field(..., description="Suggested prefix for renaming functions in this cluster. Concise, descriptive, and ideally one word.")
@@ -631,7 +648,48 @@ class ClusterAnalysisResponse(BaseModel):
 
     clusters: List[ClusterAnalysisItem] = Field(..., description="List of cluster analyses with their identifiers")
     binary_description: str = Field(..., description="Overall description of the binary's functionality. Plain prose only — do NOT use markdown formatting (no headings, no bullet lists, no asterisks for emphasis).")
-    binary_category: BinaryCategory = Field(..., description="Classification of the binary")
+    binary_category: BinaryCategory = Field(
+        ...,
+        description=(
+            "Classification of the binary. Choose the category that "
+            "matches closest. Definitions (FLARE taxonomy):\n"
+            "- Downloader: A program whose sole purpose is to download (and perhaps launch) a file from a specified address, and which does not provide any additional functionality or support any other interactive commands.\n"
+            "- Point-of-Sale Malware: A program whose primary purpose is to steal financial transaction data at the point of sale (POS). Examples include malware that extracts credit card data from the memory of a POS system and malware inserted into a POS web application that steals payment information.\n"
+            "- Ransomware: A program whose primary purpose is to perform some malicious action (such as encrypting data), with the goal of extracting payment from the victim in order to avoid or undo the malicious action.\n"
+            "- Uploader: A program whose sole purpose is to upload a file to specified address, and which does not provide any additional functionality or support any other interactive commands.\n"
+            "- Remote Control and Administration Tool: A legitimate program whose primary purpose is to remotely access and control or administer a system.\n"
+            "- Backdoor: A program whose primary purpose is to allow a threat actor to interactively issue commands to the system on which it is installed.\n"
+            "- File Infector: A program that inserts malicious code into a file to alter its runtime behavior.\n"
+            "- Dropper: A program whose primary purpose is to extract, install and potentially launch or execute one or more files.\n"
+            "- Installer: A program whose primary purpose is to install and potentially launch one or more files. Differs from a dropper in that an installer does not contain the file to be installed, but merely configures it.\n"
+            "- Launcher: A program whose primary purpose is to execute an external payload or shell command. A launcher does not contain or configure a payload it executes. Examples include a program that starts an executable file located on disk and a program that reads a payload from disk and executes it in memory.\n"
+            "- Controller: A program whose primary purpose is to allow a threat actor to interact with a backdoor (usually corresponds to the 'C2 server' software, but does not technically have to be a 'server').\n"
+            "- Builder: A program whose primary purpose is to build (e.g., compile, create, or configure) an instance of another code family.\n"
+            "- Disruption Tool: A program whose primary purpose is to damage, destroy or disable resources. Examples include DDoS utilities or disk wipers.\n"
+            "- Credential Stealer: A utility whose primary purpose is to access, copy, or steal authentication credentials.\n"
+            "- Privilege Escalation Tool: A program, utility, or exploit whose primary purpose is to escalate privileges on a local system (as opposed to a remote system). Excludes 'credtheft' tools which attempt to steal authentication credentials.\n"
+            "- Remote Exploitation Tool: A program, utility, or exploit whose primary purpose is to gain access to a remote system. Examples include brute force utilities and self-propagating worms.\n"
+            "- Exploit: A file whose sole purpose is to exploit a system (e.g. a malicious PDF).\n"
+            "- Tunneler: A program that proxies or tunnels network traffic.\n"
+            "- Lateral Movement Tool: A program whose primary purpose is to facilitate lateral movement within a network.\n"
+            "- Reconnaissance Tool: A program whose primary purpose is to conduct some type of system or network reconnaissance (for example, enumerating accounts or systems, or conducting port scanning).\n"
+            "- Data Miner: A utility whose primary purpose is to gather ('mine') data, typically for theft by threat actors. Excludes utilities that gather data such as credentials used for the purpose of escalating privileges or information used for system or network reconnaissance.\n"
+            "- Keylogger: A program whose primary purpose is to capture keystrokes.\n"
+            "- Sniffer: A program whose primary purpose is to capture and optionally process network traffic.\n"
+            "- Archiver: A program whose primary purpose is to package one or more files into an archive, and may also extract files from an existing archive. The program may have additional options to compress or encrypt the archived files. Common examples include RAR, ZIP, and TAR.\n"
+            "- Screen Capture Tool: A program whose primary purpose is to capture images or video of a system's display.\n"
+            "- Decoder: A program whose primary purpose is to decode, parse, or deobfuscate an artifact(s).\n"
+            "- Decrypter: A program whose primary purpose is to decrypt files or other artifacts.\n"
+            "- Bootkit: A program that uses the boot process to subvert a computer before the operating system is loaded. Examples include code that modifies the MS-DOS boot sector; modifies the Windows Master Boot Record (MBR) or Volume Boot Record (VBR); or uses similar methods to modify structures associated with the Linux or MacOS operating systems.\n"
+            "- Framework: A framework is a named structure around disparate capabilities aggregated to facilitate operations. Frameworks may include named capabilities borrowed from other projects. Examples include Metasploit Framework and Cobalt Strike.\n"
+            "- Rootkit: A program used to hide files, processes, or other data from system information tools; can run in either user or kernel mode.\n"
+            "- Cryptocurrency Miner: A program whose primary purpose is mining cryptocurrency.\n"
+            "- Spambot: A program whose primary purpose is to surreptitiously send large quantities of spam e-mail. Spambots may also collect email addresses by various means including credential stuffing attacks, scanning or scraping various internet resources or guessing/brute-forcing account credentials.\n"
+            "- ATM Malware: A program whose primary purpose is to manipulate ATM machines to illicitly obtain funds.\n"
+            "- Utility: A program that has a specialized purpose that does not fit into any other defined category (such as keylogger, sniffer, or credential theft). Examples may include tools designed to overwrite or clear log files, encode or decode files, etc.\n"
+            "- Undetermined: A program which doesn't fall in any of the above categories, OR appears to be benign."
+        ),
+    )
     binary_report: BinaryReport = Field(
         ...,
         description=(
