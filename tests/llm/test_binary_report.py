@@ -382,22 +382,33 @@ def test_cluster_id_leak_in_artifact_value_raises():
 # ── 6. Length budget ──────────────────────────────────────────────────
 
 
-def test_total_length_below_minimum_raises():
-    """A report with a single tiny behavior section and an empty
-    artifacts list renders well under 1500 chars and must fail the
-    length validator.
+def test_total_length_below_soft_minimum_is_accepted():
+    """A sparse-but-structurally-valid report (single tiny behavior,
+    empty artifacts) MUST instantiate successfully even though its
+    rendered total is well below SOFT_MIN_LENGTH (1500).
+
+    The hard floor was intentionally removed because the Pydantic
+    model-validator constraint is not visible in the JSON schema the
+    LLM sees, so the model can't aim for a minimum it doesn't know
+    exists. A hard floor caused entire analyses to fail when the LLM
+    produced a sparse-but-valid report. The soft target is now
+    advertised in the ClusterAnalyzerSignature docstring (LLM-visible)
+    and surfaced as a post-hoc warning in ClusterAnalyzer.analyze_clusters.
     """
-    with pytest.raises(ValidationError, match="rendered length"):
-        BinaryReport(
-            overview=_valid_overview(),
-            behavior=[
-                BehaviorSection(
-                    heading="Token enumeration",
-                    body="Reads a few values.",
-                ),
-            ],
-            observed_artifacts=[],
-        )
+    r = BinaryReport(
+        overview=_valid_overview(),
+        behavior=[
+            BehaviorSection(
+                heading="Token enumeration",
+                body="Reads a few values.",
+            ),
+        ],
+        observed_artifacts=[],
+    )
+    n = len(r.to_markdown())
+    # Confirm this fixture is genuinely below the soft minimum — that's
+    # the precondition the test is exercising.
+    assert n < BinaryReport.SOFT_MIN_LENGTH, n
 
 
 def test_total_length_above_maximum_raises():

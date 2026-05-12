@@ -81,6 +81,7 @@ class ClusterAnalyzer:
             log(f"Generated cluster data ({len(cluster_data)} chars)")
             results = processor.process_items(cluster_data, prompt_type=PromptType.CLUSTER_ANALYZER, ignore_token_limit=True)
             results = dict(results)  # Ensure it's a dict # TODO: Drop dict across the codebase for better developer experience.
+            cls._warn_on_sparse_binary_report(results.get("binary_report"))
             return results
         else:
             # Multiple batch scenario
@@ -136,8 +137,47 @@ class ClusterAnalyzer:
             final_result = {"clusters": all_clusters_result, "binary_description": binary_description, "binary_category": binary_category}
             if binary_report is not None:
                 final_result["binary_report"] = binary_report
+                cls._warn_on_sparse_binary_report(binary_report)
 
             return final_result
+
+
+    @staticmethod
+    def _warn_on_sparse_binary_report(binary_report: Any) -> None:
+        """Soft length check on the final binary_report markdown string.
+
+        The hard length validator on ``BinaryReport`` was relaxed to a
+        ceiling-only check because the Pydantic model-validator
+        constraint isn't visible in the JSON schema the LLM sees, so
+        the model can't aim for a minimum it doesn't know exists, and
+        a hard floor would fail entire analyses on sparse-but-valid
+        reports. The LLM-visible target (1500-4500 chars) lives in
+        ``ClusterAnalyzerSignature``'s docstring; this function logs
+        a non-fatal warning when the produced report falls under
+        ``BinaryReport.SOFT_MIN_LENGTH`` so the analyst knows the
+        report is sparse but the analysis still succeeds.
+
+        ``binary_report`` is the already-rendered markdown string —
+        the outer ``ClusterAnalysisResponse`` serializer flattens the
+        structured form via ``to_markdown()`` before this function
+        sees it.
+        """
+        if not isinstance(binary_report, str):
+            return
+        try:
+            from xrefer.llm.dspy_modules import BinaryReport
+            soft_min = BinaryReport.SOFT_MIN_LENGTH
+        except Exception:
+            soft_min = 1500
+        n = len(binary_report)
+        if n and n < soft_min:
+            log(
+                f"[!] binary_report is sparse: {n} chars rendered "
+                f"(target: {soft_min}-4500). Analysis succeeded but "
+                "the report may lack detail for analyst triage. "
+                "Re-running cluster analysis usually produces a "
+                "richer report."
+            )
 
 
     @staticmethod

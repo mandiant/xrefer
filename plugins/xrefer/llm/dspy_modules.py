@@ -16,7 +16,7 @@
 
 import enum
 import re
-from typing import Any, Dict, List
+from typing import Any, ClassVar, Dict, List
 
 import dspy
 from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
@@ -264,16 +264,34 @@ class BinaryReport(BaseModel):
 
     @model_validator(mode="after")
     def _length_budget(self) -> "BinaryReport":
+        # We only enforce the UPPER bound here — runaway-long reports
+        # break the renderer's layout and are easy to detect. A lower
+        # bound is INTENTIONALLY NOT enforced as a hard validator: the
+        # Pydantic model-validator constraint isn't reflected in the
+        # JSON schema the LLM sees, so the model can't aim for a
+        # minimum it doesn't know exists, and a hard floor would cause
+        # the whole analysis to fail when the LLM produces a sparse
+        # (but otherwise structurally-valid) report. Length-target
+        # guidance for the LLM lives in the ClusterAnalyzerSignature
+        # docstring (LLM-visible); a post-hoc warning lives in
+        # ClusterAnalyzer.analyze_clusters (non-fatal).
         n = len(self.to_markdown())
-        if not 1500 <= n <= 4500:
+        if n > 4500:
             raise ValueError(
                 f"binary_report rendered length is {n} chars; must be "
-                "1500-4500. Trim or expand to fit. Per-section caps "
-                "are intentionally not enforced — distribute prose "
+                "<= 4500. Trim verbose sections. Per-section caps are "
+                "intentionally not enforced — redistribute prose "
                 "across overview, behavior sections, and "
                 "observed_artifacts."
             )
         return self
+
+    # Soft target length (rendered markdown) below which we log a
+    # warning in analyze_clusters. Above this, the report is considered
+    # rich enough for analyst triage; below, it likely lacks substance.
+    # Annotated as ClassVar so Pydantic v2 doesn't try to treat it as
+    # a model field.
+    SOFT_MIN_LENGTH: ClassVar[int] = 1500
 
     def to_markdown(self) -> str:
         """Render this BinaryReport back to the markdown subset the
@@ -830,7 +848,13 @@ class ClusterAnalyzerSignature(dspy.Signature):
         `behavior` sections (each with an evidence-descriptive
         verb-phrase heading, never a bare TTP category name), and an
         `observed_artifacts` list (label + value pairs from the
-        IoCLabel enum).
+        IoCLabel enum). TARGET TOTAL RENDERED LENGTH: 1500-4500
+        characters (sum of overview + every behavior body + every
+        observed-artifact line). Hard ceiling is 4500 chars and is
+        validated. Lengths under 1500 chars are accepted but are
+        usually too sparse for analyst triage — aim for the target
+        band by writing substantive bodies on every behavior section
+        rather than padding with filler.
 
     Evidence basis: your input is the artifacts (strings, APIs,
     libraries, CAPA matches) and call flows shown above — NOT the
