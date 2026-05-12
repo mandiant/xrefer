@@ -81,215 +81,54 @@ class BinaryReport(BaseModel):
     overview: str = Field(
         ...,
         description=(
-            "One paragraph. MUST open with 'The binary is ' or 'This "
-            "binary is '. States what the binary is and the single "
-            "strongest takeaway in one or two sentences. No bullets. "
-            "Code spans (`like this`) are permitted; no other markdown. "
-            "Length is NOT validated — match the binary; do not pad to "
-            "hit a target."
+            "One paragraph opening with 'The binary is ' or 'This "
+            "binary is '. State what the binary is and its strongest "
+            "takeaway. No bullets. Code spans (`like this`) are "
+            "permitted; no other markdown."
         ),
     )
     details: str = Field(
         ...,
         description=(
-            "Comprehensive technical analysis as free-form markdown. "
-            "Organize with `###` sub-headings driven by what THIS "
-            "binary actually does — examples drawn from real reports "
-            "include 'Execution and Orchestration', 'Information "
-            "Stealing and Data Collection', 'Screen Capture Utility', "
-            "'Network Communication and Exfiltration', 'Defense "
-            "Evasion and Infrastructure', 'Privilege Escalation and "
-            "Evasion', 'File Processing and Encryption Pipeline', "
-            "'Reporting and User Interface'. The LLM picks the sub-"
-            "headings; the schema does NOT prescribe a list. \n"
+            "Comprehensive technical report as markdown. Use `###` "
+            "sub-headings to organise the analysis around what the "
+            "binary actually does — there is no fixed list of sub-"
+            "section names.\n"
             "\n"
-            "BREADTH MATTERS AS MUCH AS DEPTH. Open a SEPARATE `###` "
-            "sub-section for each distinct functional area the "
-            "cluster_data reveals. Do NOT consolidate unrelated "
-            "behaviors into one sub-section just because they share "
-            "a vague theme. \n"
+            "Cover EVERY aspect of the binary's behaviour visible in "
+            "the cluster_data: every cluster's functionality, every "
+            "library, protocol, algorithm, configuration setting, "
+            "and runtime identifier. Be exhaustive within sub-"
+            "sections — if 32 file extensions are observed, list all "
+            "32; if three encryption algorithms, name each.\n"
             "\n"
-            "XRefer analyses every kind of binary, not just malware. "
-            "Different binary classes have very different functional "
-            "structures, and the right set of sub-sections varies "
-            "widely: \n"
-            "  - A compression utility's sub-sections might cover "
-            "input parsing, compression algorithms, output streaming, "
-            "and CLI handling. \n"
-            "  - A debugger's might cover process attachment, symbol "
-            "resolution, breakpoint management, memory inspection, "
-            "and scripting / automation APIs. \n"
-            "  - A backup tool's might cover file discovery, "
-            "compression, encryption, scheduling, and cloud "
-            "transport. \n"
-            "  - An installer's might cover package extraction, "
-            "dependency resolution, COM registration, shortcut "
-            "creation, and uninstall manifest writing. \n"
-            "  - A media player's might cover container parsing, "
-            "codec selection, audio / video I/O, and hardware "
-            "acceleration. \n"
-            "  - A malware sample's might cover execution / "
-            "orchestration, autostart configuration, security-"
-            "relevant behaviors (anti-debug, log access), network "
-            "discovery, network transport, encryption pipeline, and "
-            "observable runtime artifacts. \n"
+            "Quote concrete strings VERBATIM in backticks: domains, "
+            "IPs, paths, registry keys, mutex names, user-agents, "
+            "library names, CLI flags, hardcoded commands. Do not "
+            "generalise ('uses a mutex named `filemanager1`' not "
+            "'uses a mutex').\n"
             "\n"
-            "MATCH THE BINARY'S ACTUAL FUNCTIONAL STRUCTURE. The "
-            "categories below are a STARTING SET of common functional "
-            "areas across many binary classes — they are NOT a "
-            "checklist to satisfy, NOT a required set, and MANY "
-            "binaries will have meaningful categories not on the "
-            "list. Open a sub-section ONLY when the artifacts "
-            "support it; do NOT invent sub-sections to match the "
-            "list, and DO open additional sub-sections (with "
-            "appropriate `###` headings) for any functional area the "
-            "artifacts reveal that isn't enumerated here. \n"
+            "End with a final sub-section listing the binary's "
+            "observable runtime identifiers (domains, IPs, URLs / "
+            "URL paths, user-agents, mutexes, registry keys, file "
+            "paths, file extensions, commands, service names, "
+            "scheduled tasks, COM CLSIDs / GUIDs, library names) "
+            "when any exist, formatted as ``- **<Label>**: `<value>`"
+            " `` lines. Title it `### Indicators of Compromise "
+            "(IoCs)` when binary_category is explicitly malicious "
+            "(anything other than Undetermined, Utility, Remote "
+            "Control and Administration Tool, Archiver, Sniffer, "
+            "Cryptocurrency Miner, Decoder, Decrypter, Screen "
+            "Capture Tool, Reconnaissance Tool, Builder); otherwise "
+            "title it `### Observable Runtime Artifacts`. Omit this "
+            "sub-section only when the binary has no such "
+            "identifiers at all.\n"
             "\n"
-            "  - Language / runtime / framework identification "
-            "(Rust, Go, .NET, Python-frozen, Electron, etc. — when "
-            "symbol prefixes, library names, or string patterns "
-            "indicate it). \n"
-            "  - Configuration handling (CLI argument parsers + "
-            "verbatim flag names, config-file formats, environment "
-            "variables, embedded schemas, key blobs, exclusion "
-            "lists). \n"
-            "  - Library / framework dependencies (every notable "
-            "third-party library that defines a behavior — JSON/YAML "
-            "parsers, TUI/UI frameworks, HTTP clients, compression "
-            "libraries, crypto libraries, ORMs, etc.). \n"
-            "  - Data formats / parsers / codecs / containers (file "
-            "format support, codec selection, container parsing, "
-            "wire-protocol encoders/decoders, schema serialisation). \n"
-            "  - External I/O (file-system operations, network "
-            "I/O, registry, IPC such as named pipes / mailslots / "
-            "shared memory, COM, etc.). \n"
-            "  - Storage / database / state management (transaction "
-            "logs, indexing, replication, embedded databases, "
-            "checkpoint files). \n"
-            "  - Cryptographic operations (EVERY algorithm by name: "
-            "AES, ChaCha20, RSA with key sizes, hash functions; "
-            "EVERY mode / pattern: CBC, GCM, Full / Partial / Header "
-            "/ SmartPattern / DotPattern, etc.; key wrapping; nonce "
-            "handling; certificate / TLS handling). \n"
-            "  - Process and privilege handling (every privilege "
-            "token requested by name, elevation primitives, process "
-            "creation / injection, token manipulation). \n"
-            "  - Autostart / persistence / installation behaviors "
-            "(registry run keys, services, scheduled tasks, startup "
-            "folders, WMI subscriptions, boot-config edits, install "
-            "/ uninstall manifests, COM registration). These apply "
-            "to installers AND malware; describe what the artifacts "
-            "actually show. \n"
-            "  - Security-relevant behaviors (anti-debug, anti-VM, "
-            "DLL unhooking / handling, log access, dynamic API "
-            "resolution, process hollowing — when present). \n"
-            "  - Network discovery / enumeration (each protocol / "
-            "API family separately — `NetShareEnum`/`NetServerEnum` "
-            "vs. ARP vs. NetBIOS vs. mDNS, etc.; when present). \n"
-            "  - Network propagation / multi-host coordination "
-            "(self-spread mechanisms, remote-execution primitives "
-            "with verbatim flags, distributed coordination "
-            "protocols — when present). \n"
-            "  - Network transport (HTTP/HTTPS, custom TCP/UDP "
-            "protocols, DNS, hardcoded endpoints, user-agent "
-            "strings — when present). \n"
-            "  - User interface / reporting / logging (terminal UI "
-            "libraries by name, GUI frameworks, dashboards, "
-            "telemetry, log formats). \n"
-            "  - Plugin / extension / scripting interfaces "
-            "(scripting engines, extension loading — when present). \n"
-            "  - Hardware interaction (drivers, USB, sensors, "
-            "graphics-acceleration APIs — when present). \n"
-            "  - Localisation / internationalisation (when "
-            "materially significant). \n"
-            "  - Update / patch behaviors (legitimate updater logic, "
-            "version-check endpoints, patch-application). \n"
-            "  - Telemetry / diagnostics / metrics. \n"
-            "  - Observable Runtime Artifacts (FINAL sub-section — "
-            "see MANDATORY rule below; for malicious binaries this "
-            "is the IoC list). \n"
-            "\n"
-            "WHEN IN DOUBT, prefer more sub-sections at finer "
-            "granularity over fewer at coarser granularity. \n"
-            "\n"
-            "REPORT COMPREHENSIVELY AND VERBATIM. Every cluster, "
-            "every interesting artifact, every behavior visible in "
-            "the cluster_data MUST be mentioned somewhere in the "
-            "report. Do NOT summarize away information. If the "
-            "cluster_data shows 32 file extensions, list all 32. If "
-            "five distinct evasion techniques, describe each. \n"
-            "\n"
-            "QUOTE SPECIFIC STRINGS VERBATIM. When the cluster's "
-            "artifacts contain a concrete string (domain, path, "
-            "registry key, mutex name, user-agent, CLI command, API "
-            "or library name, file extension), write the string "
-            "INSIDE BACKTICKS in the prose — do NOT paraphrase or "
-            "generalize. Examples of the difference: \n"
-            "  - GOOD: 'communicates with the domain `tastedata.shop`' \n"
-            "  - BAD:  'communicates with a remote domain' \n"
-            "  - GOOD: 'uses a mutex named `filemanager1`' \n"
-            "  - BAD:  'uses a mutex' \n"
-            "  - GOOD: 'queries `Software\\\\Bitcoin\\\\Bitcoin-Qt` "
-            "and `Software\\\\monero-project\\\\monero-core`' \n"
-            "  - BAD:  'queries registry keys for cryptocurrency "
-            "wallets' \n"
-            "Specific names ARE the value the analyst is reading the "
-            "report to recover. Hand-waved descriptions are the "
-            "regression we are explicitly trying to prevent. Hedging "
-            "language ('likely', 'appears to', 'may') is fine and "
-            "signals inference. \n"
-            "\n"
-            "MANDATORY OBSERVABLE-ARTIFACTS SUB-SECTION. When the "
-            "cluster_data contains ANY concrete strings that the "
-            "binary references at runtime — domains, IPs, URLs / "
-            "URL paths, user-agents, mutex / event / semaphore "
-            "names, registry keys, file paths, file extensions, "
-            "command lines, service names, scheduled task names, "
-            "COM CLSIDs / GUIDs, library names, or other hardcoded "
-            "identifiers — you MUST include them as the FINAL sub-"
-            "section formatted as a bulleted list: "
-            "``- **<Label>**: `<value>` ``. List ALL observed "
-            "values (if there are 12 file extensions, list all "
-            "12). The framing is LITERAL (these strings appear in "
-            "the binary's artifacts), NOT interpretive (they are "
-            "known to be malicious). \n"
-            "\n"
-            "Title for this final sub-section: use "
-            "`### Observable Runtime Artifacts` for a binary that "
-            "is benign, ambiguous, or unclassified. Use "
-            "`### Indicators of Compromise (IoCs)` only when "
-            "`binary_category` is one of the explicitly-malicious "
-            "categories (every category except `Undetermined`, "
-            "`Utility`, `Remote Control and Administration Tool`, "
-            "`Archiver`, `Sniffer`, `Cryptocurrency Miner`, "
-            "`Decoder`, `Decrypter`, `Screen Capture Tool`, "
-            "`Reconnaissance Tool`, `Builder` — those are neutral "
-            "or explicitly-legitimate categories where the IoC "
-            "framing presupposes a malicious verdict the artifacts "
-            "may not support). The bullet format is identical "
-            "regardless of which title is used. \n"
-            "\n"
-            "The sub-section is omitted ONLY when the binary has "
-            "no hardcoded runtime identifiers at all (a pure "
-            "compute / parsing utility with no network endpoints, "
-            "no hardcoded paths, no fixed mutex / service names). \n"
-            "\n"
-            "STYLE. Prefer concrete facts ('32 file extensions') "
-            "over marketing adjectives ('comprehensive list'). The "
-            "words 'sophisticated', 'advanced', 'powerful', "
-            "'comprehensive', 'extensive', 'robust', 'complex', "
-            "'specialized', and 'distinctive' carry no information "
-            "the concrete facts can't carry better — avoid them. "
-            "Cluster cross-references (the `cluster.id.NNNN` form) "
-            "belong in the per-cluster `relationships` field, NOT "
-            "in binary_report. \n"
-            "\n"
-            "Allowed markdown inside details: `###` (sub-headings, "
-            "this is the only level — the top-level `##` structure is "
-            "fixed by `to_markdown()`), `####` (sub-sub-headings if "
-            "needed), `-` bulleted lists, `**bold**`, `` `inline "
-            "code` ``. No code fences, no `##`, no tables, no images. "
-            "Length is NOT validated — match the binary's substance."
+            "Markdown allowed: `###`, `####`, `-`, `**bold**`, "
+            "`` `inline code` ``. No `##` (top-level structure is "
+            "fixed), no code fences, no tables. Do not include "
+            "`cluster.id.NNNN` references — those belong in per-"
+            "cluster relationships, not in this field."
         ),
     )
 
@@ -695,7 +534,19 @@ class ClusterAnalysisResponse(BaseModel):
     """Response model for cluster analysis."""
 
     clusters: List[ClusterAnalysisItem] = Field(..., description="List of cluster analyses with their identifiers")
-    binary_description: str = Field(..., description="Overall description of the binary's functionality. Plain prose only — do NOT use markdown formatting (no headings, no bullet lists, no asterisks for emphasis).")
+    binary_description: str = Field(
+        ...,
+        description=(
+            "Overall description of the binary's functionality. "
+            "PLAIN PROSE ONLY. Absolutely no markdown formatting "
+            "of any kind: no headings (`#`, `##`, `###`), no bullet "
+            "lists (`-`, `*`), no asterisks for emphasis "
+            "(`**bold**`, `*italic*`), no backticks for code spans "
+            "(`` `code` ``), no code fences. The full description "
+            "must read as natural prose. Markdown belongs in "
+            "binary_report, not here."
+        ),
+    )
     binary_category: BinaryCategory = Field(
         ...,
         description=(
@@ -805,306 +656,112 @@ class ClusterAnalysisResponse(BaseModel):
 
 class ClusterAnalyzerSignature(dspy.Signature):
     """
-    Analyze function clusters to understand binary functionality.
+    You are analysing a binary by reading its function-cluster
+    structure and per-cluster artifacts (API calls, strings,
+    libraries, CAPA capabilities, and call flows). The binary may or
+    may not be malicious. Describe what the artifacts actually show;
+    do not presume intent.
 
-    You will be given a hierarchical structure of function clusters with
-    their associated artifacts (API calls, strings, libraries, CAPA
-    capabilities) and call flows.
-
-    IMPORTANT — objectivity. The binary you are analyzing MAY OR MAY NOT
-    be malicious. Your job is to describe what it does objectively,
-    based solely on the observed artifacts; do NOT presume malicious
-    intent. Many benign programs (compilers, archivers, installers,
-    system utilities, remote-administration software, compression /
-    encryption tools, antivirus products, debuggers, network
-    diagnostics) share artifact patterns with malware. When the
-    artifacts do not clearly indicate adversary behavior, choose
-    neutral or `Undetermined` classifications over forcing the binary
-    into a malicious one. Confine claims to what the artifacts
-    directly support; do not infer intent.
-
-    For each cluster, working from deepest subclusters upward, produce:
-      - `label`: short descriptive name
-      - `description`: what the cluster does (no function addresses,
-        no cluster IDs — cluster IDs go in `relationships`). Should
-        reflect the functionality of subclusters and referenced
-        clusters too.
+    Per-cluster outputs (work from deepest subclusters upward):
+      - `label`: short descriptive name. Reflect the functionality
+        of subclusters and referenced clusters too. If a cluster
+        orchestrates most of the binary, say so in the label.
+      - `description`: what the cluster does. No function addresses;
+        no cluster IDs (those go in `relationships`).
       - `relationships`: how this cluster interacts with referenced
-        clusters; this is the ONLY field where `cluster.id.NNNN` form
-        is allowed.
-      - `function_prefix`: one-word prefix for renaming functions
-      - `library_or_runtime`: 1 for library/runtime code, 0 otherwise
-      - `mitre_attack`: WHEN the cluster's observed behaviors
-        correspond to MITRE ATT&CK Enterprise techniques, map them.
-        ONLY include techniques SUPPORTED by the cluster's actual
-        artifacts (APIs, strings, CAPA hits, call patterns). Each entry
-        has `id` (canonical MITRE form, sub-technique when applicable
-        e.g. `T1059.003`), `tactic` (kill-chain phase, exactly as
-        MITRE names it), `name`, and `rationale` (1-2 sentences citing
-        specific observed artifacts/behaviors — not generic technique
-        definitions). The rationale must cite what was observed in
-        THIS cluster (e.g. "uses CreateProcessW with the /c cmd.exe
-        pattern visible in strings"); if you can't construct such a
-        rationale, OMIT the mapping. Bias STRONGLY toward omitting
-        marginal mappings — a cluster with 2 well-grounded mappings is
-        more useful than 8 thinly-supported ones. Use the rationale's
-        own language as the test: if you'd need hedging phrases like
-        "may indicate", "could suggest", "is consistent with",
-        "potentially used for", "appears to be related to", or "likely
-        involved in", the evidence is too weak; OMIT the mapping
-        instead. Empty list is the CORRECT answer for pure utility /
-        library / runtime / parsing / math / string-handling clusters
-        that do not implement any technique-shaped behavior. The same
-        mapping standard applies regardless of the binary's eventual
-        `binary_category`: map when the artifact evidence directly
-        supports the technique, omit when it doesn't. Benign software
-        that genuinely performs operations matching an ATT&CK
-        technique (an installer that spawns a shell, a backup tool
-        that takes a shadow copy, an archiver that compresses files)
-        should still get the mapping — ATT&CK is used here as a
-        behavioral lens, not as a malicious/benign verdict. Order by
-        ATT&CK kill-chain position; use the LATEST MITRE ATT&CK
-        Enterprise matrix; if unsure of a sub-technique ID, return
-        the parent technique ID rather than guessing.
+        clusters. The ONLY field where `cluster.id.NNNN` may appear.
+      - `function_prefix`: one-word prefix for renaming functions.
+      - `library_or_runtime`: 1 for library/runtime code, 0 else.
+      - `mitre_attack`: ATT&CK Enterprise mappings supported by the
+        cluster's artifacts. Each entry: `id`, `tactic`, `name`,
+        `rationale` (1-2 sentences citing observed artifacts). Omit
+        any mapping you cannot ground; if you'd need hedging phrases
+        like "may indicate" or "could suggest" or "is consistent
+        with", omit instead. Empty list is correct for clusters that
+        don't perform technique-shaped behaviour, and for binaries
+        that don't exhibit adversary techniques regardless of class.
 
-    Then produce binary-level outputs:
-      - `binary_description`: one-paragraph plain-prose summary (no
-        markdown — that's reserved for `binary_report`).
+    Binary-level outputs:
+      - `binary_description`: one paragraph, PLAIN PROSE ONLY (no
+        markdown of any kind — no headings, bullets, asterisks, or
+        backticks).
       - `binary_category`: one of the BinaryCategory enum values.
-      - `binary_report`: a BinaryReport with exactly two fields:
-        `overview` (paragraph that opens with "The binary is" /
-        "This binary is") and `details` (free-form markdown with
-        `###` sub-headings the LLM picks based on what the binary
-        actually does). The schema does NOT prescribe a list of
-        sub-section names — you organize Details however the
-        binary's behavior calls for. When the data contains
-        concrete runtime identifiers (domains, paths, mutexes,
-        registry keys, commands, etc.), end Details with a
-        `### Observable Runtime Artifacts` sub-section formatted
-        as bulleted ``- **<Label>**: `<value>` `` lines. (Use
-        `### Indicators of Compromise (IoCs)` as the title instead
-        only when `binary_category` is explicitly malicious — for
-        benign / ambiguous categories the IoC framing presupposes
-        a verdict the artifacts may not support.) See the
-        BinaryReport.overview and BinaryReport.details field
-        descriptions for full guidance. LENGTH TARGETS (advisory,
-        not validated): overview ≈ 200-500 chars; total rendered
-        markdown ≈ 1500-4500 chars. Match the binary — a small or
-        simple binary may need substantially less; a large or
-        complex one may merit more. Do NOT pad to hit a target;
-        do NOT truncate substantive content to fit one.
+        See the field description for the FLARE-taxonomy
+        definitions. Default to `Undetermined` when the artifacts
+        do not clearly support a malicious category.
+      - `binary_report`: a structured BinaryReport (overview +
+        details). See the field descriptions for the rules. The
+        core directive: cover EVERY aspect of the binary visible in
+        the cluster_data, quote concrete strings VERBATIM in
+        backticks, and end with the observable-artifacts /
+        IoC sub-section when the binary has hardcoded runtime
+        identifiers.
 
-    REPORT COMPREHENSIVELY AND VERBATIM. The most common failure
-    mode of earlier iterations was hand-waved descriptions that
-    omitted the specific strings the analyst is reading the report
-    to recover. Every cluster, every interesting artifact, every
-    behavior visible in the cluster_data MUST be mentioned in
-    `details`. If 32 file extensions are observed, list all 32. If
-    five distinct evasion techniques, describe each. When a concrete
-    string (domain, path, registry key, mutex, user-agent, API or
-    library name, file extension) is in the artifacts, QUOTE IT
-    VERBATIM IN BACKTICKS in the prose — do not generalize:
+    Example BinaryReport.details for a credential-stealer style
+    binary — shows the level of depth, breadth, and verbatim-
+    quotation expected; match this quality on real binaries.
+    Because the example binary is explicitly malicious, the final
+    sub-section uses the IoC title; for benign / ambiguous binaries
+    the same content goes under `### Observable Runtime Artifacts`.
 
-      - GOOD: "communicates with the domain `tastedata.shop` and
-        POSTs to `/ag-ap.php`"
-      - BAD:  "communicates with a remote PHP endpoint"
-      - GOOD: "uses a mutex named `filemanager1`"
-      - BAD:  "uses a mutex"
-      - GOOD: "queries `Software\\\\Bitcoin\\\\Bitcoin-Qt` and
-        `Software\\\\monero-project\\\\monero-core`"
-      - BAD:  "queries cryptocurrency-wallet registry keys"
+      ### Execution and Orchestration
 
-    Hedging language ('likely', 'appears to', 'may') is FINE — it
-    honestly signals inference vs. direct observation, and the
-    originals (origin/main, origin/gsoc_2025) use these tokens in
-    their own framing. Missing information and generalized
-    descriptions are the worst failure modes.
+      Initialises the environment and uses a mutex named
+      `filemanager1` to enforce single-instance execution.
+      Establishes exception handling and dispatches between
+      collection modules.
 
-    BREADTH MATTERS AS MUCH AS DEPTH. Open a SEPARATE `###` sub-
-    section for each distinct functional area the cluster_data
-    reveals; do NOT consolidate unrelated behaviors into one sub-
-    section just because they share a vague theme. XRefer analyses
-    every kind of binary, not just malware — the right set of sub-
-    sections varies widely by binary class (a compression utility
-    has different sub-sections than a debugger, which has different
-    ones than a backup tool, which has different ones than a
-    ransomware sample). Match the binary's actual functional
-    structure. The list below is a STARTING SET of common
-    categories across many classes, not a required checklist;
-    open additional sub-sections for any functional area the
-    artifacts reveal that isn't enumerated here:
+      ### Information Stealing and Data Collection
 
-    language / runtime identification; CLI / configuration
-    handling; library and framework dependencies; data formats /
-    parsers / codecs / containers; external I/O (file / network /
-    registry / IPC); storage / database / state management;
-    cryptographic operations (every algorithm + mode);
-    process and privilege handling; autostart / persistence /
-    installation behaviors (for installers AND malware); security-
-    relevant behaviors (anti-debug, log access, etc., when present);
-    network discovery (each protocol family separately, when
-    present); network propagation / multi-host coordination (when
-    present); network transport (when present); user interface /
-    reporting / logging; plugin / extension / scripting interfaces;
-    hardware interaction; update / patch behaviors; telemetry /
-    diagnostics; observable runtime artifacts.
+      - **System Discovery**: retrieves computer name, current
+        user, OS version, and physical memory status via
+        `GetComputerNameW`, `GetUserNameW`, `GlobalMemoryStatusEx`.
+      - **Storage Enumeration**: identifies logical drives and
+        standard system folders (Desktop, AppData) to locate
+        target files.
+      - **Application Targeting**: searches the registry for
+        configuration data:
+        - Cryptocurrency wallets: Bitcoin-Qt, Monero core wallets
+        - Communication: Microsoft Outlook profiles
+        - Remote access: WinSCP sessions, OpenVPN configurations
+        - Gaming: Valve Steam account information
 
-    See BinaryReport.details for the full guidance. WHEN IN DOUBT,
-    prefer more sub-sections at finer granularity over fewer at
-    coarser granularity. Open a sub-section ONLY when the
-    artifacts support it; do NOT invent sub-sections to match the
-    list above.
+      ### Screen Capture
 
-    MANDATORY OBSERVABLE-ARTIFACTS SUB-SECTION. When the
-    cluster_data contains ANY concrete runtime identifiers — domains,
-    IPs, URLs, user-agents, mutexes, registry keys, file paths, file
-    extensions, command lines, service names, scheduled tasks, COM
-    CLSIDs / GUIDs, or library names that the binary references at
-    runtime — the LAST sub-section of `details` MUST list every one,
-    formatted as ``- **<Label>**: `<value>` ``. Title the sub-section
-    `### Observable Runtime Artifacts` by default, OR
-    `### Indicators of Compromise (IoCs)` when `binary_category` is
-    explicitly malicious (i.e. NOT one of `Undetermined`, `Utility`,
-    `Remote Control and Administration Tool`, `Archiver`, `Sniffer`,
-    `Cryptocurrency Miner`, `Decoder`, `Decrypter`, `Screen Capture
-    Tool`, `Reconnaissance Tool`, `Builder`). Omit the sub-section
-    entirely only when the binary has no such hardcoded identifiers
-    at all.
+      Captures the desktop window using GDI+ — calls `BitBlt` to
+      copy the display context into a bitmap, then encodes and
+      stages it for exfiltration.
 
-    Evidence basis: your input is the artifacts (strings, APIs,
-    libraries, CAPA matches) and call flows shown above — NOT the
-    binary's source code. Confine claims in `binary_report` (and in
-    `mitre_attack` rationales) to what those artifacts directly
-    support. You can use hedges to mark inference, but you should
-    not state observations the artifacts don't contain.
-      - GOOD: "Captures the desktop using GDI handles and stages
-        the bitmap in a memory buffer."
-      - GOOD: "Likely facilitates execution of dynamically loaded
-        code by adjusting page protections."  (hedge marks inference)
-      - BAD  (marketing adjectives + filler instead of facts):
-        "Uses a sophisticated screen-capture technique for
-        comprehensive surveillance." Replace with concrete facts.
-      - BAD  (presumes malice without artifact support):
-        "Compresses files for exfiltration to attacker-controlled
-        servers." — the "exfiltration" claim names a network
-        destination the artifacts do not show. If the cluster
-        compresses files and there is no observed network call,
-        describe only the compression.
+      ### Network Communication
 
-    Avoid the banned-token list (marketing adjectives like
-    'sophisticated' / 'advanced' / 'robust' / 'comprehensive' /
-    'extensive', and the substring 'cluster.id.'). Use concrete
-    numbers and concrete artifact names — '32 file extensions',
-    not 'comprehensive list'.
+      Exfiltrates over HTTP using WinHttp. POSTs to
+      `tastedata.shop/ag-ap.php` with a hardcoded User-Agent
+      string mimicking macOS Chrome.
 
-    Worked example #1 — a BinaryReport for a credential-stealer
-    style binary. Demonstrates the rich, comprehensive style and
-    the final-sub-section format. Because `binary_category` for
-    this hypothetical sample would be `Credential Stealer`
-    (explicitly malicious), the final sub-section is titled
-    `### Indicators of Compromise (IoCs)`. For a benign / ambiguous
-    binary the same content would appear under
-    `### Observable Runtime Artifacts` — the format and bullets
-    are identical:
+      ### Defense Evasion
 
-      overview: "The binary is a credential stealer that
-        systematically harvests environment information, captures
-        user activity via screenshots, and pulls credentials from
-        installed applications, exfiltrating the results to a
-        remote HTTP server. It uses standard Windows APIs for data
-        collection and the WinHttp library for exfiltration."
+      - **DLL unhooking**: reads `ntdll.dll` directly from
+        `C:\\windows\\system32\\` to bypass EDR/AV hooks.
+      - **Dynamic API resolution**: resolves functions at runtime
+        via `LoadLibraryA` and `GetProcAddress`.
+      - **Memory protection**: uses `VirtualProtect` to modify
+        page permissions, likely to facilitate execution of
+        dynamically loaded code.
 
-      details: |
-        ### Execution and Orchestration
+      ### Indicators of Compromise (IoCs)
 
-        The binary's execution begins with an orchestration layer
-        that initialises the environment and manages the transition
-        between primary modules. It establishes exception handling
-        routines and uses a mutex named `filemanager1` to ensure
-        only a single instance runs on the host.
+      - **Domain**: `tastedata.shop`
+      - **URL Path**: `/ag-ap.php`
+      - **Mutex**: `filemanager1`
+      - **User-Agent**: `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36`
 
-        ### Information Stealing and Data Collection
-
-        The core functionality lives in a dedicated data-collection
-        engine that performs:
-
-        - **System Discovery**: Retrieves the computer name,
-          current username, OS version, and physical memory status
-          via `GetComputerNameW`, `GetUserNameW`, and
-          `GlobalMemoryStatusEx`.
-        - **Storage and Environment Enumeration**: Identifies all
-          logical drives and maps standard system folders (Desktop,
-          AppData) to locate target files.
-        - **Application Targeting**: Searches the registry for
-          configuration data tied to high-value applications:
-          - Cryptocurrency Wallets: Bitcoin-Qt, Monero core wallets
-          - Communication: Microsoft Outlook profiles
-          - Remote Access: WinSCP sessions, OpenVPN configurations
-          - Gaming: Valve Steam account information
-
-        ### Screen Capture Utility
-
-        A specialised module leverages the GDI+ library to capture
-        the desktop window. It uses `BitBlt` to copy the display
-        context into a bitmap, which is then encoded and saved to
-        a stream for exfiltration.
-
-        ### Network Communication and Exfiltration
-
-        Exfiltration runs over HTTP via the WinHttp library. The
-        malware communicates with the domain `tastedata.shop`,
-        POSTing collected data to the PHP endpoint `/ag-ap.php`.
-        Requests use a hardcoded User-Agent string mimicking a
-        macOS Chrome browser.
-
-        ### Defense Evasion and Infrastructure
-
-        Several defensive behaviours are present:
-
-        - **DLL Unhooking**: Reads `ntdll.dll` directly from
-          `C:\\windows\\system32\\` — a common technique to bypass
-          EDR/AV hooks by loading a clean library copy.
-        - **Dynamic API Resolution**: Resolves critical functions
-          at runtime via `LoadLibraryA` and `GetProcAddress`,
-          hindering static analysis.
-        - **Memory Protection**: Uses `VirtualProtect` to modify
-          memory-page permissions, likely to facilitate execution
-          of dynamically loaded code or protect sensitive buffers.
-
-        ### Indicators of Compromise (IoCs)
-
-        - **Domain**: `tastedata.shop`
-        - **URL Path**: `/ag-ap.php`
-        - **Mutex**: `filemanager1`
-        - **User-Agent**: `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36`
-
-    Worked example #2 — a BinaryReport for a benign binary (a
-    small CRC32 command-line utility). Demonstrates that the same
-    schema accommodates a terse binary — there are no IoCs, the
-    details body is short, and `binary_category` is `Utility` or
-    `Undetermined`, NOT a malicious category. Match the binary's
-    actual substance.
-
-      overview: "The binary is a command-line CRC32 utility that
-        reads input bytes (from stdin or from a path supplied as
-        an argument), computes the CRC32 checksum, and prints the
-        result. It performs no network I/O, registry access, or
-        process spawning."
-
-      details: |
-        ### CRC32 Computation Pipeline
-
-        Reads input bytes either from stdin or from the file path
-        supplied as the first argument. Computes the CRC32
-        checksum using a precomputed table-based reflection of the
-        IEEE 802.3 polynomial. Prints the result in lowercase hex.
-
-        ### Command-line Argument Handling
-
-        Accepts a single optional positional argument: a file path
-        to checksum. With no argument, reads bytes from stdin
-        until EOF. Errors during file open are reported to stderr
-        and the process exits with a non-zero status.
+    This example shows the EXPECTED LEVEL of depth and specificity —
+    multiple sub-sections covering distinct functional areas,
+    verbatim strings, exhaustive bullets. Real binaries vary widely
+    in class (compression utilities, debuggers, installers, etc.)
+    and their sub-sections will look very different; match the
+    binary's actual structure rather than copying this example's
+    headings.
     """
     cluster_data: str = dspy.InputField(description="Raw cluster hierarchy with functions and artifacts (for reference)")
     analysis: ClusterAnalysisResponse = dspy.OutputField(description="Complete cluster analysis with per-cluster metadata and binary-level insights")
