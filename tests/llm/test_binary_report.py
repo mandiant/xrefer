@@ -169,8 +169,8 @@ def test_valid_report_passes_all_validators():
     # Observed-artifact lines match the `- **Label**: \`value\`` shape.
     for art in _valid_artifacts():
         assert f"- **{art.label.value}**: `{art.value}`" in md
-    # Total length is inside the [1500, 4500] band.
-    assert 1500 <= len(md) <= 4500, len(md)
+    # Length is NOT asserted — that's intentional; see BinaryReport
+    # class-level note explaining why length validation was dropped.
 
 
 def test_empty_observed_artifacts_renders_fallback_sentence():
@@ -238,21 +238,15 @@ def test_explicit_none_observed_artifacts_raises():
 @pytest.mark.parametrize(
     "bad_opener",
     [
-        # Each filler is sized so the overview lands inside [200, 500]
-        # min/max_length — we want the opener validator to be the
-        # cause of failure, not the min_length validator firing first.
-        "This is a binary that "
-        + "spreads through phishing-attached zip files. " * 5,
-        "The sample is a Windows credential stealer that "
-        + "harvests browser-stored secrets. " * 5,
-        "It is a tiny dropper that "
-        + "stages a second-stage payload on disk. " * 5,
+        # Length is no longer enforced on overview; these openers can
+        # be any length. We only care that the opener-validator rule
+        # ("must open with The binary is / This binary is") fires.
+        "This is a binary that spreads through phishing-attached zip files.",
+        "The sample is a Windows credential stealer.",
+        "It is a tiny dropper that stages a second-stage payload on disk.",
     ],
 )
 def test_overview_opener_validator(bad_opener):
-    # Sanity-check the fixture so a future tweak doesn't accidentally
-    # trip the min/max_length validators instead of the opener rule.
-    assert 200 <= len(bad_opener) <= 500, len(bad_opener)
     with pytest.raises(ValidationError, match="open with"):
         BinaryReport(
             overview=bad_opener,
@@ -379,21 +373,43 @@ def test_cluster_id_leak_in_artifact_value_raises():
         )
 
 
-# ── 6. Length budget ──────────────────────────────────────────────────
+# ── 6. Length is NOT validated ───────────────────────────────────────
+#
+# Earlier iterations had hard length constraints (min_length on
+# overview, [1500, 4500] total). Both failed real analyses on
+# small/simple binaries and on terse-but-accurate LLM responses. The
+# constraints aren't reflected in the JSON schema the LLM sees, so
+# the model could not aim for them, and DSPy doesn't retry on
+# Pydantic ValidationError in this path. Lengths are now expressed as
+# TARGETS in the LLM-visible docstring and as soft post-hoc warnings
+# in ClusterAnalyzer.analyze_clusters.
+
+
+def test_terse_short_overview_is_accepted():
+    """A short overview (well under what used to be the 200-char
+    floor) MUST instantiate without raising. Real-world small/simple
+    binaries can be described in a single short sentence.
+    """
+    r = BinaryReport(
+        overview="The binary is a CRC32 utility that prints the checksum of its argument.",
+        behavior=[
+            BehaviorSection(
+                heading="CRC32 computation over input bytes",
+                body="Reads the input argument as bytes and computes its CRC32.",
+            ),
+        ],
+        observed_artifacts=[],
+    )
+    n = len(r.to_markdown())
+    # Sanity-check that this fixture is below the soft floor — that's
+    # the precondition the test is exercising.
+    assert n < BinaryReport.SOFT_MIN_LENGTH, n
 
 
 def test_total_length_below_soft_minimum_is_accepted():
     """A sparse-but-structurally-valid report (single tiny behavior,
     empty artifacts) MUST instantiate successfully even though its
     rendered total is well below SOFT_MIN_LENGTH (1500).
-
-    The hard floor was intentionally removed because the Pydantic
-    model-validator constraint is not visible in the JSON schema the
-    LLM sees, so the model can't aim for a minimum it doesn't know
-    exists. A hard floor caused entire analyses to fail when the LLM
-    produced a sparse-but-valid report. The soft target is now
-    advertised in the ClusterAnalyzerSignature docstring (LLM-visible)
-    and surfaced as a post-hoc warning in ClusterAnalyzer.analyze_clusters.
     """
     r = BinaryReport(
         overview=_valid_overview(),
@@ -406,27 +422,41 @@ def test_total_length_below_soft_minimum_is_accepted():
         observed_artifacts=[],
     )
     n = len(r.to_markdown())
-    # Confirm this fixture is genuinely below the soft minimum — that's
-    # the precondition the test is exercising.
     assert n < BinaryReport.SOFT_MIN_LENGTH, n
 
 
-def test_total_length_above_maximum_raises():
-    """Inflate one body so the rendered total clears the 4500 char
-    cap and confirm the validator catches it.
+def test_total_length_above_soft_maximum_is_accepted():
+    """A long report (over what used to be the 4500-char ceiling)
+    MUST instantiate without raising. The HTML renderer is happy
+    with long markdown; the soft maximum exists only as a triage
+    hint via ClusterAnalyzer's post-hoc warning, not a hard limit.
     """
-    huge_body = "Writes data to disk in a loop. " * 200  # ~6 KB
-    with pytest.raises(ValidationError, match="rendered length"):
-        BinaryReport(
-            overview=_valid_overview(),
-            behavior=[
-                BehaviorSection(
-                    heading="Disk staging via standard CRT IO",
-                    body=huge_body,
-                )
-            ],
-            observed_artifacts=[],
-        )
+    huge_body = "Writes data to disk in a loop. " * 200  # ~6 KB body
+    r = BinaryReport(
+        overview=_valid_overview(),
+        behavior=[
+            BehaviorSection(
+                heading="Disk staging via standard CRT IO",
+                body=huge_body,
+            )
+        ],
+        observed_artifacts=[],
+    )
+    n = len(r.to_markdown())
+    assert n > BinaryReport.SOFT_MAX_LENGTH, n
+
+
+def test_long_behavior_heading_is_accepted():
+    """The previous max_length=120 on BehaviorSection.heading was
+    removed. Long verb-phrase headings should now be accepted.
+    """
+    long_heading = (
+        "Registry writes to startup-related keys under the user-profile "
+        "hive that persist a scheduled task pointing to a copy of the "
+        "binary staged in the user's roaming AppData directory"
+    )
+    assert len(long_heading) > 120
+    BehaviorSection(heading=long_heading, body="not empty")
 
 
 # ── 7. Outer-model serializer flattening ──────────────────────────────

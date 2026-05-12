@@ -146,16 +146,18 @@ class ClusterAnalyzer:
     def _warn_on_sparse_binary_report(binary_report: Any) -> None:
         """Soft length check on the final binary_report markdown string.
 
-        The hard length validator on ``BinaryReport`` was relaxed to a
-        ceiling-only check because the Pydantic model-validator
-        constraint isn't visible in the JSON schema the LLM sees, so
-        the model can't aim for a minimum it doesn't know exists, and
-        a hard floor would fail entire analyses on sparse-but-valid
-        reports. The LLM-visible target (1500-4500 chars) lives in
-        ``ClusterAnalyzerSignature``'s docstring; this function logs
-        a non-fatal warning when the produced report falls under
-        ``BinaryReport.SOFT_MIN_LENGTH`` so the analyst knows the
-        report is sparse but the analysis still succeeds.
+        Length is INTENTIONALLY not validated by Pydantic — Pydantic
+        field/model-validator constraints aren't reflected in the JSON
+        schema the LLM sees, so the model can't reliably aim for a
+        minimum it doesn't know exists, and a hard floor caused entire
+        analyses to fail when the LLM produced a terse-but-accurate
+        report for a small/simple binary. Length expectations live as
+        TARGETS in ``ClusterAnalyzerSignature``'s docstring
+        (LLM-visible) and as ``BinaryReport.SOFT_MIN_LENGTH`` /
+        ``SOFT_MAX_LENGTH`` (used here). When the rendered report
+        falls outside the target band, this function logs a non-fatal
+        warning so the analyst knows the report is anomalous but the
+        analysis still succeeds.
 
         ``binary_report`` is the already-rendered markdown string —
         the outer ``ClusterAnalysisResponse`` serializer flattens the
@@ -167,16 +169,28 @@ class ClusterAnalyzer:
         try:
             from xrefer.llm.dspy_modules import BinaryReport
             soft_min = BinaryReport.SOFT_MIN_LENGTH
+            soft_max = BinaryReport.SOFT_MAX_LENGTH
         except Exception:
-            soft_min = 1500
+            soft_min, soft_max = 1500, 4500
         n = len(binary_report)
-        if n and n < soft_min:
+        if not n:
+            return
+        if n < soft_min:
             log(
                 f"[!] binary_report is sparse: {n} chars rendered "
-                f"(target: {soft_min}-4500). Analysis succeeded but "
-                "the report may lack detail for analyst triage. "
-                "Re-running cluster analysis usually produces a "
+                f"(target: {soft_min}-{soft_max}). Analysis "
+                "succeeded but the report may lack detail. This is "
+                "fine for small/simple binaries; for larger ones, "
+                "re-running cluster analysis usually produces a "
                 "richer report."
+            )
+        elif n > soft_max:
+            log(
+                f"[!] binary_report is long: {n} chars rendered "
+                f"(target: {soft_min}-{soft_max}). Analysis "
+                "succeeded but the report may be verbose. The HTML "
+                "renderer handles long reports, but a more concise "
+                "report is usually easier to triage."
             )
 
 

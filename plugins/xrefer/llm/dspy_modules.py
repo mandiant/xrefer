@@ -117,15 +117,16 @@ class BehaviorSection(BaseModel):
     heading: str = Field(
         ...,
         min_length=1,
-        max_length=120,
         description=(
             "Evidence-descriptive verb-phrase heading naming what was "
             "observed. Examples of GOOD headings: 'Registry writes to "
             "startup-related keys', 'HTTP exfiltration to a remote "
             "endpoint', 'Screen-capture operations via GDI handles'. "
-            "The heading MUST NOT be a bare TTP category name like "
-            "'Persistence', 'Defense Evasion', 'Credential Theft', "
-            "'C2 Communication', 'Lateral Movement', 'Privilege "
+            "Typically a short verb-phrase (rule of thumb: under ~120 "
+            "characters), but length is NOT validated — substance wins "
+            "over brevity. The heading MUST NOT be a bare TTP category "
+            "name like 'Persistence', 'Defense Evasion', 'Credential "
+            "Theft', 'C2 Communication', 'Lateral Movement', 'Privilege "
             "Escalation', 'Reconnaissance', 'Discovery', 'Exfiltration', "
             "'Execution', 'Initial Access', 'Impact', or 'Collection' — "
             "those require reachability/intent inference that xrefer "
@@ -192,14 +193,16 @@ class BinaryReport(BaseModel):
 
     overview: str = Field(
         ...,
-        min_length=200,
-        max_length=500,
         description=(
-            "One paragraph, 200-500 characters. MUST open with 'The "
-            "binary is ' or 'This binary is '. States what the binary "
-            "is and the single strongest takeaway in one or two "
-            "sentences. No bullets. Code spans (`like this`) are "
-            "permitted; no other markdown."
+            "One paragraph. MUST open with 'The binary is ' or 'This "
+            "binary is '. States what the binary is and the single "
+            "strongest takeaway in one or two sentences. No bullets. "
+            "Code spans (`like this`) are permitted; no other markdown. "
+            "Length is NOT validated and is intentionally permissive — "
+            "a small, simple binary may need only a sentence ('The "
+            "binary is a CRC32 utility that prints the checksum of "
+            "its argument.'), while a complex one may merit two or "
+            "three. Match the binary; do not pad to hit a target."
         ),
     )
     behavior: List[BehaviorSection] = Field(
@@ -262,36 +265,26 @@ class BinaryReport(BaseModel):
             _scan(a.value, f"observed_artifacts[{i}].value")
         return self
 
-    @model_validator(mode="after")
-    def _length_budget(self) -> "BinaryReport":
-        # We only enforce the UPPER bound here — runaway-long reports
-        # break the renderer's layout and are easy to detect. A lower
-        # bound is INTENTIONALLY NOT enforced as a hard validator: the
-        # Pydantic model-validator constraint isn't reflected in the
-        # JSON schema the LLM sees, so the model can't aim for a
-        # minimum it doesn't know exists, and a hard floor would cause
-        # the whole analysis to fail when the LLM produces a sparse
-        # (but otherwise structurally-valid) report. Length-target
-        # guidance for the LLM lives in the ClusterAnalyzerSignature
-        # docstring (LLM-visible); a post-hoc warning lives in
-        # ClusterAnalyzer.analyze_clusters (non-fatal).
-        n = len(self.to_markdown())
-        if n > 4500:
-            raise ValueError(
-                f"binary_report rendered length is {n} chars; must be "
-                "<= 4500. Trim verbose sections. Per-section caps are "
-                "intentionally not enforced — redistribute prose "
-                "across overview, behavior sections, and "
-                "observed_artifacts."
-            )
-        return self
-
-    # Soft target length (rendered markdown) below which we log a
-    # warning in analyze_clusters. Above this, the report is considered
-    # rich enough for analyst triage; below, it likely lacks substance.
-    # Annotated as ClassVar so Pydantic v2 doesn't try to treat it as
-    # a model field.
+    # Length is INTENTIONALLY NOT validated. Earlier iterations had a
+    # hard [1500, 4500] floor/ceiling validator on the rendered total
+    # AND a min_length=200 on `overview`; both failed real analyses
+    # on small, simple binaries (and on terse-but-accurate LLM
+    # responses for any binary). Pydantic field-level / model-level
+    # length constraints aren't reflected in the JSON schema the LLM
+    # sees in a way that makes the LLM able to aim for them
+    # reliably, so a hard floor/ceiling on length is a contract the
+    # model can violate without warning, and DSPy doesn't retry on
+    # Pydantic ValidationError in this path — the whole analysis
+    # aborts.
+    #
+    # Length expectations now live as TARGETS in the LLM-visible
+    # docstring on ClusterAnalyzerSignature (so the model can read
+    # and aim for them), with non-fatal post-hoc warnings in
+    # ClusterAnalyzer.analyze_clusters if the produced report falls
+    # well below or above the target band. The constants below feed
+    # the warning logic.
     SOFT_MIN_LENGTH: ClassVar[int] = 1500
+    SOFT_MAX_LENGTH: ClassVar[int] = 4500
 
     def to_markdown(self) -> str:
         """Render this BinaryReport back to the markdown subset the
@@ -843,18 +836,18 @@ class ClusterAnalyzerSignature(dspy.Signature):
       - `binary_category`: one of the BinaryCategory enum values.
       - `binary_report`: a STRUCTURED BinaryReport (NOT a free-form
         string). Read each field's description carefully. Three
-        required sections: an `overview` paragraph (200-500 chars,
-        opens with "The binary is" or "This binary is"), a list of
-        `behavior` sections (each with an evidence-descriptive
-        verb-phrase heading, never a bare TTP category name), and an
+        required sections: an `overview` paragraph (opens with "The
+        binary is" or "This binary is"), a list of `behavior`
+        sections (each with an evidence-descriptive verb-phrase
+        heading, never a bare TTP category name), and an
         `observed_artifacts` list (label + value pairs from the
-        IoCLabel enum). TARGET TOTAL RENDERED LENGTH: 1500-4500
-        characters (sum of overview + every behavior body + every
-        observed-artifact line). Hard ceiling is 4500 chars and is
-        validated. Lengths under 1500 chars are accepted but are
-        usually too sparse for analyst triage — aim for the target
-        band by writing substantive bodies on every behavior section
-        rather than padding with filler.
+        IoCLabel enum). LENGTH TARGETS (not validated, advisory
+        only): overview ≈ 200-500 chars; total rendered markdown
+        ≈ 1500-4500 chars. Match the binary you're analyzing — a
+        small, simple binary may need substantially less, and a
+        large, complex one may merit more. Do NOT pad with filler
+        to hit a target, and do NOT truncate substantive content
+        to fit one.
 
     Evidence basis: your input is the artifacts (strings, APIs,
     libraries, CAPA matches) and call flows shown above — NOT the
