@@ -107,61 +107,110 @@ class BinaryReport(BaseModel):
             "sub-section for each distinct functional area the "
             "cluster_data reveals. Do NOT consolidate unrelated "
             "behaviors into one sub-section just because they share "
-            "a vague theme (e.g. do not fold privilege escalation, "
-            "shadow-copy deletion, log clearing, and Safe Mode "
-            "reboots into a single 'system control' sub-section — "
-            "each is a distinct functional area worth its own `###`). "
-            "Categories to PROBE FOR — open a sub-section about any "
-            "that the artifacts support (not every binary has every "
-            "category; do not invent sub-sections, but do NOT collapse "
-            "supported categories into adjacent ones): \n"
+            "a vague theme. \n"
+            "\n"
+            "XRefer analyses every kind of binary, not just malware. "
+            "Different binary classes have very different functional "
+            "structures, and the right set of sub-sections varies "
+            "widely: \n"
+            "  - A compression utility's sub-sections might cover "
+            "input parsing, compression algorithms, output streaming, "
+            "and CLI handling. \n"
+            "  - A debugger's might cover process attachment, symbol "
+            "resolution, breakpoint management, memory inspection, "
+            "and scripting / automation APIs. \n"
+            "  - A backup tool's might cover file discovery, "
+            "compression, encryption, scheduling, and cloud "
+            "transport. \n"
+            "  - An installer's might cover package extraction, "
+            "dependency resolution, COM registration, shortcut "
+            "creation, and uninstall manifest writing. \n"
+            "  - A media player's might cover container parsing, "
+            "codec selection, audio / video I/O, and hardware "
+            "acceleration. \n"
+            "  - A malware sample's might cover execution / "
+            "orchestration, autostart configuration, security-"
+            "relevant behaviors (anti-debug, log access), network "
+            "discovery, network transport, encryption pipeline, and "
+            "observable runtime artifacts. \n"
+            "\n"
+            "MATCH THE BINARY'S ACTUAL FUNCTIONAL STRUCTURE. The "
+            "categories below are a STARTING SET of common functional "
+            "areas across many binary classes — they are NOT a "
+            "checklist to satisfy, NOT a required set, and MANY "
+            "binaries will have meaningful categories not on the "
+            "list. Open a sub-section ONLY when the artifacts "
+            "support it; do NOT invent sub-sections to match the "
+            "list, and DO open additional sub-sections (with "
+            "appropriate `###` headings) for any functional area the "
+            "artifacts reveal that isn't enumerated here. \n"
+            "\n"
             "  - Language / runtime / framework identification "
             "(Rust, Go, .NET, Python-frozen, Electron, etc. — when "
             "symbol prefixes, library names, or string patterns "
             "indicate it). \n"
             "  - Configuration handling (CLI argument parsers + "
-            "verbatim flag names, config-file formats, embedded "
-            "schemas, key blobs, exclusion lists). \n"
+            "verbatim flag names, config-file formats, environment "
+            "variables, embedded schemas, key blobs, exclusion "
+            "lists). \n"
             "  - Library / framework dependencies (every notable "
             "third-party library that defines a behavior — JSON/YAML "
-            "parsers, TUI/UI frameworks, HTTP clients, crypto "
-            "libraries, etc.). \n"
-            "  - Privilege handling (every Windows privilege token "
-            "requested by name, UAC-bypass approaches, service "
-            "installation, token theft). \n"
-            "  - Persistence (registry run keys, scheduled tasks, "
-            "services, startup folders, WMI subscriptions, "
-            "boot-config edits). \n"
-            "  - Defense evasion (DLL unhooking, log clearing, "
-            "anti-debug, anti-VM, process hollowing, dynamic API "
-            "resolution). \n"
-            "  - Network discovery (each protocol / API family "
-            "separately — `NetShareEnum`/`NetServerEnum` vs. ARP "
-            "vs. NetBIOS vs. mDNS, etc.). \n"
-            "  - Network propagation (self-spread mechanisms, "
-            "`psexec.exe` with verbatim flags, remote-execution "
-            "primitives, lateral-movement APIs). \n"
-            "  - Network transport / C2 (HTTP/HTTPS, custom TCP/UDP "
-            "protocols, DNS tunneling, hardcoded endpoints, "
-            "user-agent strings). \n"
-            "  - Cryptography (EVERY algorithm: AES, ChaCha20, RSA "
-            "with key sizes, hash functions; EVERY mode / pattern: "
-            "CBC, GCM, Full / Partial / Header / SmartPattern / "
-            "DotPattern, etc.; key wrapping; nonce handling). \n"
-            "  - Data collection (system discovery, registry queries, "
-            "file enumeration, screen capture, keystroke logging). \n"
-            "  - Process / file manipulation (process injection, "
-            "file-attribute changes, ACL manipulation, shadow-copy "
-            "operations). \n"
-            "  - Reporting / UI / progress tracking (terminal UI "
-            "libraries by name, dashboards, telemetry, logging). \n"
-            "  - Indicators of Compromise (FINAL sub-section — see "
-            "MANDATORY rule below). \n"
-            "This list is not exhaustive; open additional `###` sub-"
-            "sections for any other distinct functional area the "
-            "artifacts reveal. WHEN IN DOUBT, prefer more sub-"
-            "sections at finer granularity over fewer at coarser "
-            "granularity. \n"
+            "parsers, TUI/UI frameworks, HTTP clients, compression "
+            "libraries, crypto libraries, ORMs, etc.). \n"
+            "  - Data formats / parsers / codecs / containers (file "
+            "format support, codec selection, container parsing, "
+            "wire-protocol encoders/decoders, schema serialisation). \n"
+            "  - External I/O (file-system operations, network "
+            "I/O, registry, IPC such as named pipes / mailslots / "
+            "shared memory, COM, etc.). \n"
+            "  - Storage / database / state management (transaction "
+            "logs, indexing, replication, embedded databases, "
+            "checkpoint files). \n"
+            "  - Cryptographic operations (EVERY algorithm by name: "
+            "AES, ChaCha20, RSA with key sizes, hash functions; "
+            "EVERY mode / pattern: CBC, GCM, Full / Partial / Header "
+            "/ SmartPattern / DotPattern, etc.; key wrapping; nonce "
+            "handling; certificate / TLS handling). \n"
+            "  - Process and privilege handling (every privilege "
+            "token requested by name, elevation primitives, process "
+            "creation / injection, token manipulation). \n"
+            "  - Autostart / persistence / installation behaviors "
+            "(registry run keys, services, scheduled tasks, startup "
+            "folders, WMI subscriptions, boot-config edits, install "
+            "/ uninstall manifests, COM registration). These apply "
+            "to installers AND malware; describe what the artifacts "
+            "actually show. \n"
+            "  - Security-relevant behaviors (anti-debug, anti-VM, "
+            "DLL unhooking / handling, log access, dynamic API "
+            "resolution, process hollowing — when present). \n"
+            "  - Network discovery / enumeration (each protocol / "
+            "API family separately — `NetShareEnum`/`NetServerEnum` "
+            "vs. ARP vs. NetBIOS vs. mDNS, etc.; when present). \n"
+            "  - Network propagation / multi-host coordination "
+            "(self-spread mechanisms, remote-execution primitives "
+            "with verbatim flags, distributed coordination "
+            "protocols — when present). \n"
+            "  - Network transport (HTTP/HTTPS, custom TCP/UDP "
+            "protocols, DNS, hardcoded endpoints, user-agent "
+            "strings — when present). \n"
+            "  - User interface / reporting / logging (terminal UI "
+            "libraries by name, GUI frameworks, dashboards, "
+            "telemetry, log formats). \n"
+            "  - Plugin / extension / scripting interfaces "
+            "(scripting engines, extension loading — when present). \n"
+            "  - Hardware interaction (drivers, USB, sensors, "
+            "graphics-acceleration APIs — when present). \n"
+            "  - Localisation / internationalisation (when "
+            "materially significant). \n"
+            "  - Update / patch behaviors (legitimate updater logic, "
+            "version-check endpoints, patch-application). \n"
+            "  - Telemetry / diagnostics / metrics. \n"
+            "  - Observable Runtime Artifacts (FINAL sub-section — "
+            "see MANDATORY rule below; for malicious binaries this "
+            "is the IoC list). \n"
+            "\n"
+            "WHEN IN DOUBT, prefer more sub-sections at finer "
+            "granularity over fewer at coarser granularity. \n"
             "\n"
             "REPORT COMPREHENSIVELY AND VERBATIM. Every cluster, "
             "every interesting artifact, every behavior visible in "
@@ -190,22 +239,40 @@ class BinaryReport(BaseModel):
             "language ('likely', 'appears to', 'may') is fine and "
             "signals inference. \n"
             "\n"
-            "MANDATORY IoC SUB-SECTION. When the cluster_data "
-            "contains ANY observable indicators of compromise — "
-            "concrete strings that appear in the binary's artifacts "
-            "such as domains, IPs, URLs / URL paths, user-agents, "
-            "mutexes, registry keys, file paths, file extensions, "
-            "commands, service names, scheduled tasks, COM objects, "
-            "GUIDs, or library names — you MUST include them as the "
-            "FINAL sub-section under `### Indicators of Compromise "
-            "(IoCs)` formatted as a bulleted list: "
-            "``- **<Label>**: `<value>` ``. List ALL observed values "
-            "(if there are 12 file extensions, list all 12). The "
-            "framing is literal (these strings appear in the binary), "
-            "not interpretive (they are known to be malicious). The "
-            "IoC sub-section is omitted ONLY when the binary has no "
-            "such observables at all (a pure compute / parsing "
-            "utility with no network, no hardcoded paths). \n"
+            "MANDATORY OBSERVABLE-ARTIFACTS SUB-SECTION. When the "
+            "cluster_data contains ANY concrete strings that the "
+            "binary references at runtime — domains, IPs, URLs / "
+            "URL paths, user-agents, mutex / event / semaphore "
+            "names, registry keys, file paths, file extensions, "
+            "command lines, service names, scheduled task names, "
+            "COM CLSIDs / GUIDs, library names, or other hardcoded "
+            "identifiers — you MUST include them as the FINAL sub-"
+            "section formatted as a bulleted list: "
+            "``- **<Label>**: `<value>` ``. List ALL observed "
+            "values (if there are 12 file extensions, list all "
+            "12). The framing is LITERAL (these strings appear in "
+            "the binary's artifacts), NOT interpretive (they are "
+            "known to be malicious). \n"
+            "\n"
+            "Title for this final sub-section: use "
+            "`### Observable Runtime Artifacts` for a binary that "
+            "is benign, ambiguous, or unclassified. Use "
+            "`### Indicators of Compromise (IoCs)` only when "
+            "`binary_category` is one of the explicitly-malicious "
+            "categories (every category except `Undetermined`, "
+            "`Utility`, `Remote Control and Administration Tool`, "
+            "`Archiver`, `Sniffer`, `Cryptocurrency Miner`, "
+            "`Decoder`, `Decrypter`, `Screen Capture Tool`, "
+            "`Reconnaissance Tool`, `Builder` — those are neutral "
+            "or explicitly-legitimate categories where the IoC "
+            "framing presupposes a malicious verdict the artifacts "
+            "may not support). The bullet format is identical "
+            "regardless of which title is used. \n"
+            "\n"
+            "The sub-section is omitted ONLY when the binary has "
+            "no hardcoded runtime identifiers at all (a pure "
+            "compute / parsing utility with no network endpoints, "
+            "no hardcoded paths, no fixed mutex / service names). \n"
             "\n"
             "STYLE. Prefer concrete facts ('32 file extensions') "
             "over marketing adjectives ('comprehensive list'). The "
@@ -811,9 +878,14 @@ class ClusterAnalyzerSignature(dspy.Signature):
         actually does). The schema does NOT prescribe a list of
         sub-section names — you organize Details however the
         binary's behavior calls for. When the data contains
-        observable indicators of compromise, end Details with a
-        `### Indicators of Compromise (IoCs)` sub-section formatted
-        as bulleted ``- **<Label>**: `<value>` `` lines. See the
+        concrete runtime identifiers (domains, paths, mutexes,
+        registry keys, commands, etc.), end Details with a
+        `### Observable Runtime Artifacts` sub-section formatted
+        as bulleted ``- **<Label>**: `<value>` `` lines. (Use
+        `### Indicators of Compromise (IoCs)` as the title instead
+        only when `binary_category` is explicitly malicious — for
+        benign / ambiguous categories the IoC framing presupposes
+        a verdict the artifacts may not support.) See the
         BinaryReport.overview and BinaryReport.details field
         descriptions for full guidance. LENGTH TARGETS (advisory,
         not validated): overview ≈ 200-500 chars; total rendered
@@ -851,28 +923,53 @@ class ClusterAnalyzerSignature(dspy.Signature):
     BREADTH MATTERS AS MUCH AS DEPTH. Open a SEPARATE `###` sub-
     section for each distinct functional area the cluster_data
     reveals; do NOT consolidate unrelated behaviors into one sub-
-    section just because they share a vague theme. Categories to
-    probe for (open a sub-section about any the artifacts support;
-    not every binary has every one): language/runtime identification;
-    CLI / configuration handling; library and framework dependencies;
-    privilege handling (every token by name); persistence mechanisms;
-    defense evasion; network discovery (each protocol family
-    separately); network propagation; network transport / C2;
-    cryptography (every algorithm + mode); data collection; process /
-    file manipulation; reporting / UI / progress tracking; IoCs.
-    See BinaryReport.details for the full checklist. WHEN IN DOUBT,
-    prefer more sub-sections at finer granularity over fewer at
-    coarser granularity.
+    section just because they share a vague theme. XRefer analyses
+    every kind of binary, not just malware — the right set of sub-
+    sections varies widely by binary class (a compression utility
+    has different sub-sections than a debugger, which has different
+    ones than a backup tool, which has different ones than a
+    ransomware sample). Match the binary's actual functional
+    structure. The list below is a STARTING SET of common
+    categories across many classes, not a required checklist;
+    open additional sub-sections for any functional area the
+    artifacts reveal that isn't enumerated here:
 
-    MANDATORY IoC SUB-SECTION. When the cluster_data contains ANY
-    domains, IPs, URLs, user-agents, mutexes, registry keys, file
-    paths, file extensions, commands, service names, scheduled
-    tasks, COM objects, GUIDs, or library names that the binary
-    references as runtime observables, the LAST sub-section of
-    `details` MUST be `### Indicators of Compromise (IoCs)` listing
-    every one, formatted as ``- **<Label>**: `<value>` ``. Omit
-    the IoC sub-section ONLY when the binary has no such
-    observables at all.
+    language / runtime identification; CLI / configuration
+    handling; library and framework dependencies; data formats /
+    parsers / codecs / containers; external I/O (file / network /
+    registry / IPC); storage / database / state management;
+    cryptographic operations (every algorithm + mode);
+    process and privilege handling; autostart / persistence /
+    installation behaviors (for installers AND malware); security-
+    relevant behaviors (anti-debug, log access, etc., when present);
+    network discovery (each protocol family separately, when
+    present); network propagation / multi-host coordination (when
+    present); network transport (when present); user interface /
+    reporting / logging; plugin / extension / scripting interfaces;
+    hardware interaction; update / patch behaviors; telemetry /
+    diagnostics; observable runtime artifacts.
+
+    See BinaryReport.details for the full guidance. WHEN IN DOUBT,
+    prefer more sub-sections at finer granularity over fewer at
+    coarser granularity. Open a sub-section ONLY when the
+    artifacts support it; do NOT invent sub-sections to match the
+    list above.
+
+    MANDATORY OBSERVABLE-ARTIFACTS SUB-SECTION. When the
+    cluster_data contains ANY concrete runtime identifiers — domains,
+    IPs, URLs, user-agents, mutexes, registry keys, file paths, file
+    extensions, command lines, service names, scheduled tasks, COM
+    CLSIDs / GUIDs, or library names that the binary references at
+    runtime — the LAST sub-section of `details` MUST list every one,
+    formatted as ``- **<Label>**: `<value>` ``. Title the sub-section
+    `### Observable Runtime Artifacts` by default, OR
+    `### Indicators of Compromise (IoCs)` when `binary_category` is
+    explicitly malicious (i.e. NOT one of `Undetermined`, `Utility`,
+    `Remote Control and Administration Tool`, `Archiver`, `Sniffer`,
+    `Cryptocurrency Miner`, `Decoder`, `Decrypter`, `Screen Capture
+    Tool`, `Reconnaissance Tool`, `Builder`). Omit the sub-section
+    entirely only when the binary has no such hardcoded identifiers
+    at all.
 
     Evidence basis: your input is the artifacts (strings, APIs,
     libraries, CAPA matches) and call flows shown above — NOT the
@@ -902,7 +999,13 @@ class ClusterAnalyzerSignature(dspy.Signature):
 
     Worked example #1 — a BinaryReport for a credential-stealer
     style binary. Demonstrates the rich, comprehensive style and
-    the IoC sub-section format:
+    the final-sub-section format. Because `binary_category` for
+    this hypothetical sample would be `Credential Stealer`
+    (explicitly malicious), the final sub-section is titled
+    `### Indicators of Compromise (IoCs)`. For a benign / ambiguous
+    binary the same content would appear under
+    `### Observable Runtime Artifacts` — the format and bullets
+    are identical:
 
       overview: "The binary is a credential stealer that
         systematically harvests environment information, captures
