@@ -14,12 +14,11 @@
 
 import re
 import typing
-from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from tabulate import tabulate
 from xrefer.backend.base import Instruction
-from xrefer.backend import Address, FunctionType, OperandType, Section, SectionType, XrefType
+from xrefer.backend import Address, FunctionType, OperandType, Section, XrefType
 from xrefer.core.helpers import filter_null_string, log, normalize_path
 from xrefer.lang.lang_base import LanguageBase
 from xrefer.lang.lang_default import LangDefault
@@ -74,17 +73,6 @@ def address_in_sections(backend: "BackEnd", addr: Optional[int], section_names: 
     for name in section_names:
         section = backend.get_section_by_name(name)
         if section and section.contains(address_obj):
-            return True
-    return False
-
-
-def address_in_code_sections(backend: "BackEnd", addr: Optional[int]) -> bool:
-    if addr is None:
-        return False
-    address_obj = Address(int(addr))
-
-    for section in backend.get_sections():
-        if section.type == SectionType.CODE and section.contains(address_obj):
             return True
     return False
 
@@ -743,98 +731,18 @@ class LangRust(LanguageBase):
         return None
 
     def _find_rust_main(self, main_addr: Address) -> Optional[int]:
-        """Find rust_main by analyzing main function."""
-        if self.backend.name == "ghidra":
-            return None
-        fn = self.backend.get_function_at(main_addr)
-        assert fn is not None, f"Should only be called with valid function address ({main_addr = })"
-        # TODO: In ghidra, this value is wrong cause the `main` isn't automatically set (i.e. we need to manually set `main` from `__scrt_common_main_seh`)
+        """Delegate rust_main detection to the active backend.
 
-        block_ranges = sorted(
-            ((bb.start, bb.end) for bb in fn.basic_blocks),
-            key=lambda pair: pair[0].value,
-        )
-        instruction_window: Deque[Address] = deque(maxlen=12)
-        for start, end in block_ranges:
-            for ins in self.backend.instructions(start, end):
-                instruction_window.append(ins)
-                inst = None
-                inst = self.backend.disassemble(ins)
-                inst_mnemonic = inst.mnemonic
-                inst_is_call = inst and inst_mnemonic.lower() == "call"
-
-                for xr in self.backend.get_xrefs_from(ins):
-                    if fn.contains(xr.target):
-                        continue
-
-                    is_call = xr.type == XrefType.CALL or inst_is_call
-                    if not is_call:
-                        continue
-
-                    wrapper_fn = self.backend.get_function_at(xr.target)
-                    if not wrapper_fn:
-                        continue
-                    if wrapper_fn.start == fn.start:
-                        continue
-
-                    candidate_addr = self._extract_rust_closure_address(instruction_window, xr.target.value)
-                    if candidate_addr is None:
-                        candidate_addr = xr.target.value
-
-                    candidate_fn = self.backend.get_function_at(Address(candidate_addr))
-                    # if not candidate_fn:
-                    #     self._define_function_if_absent(candidate_addr)
-                    #     candidate_fn = self.backend.get_function_at(Address(candidate_addr))
-                    #     if not candidate_fn:
-                    #         if candidate_addr != xr.target.value:
-                    #             continue
-                    #         candidate_fn = wrapper_fn
-
-                    if candidate_fn is None:
-                        candidate_fn = wrapper_fn
-                    assert candidate_fn is not None
-
-                    if candidate_fn.type in (FunctionType.IMPORT, FunctionType.LIBRARY, FunctionType.THUNK, FunctionType.EXPORT, FunctionType.EXTERN):
-                        continue
-
-                    current_name = (candidate_fn.name or "").lower()
-                    placeholder_prefixes = ("fun_", "sub_",  "lab_", "nullsub_", "entry", "se_func")
-
-                    should_rename = current_name != "rust_main" and (not current_name or current_name.startswith(placeholder_prefixes))
-
-                    if not should_rename:
-                        continue
-                    try:
-                        candidate_fn.name = "rust_main"
-                    except Exception:
-                        pass
-                    return fn.start.value
-        return None
-
-    def _extract_rust_closure_address(self, instruction_window: Deque[Address], fallback_target: Optional[int]) -> Optional[int]:
-        """Scan preceding instructions for a code pointer stored before the wrapper call."""
-
-        if not instruction_window:
-            return None
-
-        window_without_call = list(instruction_window)[:-1]
-
-        for ins_addr in reversed(window_without_call):
-            try:
-                inst = self.backend.disassemble(ins_addr)
-            except Exception:
-                continue
-
-            for idx, _ in enumerate(inst.operands):
-                addr = operand_address(inst, idx)
-                if addr is None:
-                    continue
-                if fallback_target is not None and addr == fallback_target:
-                    continue
-                if address_in_code_sections(self.backend, addr):
-                    return addr
-
-        return None
+        The detection heuristic (which call patterns indicate the user's
+        rust_main inside a CRT main wrapper) is backend-specific — it depends
+        on instruction-level navigation primitives that don't generalise
+        cleanly. Each backend provides its own implementation; the IDA
+        backend ports main-branch's byte-walk algorithm verbatim. Backends
+        that don't implement the heuristic inherit a default that returns
+        None, so this method falls through to the base EP.
+        """
+        candidate = self.backend.find_rust_main_candidate(main_addr)
+        return candidate.value if candidate else None
 
     # def _define_function_if_absent(self, addr: int) -> None:
     #     """Ensure a function exists at `addr` when backends defer closure emission.
