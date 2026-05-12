@@ -652,7 +652,33 @@ class ClusterAnalysisResponse(BaseModel):
         ...,
         description=(
             "Classification of the binary. Choose the category that "
-            "matches closest. Definitions (FLARE taxonomy):\n"
+            "matches closest based on OBSERVED ARTIFACTS, not on "
+            "assumed intent.\n"
+            "\n"
+            "DEFAULT: if the observed artifacts do NOT clearly support "
+            "a specific malicious purpose, choose 'Undetermined'. Do "
+            "NOT force a binary into a malicious category to 'fill the "
+            "slot' — most malware and benign software share many "
+            "artifact patterns, so picking a malicious category "
+            "requires evidence beyond mere artifact-pattern overlap.\n"
+            "\n"
+            "Categories that may legitimately describe non-malicious "
+            "software in this list:\n"
+            "- 'Undetermined' — benign, ambiguous, or unclassifiable.\n"
+            "- 'Remote Control and Administration Tool' — EXPLICITLY "
+            "  legitimate per the definition (TeamViewer, AnyDesk, "
+            "  RDP clients, SSH clients).\n"
+            "- 'Utility', 'Archiver', 'Sniffer', 'Cryptocurrency "
+            "  Miner', 'Decoder', 'Decrypter', 'Screen Capture Tool', "
+            "  'Reconnaissance Tool', 'Builder' — these definitions "
+            "  are neutral; legitimate software with the same artifact "
+            "  pattern exists in every one of them. Pick one only when "
+            "  the artifacts clearly support that specific role.\n"
+            "The remaining categories assume the binary performs "
+            "adversary or malicious activity; pick one ONLY when the "
+            "artifacts directly support the claim.\n"
+            "\n"
+            "Definitions (FLARE taxonomy):\n"
             "- Downloader: A program whose sole purpose is to download (and perhaps launch) a file from a specified address, and which does not provide any additional functionality or support any other interactive commands.\n"
             "- Point-of-Sale Malware: A program whose primary purpose is to steal financial transaction data at the point of sale (POS). Examples include malware that extracts credit card data from the memory of a POS system and malware inserted into a POS web application that steals payment information.\n"
             "- Ransomware: A program whose primary purpose is to perform some malicious action (such as encrypting data), with the goal of extracting payment from the victim in order to avoid or undo the malicious action.\n"
@@ -737,6 +763,18 @@ class ClusterAnalyzerSignature(dspy.Signature):
     their associated artifacts (API calls, strings, libraries, CAPA
     capabilities) and call flows.
 
+    IMPORTANT — objectivity. The binary you are analyzing MAY OR MAY NOT
+    be malicious. Your job is to describe what it does objectively,
+    based solely on the observed artifacts; do NOT presume malicious
+    intent. Many benign programs (compilers, archivers, installers,
+    system utilities, remote-administration software, compression /
+    encryption tools, antivirus products, debuggers, network
+    diagnostics) share artifact patterns with malware. When the
+    artifacts do not clearly indicate adversary behavior, choose
+    neutral or `Undetermined` classifications over forcing the binary
+    into a malicious one. Confine claims to what the artifacts
+    directly support; do not infer intent.
+
     For each cluster, working from deepest subclusters upward, produce:
       - `label`: short descriptive name
       - `description`: what the cluster does (no function addresses,
@@ -748,7 +786,8 @@ class ClusterAnalyzerSignature(dspy.Signature):
         is allowed.
       - `function_prefix`: one-word prefix for renaming functions
       - `library_or_runtime`: 1 for library/runtime code, 0 otherwise
-      - `mitre_attack`: MITRE ATT&CK Enterprise technique mappings.
+      - `mitre_attack`: WHEN the cluster's observed behaviors
+        correspond to MITRE ATT&CK Enterprise techniques, map them.
         ONLY include techniques SUPPORTED by the cluster's actual
         artifacts (APIs, strings, CAPA hits, call patterns). Each entry
         has `id` (canonical MITRE form, sub-technique when applicable
@@ -766,7 +805,13 @@ class ClusterAnalyzerSignature(dspy.Signature):
         "potentially used for", "appears to be related to", or "likely
         involved in", the evidence is too weak; OMIT the mapping
         instead. Empty list is the CORRECT answer for pure utility /
-        library / runtime / parsing / math clusters. Order by ATT&CK
+        library / runtime / parsing / math clusters that do not
+        implement adversary behavior — AND for every cluster in a
+        benign binary (compilers, archivers, legitimate compression /
+        encryption tools, antivirus products, debuggers, etc.).
+        ATT&CK is a malicious-behavior taxonomy: do not invent
+        mappings for legitimate operations that happen to share
+        artifact patterns with adversary techniques. Order by ATT&CK
         kill-chain position; use the LATEST MITRE ATT&CK Enterprise
         matrix; if unsure of a sub-technique ID, return the parent
         technique ID rather than guessing.
@@ -789,14 +834,21 @@ class ClusterAnalyzerSignature(dspy.Signature):
     binary's source code. Confine claims in `binary_report` (and in
     `mitre_attack` rationales) to what those artifacts directly
     support. Describe what was observed; do not attribute confident
-    TTP categories from ambiguous evidence. Examples:
+    TTP categories from ambiguous evidence, and do not infer intent
+    that the artifacts do not show. Examples:
       - GOOD behavior heading: "Registry writes to startup-related keys"
       - BAD  behavior heading: "Persistence"
       - GOOD body: "Captures the desktop using GDI handles and stages
         the bitmap in a memory buffer."
-      - BAD  body: "Likely uses a sophisticated screen-capture
-        technique for surveillance purposes." (banned tokens +
-        speculation)
+      - BAD  body (hedge + marketing adjective + speculation): "Likely
+        uses a sophisticated screen-capture technique for surveillance
+        purposes."
+      - BAD  body (presumes malice without artifact support):
+        "Compresses files for exfiltration to attacker-controlled
+        servers." — the "exfiltration" claim names a network
+        destination the artifacts do not show. If the cluster
+        compresses files and there is no observed network call,
+        describe only the compression.
 
     Avoid the banned token list documented in the BinaryReport field
     descriptions (marketing adjectives like 'sophisticated' /
@@ -805,8 +857,8 @@ class ClusterAnalyzerSignature(dspy.Signature):
     Prefer concrete numbers and concrete artifact names over vague
     descriptors ('32 file extensions' not 'comprehensive list').
 
-    Worked example of a BinaryReport for a credential-stealer style
-    binary:
+    Worked example #1 — a BinaryReport for a credential-stealer style
+    binary (a clearly-malicious binary):
       overview: "The binary is a credential stealer that harvests
         system information and application configuration data,
         exfiltrating results to a remote HTTP endpoint."
@@ -826,6 +878,28 @@ class ClusterAnalyzerSignature(dspy.Signature):
         - URL Path: /ag-ap.php
         - Mutex: filemanager1
         - User-Agent: Mozilla/5.0 (Macintosh; ...)
+
+    Worked example #2 — a BinaryReport for a benign binary (a
+    command-line compression utility). Note the empty
+    `observed_artifacts` and empty `mitre_attack` — both are CORRECT
+    when the artifacts do not support adversary classification, and
+    do not need to be padded:
+      overview: "The binary is a command-line file-compression
+        utility that reads input from disk, applies a configurable
+        compression algorithm, and writes the result to a
+        user-specified output."
+      behavior[0].heading: "File compression via DEFLATE / LZMA backends"
+      behavior[0].body:    "Reads input files in chunks, compresses
+        each chunk via the selected backend, and writes the encoded
+        bytes to the output path."
+      behavior[1].heading: "Command-line argument parsing for
+        compression flags"
+      behavior[1].body:    "Accepts compression level, output path,
+        and verbosity flags via the standard CRT argument parser."
+      observed_artifacts: []
+      (For this binary, `binary_category` is `Utility` or
+      `Undetermined`, NOT a malicious category, and every cluster's
+      `mitre_attack` is an empty list.)
     """
     cluster_data: str = dspy.InputField(description="Raw cluster hierarchy with functions and artifacts (for reference)")
     analysis: ClusterAnalysisResponse = dspy.OutputField(description="Complete cluster analysis with per-cluster metadata and binary-level insights")
