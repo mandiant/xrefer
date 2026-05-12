@@ -103,6 +103,66 @@ class BinaryReport(BaseModel):
             "'Reporting and User Interface'. The LLM picks the sub-"
             "headings; the schema does NOT prescribe a list. \n"
             "\n"
+            "BREADTH MATTERS AS MUCH AS DEPTH. Open a SEPARATE `###` "
+            "sub-section for each distinct functional area the "
+            "cluster_data reveals. Do NOT consolidate unrelated "
+            "behaviors into one sub-section just because they share "
+            "a vague theme (e.g. do not fold privilege escalation, "
+            "shadow-copy deletion, log clearing, and Safe Mode "
+            "reboots into a single 'system control' sub-section — "
+            "each is a distinct functional area worth its own `###`). "
+            "Categories to PROBE FOR — open a sub-section about any "
+            "that the artifacts support (not every binary has every "
+            "category; do not invent sub-sections, but do NOT collapse "
+            "supported categories into adjacent ones): \n"
+            "  - Language / runtime / framework identification "
+            "(Rust, Go, .NET, Python-frozen, Electron, etc. — when "
+            "symbol prefixes, library names, or string patterns "
+            "indicate it). \n"
+            "  - Configuration handling (CLI argument parsers + "
+            "verbatim flag names, config-file formats, embedded "
+            "schemas, key blobs, exclusion lists). \n"
+            "  - Library / framework dependencies (every notable "
+            "third-party library that defines a behavior — JSON/YAML "
+            "parsers, TUI/UI frameworks, HTTP clients, crypto "
+            "libraries, etc.). \n"
+            "  - Privilege handling (every Windows privilege token "
+            "requested by name, UAC-bypass approaches, service "
+            "installation, token theft). \n"
+            "  - Persistence (registry run keys, scheduled tasks, "
+            "services, startup folders, WMI subscriptions, "
+            "boot-config edits). \n"
+            "  - Defense evasion (DLL unhooking, log clearing, "
+            "anti-debug, anti-VM, process hollowing, dynamic API "
+            "resolution). \n"
+            "  - Network discovery (each protocol / API family "
+            "separately — `NetShareEnum`/`NetServerEnum` vs. ARP "
+            "vs. NetBIOS vs. mDNS, etc.). \n"
+            "  - Network propagation (self-spread mechanisms, "
+            "`psexec.exe` with verbatim flags, remote-execution "
+            "primitives, lateral-movement APIs). \n"
+            "  - Network transport / C2 (HTTP/HTTPS, custom TCP/UDP "
+            "protocols, DNS tunneling, hardcoded endpoints, "
+            "user-agent strings). \n"
+            "  - Cryptography (EVERY algorithm: AES, ChaCha20, RSA "
+            "with key sizes, hash functions; EVERY mode / pattern: "
+            "CBC, GCM, Full / Partial / Header / SmartPattern / "
+            "DotPattern, etc.; key wrapping; nonce handling). \n"
+            "  - Data collection (system discovery, registry queries, "
+            "file enumeration, screen capture, keystroke logging). \n"
+            "  - Process / file manipulation (process injection, "
+            "file-attribute changes, ACL manipulation, shadow-copy "
+            "operations). \n"
+            "  - Reporting / UI / progress tracking (terminal UI "
+            "libraries by name, dashboards, telemetry, logging). \n"
+            "  - Indicators of Compromise (FINAL sub-section — see "
+            "MANDATORY rule below). \n"
+            "This list is not exhaustive; open additional `###` sub-"
+            "sections for any other distinct functional area the "
+            "artifacts reveal. WHEN IN DOUBT, prefer more sub-"
+            "sections at finer granularity over fewer at coarser "
+            "granularity. \n"
+            "\n"
             "REPORT COMPREHENSIVELY AND VERBATIM. Every cluster, "
             "every interesting artifact, every behavior visible in "
             "the cluster_data MUST be mentioned somewhere in the "
@@ -787,6 +847,22 @@ class ClusterAnalyzerSignature(dspy.Signature):
     originals (origin/main, origin/gsoc_2025) use these tokens in
     their own framing. Missing information and generalized
     descriptions are the worst failure modes.
+
+    BREADTH MATTERS AS MUCH AS DEPTH. Open a SEPARATE `###` sub-
+    section for each distinct functional area the cluster_data
+    reveals; do NOT consolidate unrelated behaviors into one sub-
+    section just because they share a vague theme. Categories to
+    probe for (open a sub-section about any the artifacts support;
+    not every binary has every one): language/runtime identification;
+    CLI / configuration handling; library and framework dependencies;
+    privilege handling (every token by name); persistence mechanisms;
+    defense evasion; network discovery (each protocol family
+    separately); network propagation; network transport / C2;
+    cryptography (every algorithm + mode); data collection; process /
+    file manipulation; reporting / UI / progress tracking; IoCs.
+    See BinaryReport.details for the full checklist. WHEN IN DOUBT,
+    prefer more sub-sections at finer granularity over fewer at
+    coarser granularity.
 
     MANDATORY IoC SUB-SECTION. When the cluster_data contains ANY
     domains, IPs, URLs, user-agents, mutexes, registry keys, file
