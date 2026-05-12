@@ -144,37 +144,37 @@ class ClusterAnalyzer:
 
     @staticmethod
     def _warn_on_sparse_binary_report(binary_report: Any) -> None:
-        """Soft length check on the final binary_report markdown string.
+        """Soft post-hoc check on the final binary_report markdown
+        string. Logs non-fatal warnings for length out-of-band AND
+        for marketing-adjective / cluster-id-leak token usage.
 
-        Length is INTENTIONALLY not validated by Pydantic — Pydantic
-        field/model-validator constraints aren't reflected in the JSON
-        schema the LLM sees, so the model can't reliably aim for a
-        minimum it doesn't know exists, and a hard floor caused entire
-        analyses to fail when the LLM produced a terse-but-accurate
-        report for a small/simple binary. Length expectations live as
-        TARGETS in ``ClusterAnalyzerSignature``'s docstring
-        (LLM-visible) and as ``BinaryReport.SOFT_MIN_LENGTH`` /
-        ``SOFT_MAX_LENGTH`` (used here). When the rendered report
-        falls outside the target band, this function logs a non-fatal
-        warning so the analyst knows the report is anomalous but the
-        analysis still succeeds.
+        Neither length nor banned tokens are validated by Pydantic —
+        Pydantic field/model-validator constraints aren't reflected
+        in the JSON schema the LLM sees, so the model can't reliably
+        aim for them. Earlier iterations enforced both as hard
+        validators and caused real analyses to abort on small slips.
+        Prompt guidance now does the heavy lifting; these warnings
+        surface anomalies so the analyst can decide whether to
+        re-run analysis.
 
         ``binary_report`` is the already-rendered markdown string —
-        the outer ``ClusterAnalysisResponse`` serializer flattens the
-        structured form via ``to_markdown()`` before this function
-        sees it.
+        the outer ``ClusterAnalysisResponse`` serializer flattens
+        the structured form via ``to_markdown()`` before this
+        function sees it.
         """
-        if not isinstance(binary_report, str):
+        if not isinstance(binary_report, str) or not binary_report:
             return
         try:
-            from xrefer.llm.dspy_modules import BinaryReport
+            from xrefer.llm.dspy_modules import BinaryReport, BANNED_TOKENS_SOFT
             soft_min = BinaryReport.SOFT_MIN_LENGTH
             soft_max = BinaryReport.SOFT_MAX_LENGTH
+            banned = BANNED_TOKENS_SOFT
         except Exception:
             soft_min, soft_max = 1500, 4500
+            banned = ()
+
+        # Length band warning.
         n = len(binary_report)
-        if not n:
-            return
         if n < soft_min:
             log(
                 f"[!] binary_report is sparse: {n} chars rendered "
@@ -192,6 +192,30 @@ class ClusterAnalyzer:
                 "renderer handles long reports, but a more concise "
                 "report is usually easier to triage."
             )
+
+        # Banned-token warnings — marketing adjectives + cluster.id.
+        # leak. Case-insensitive substring search; one log per token
+        # found.
+        lower = binary_report.lower()
+        for tok in banned:
+            if tok.lower() in lower:
+                if tok == "cluster.id.":
+                    log(
+                        "[!] binary_report contains a `cluster.id.` "
+                        "reference. Cluster cross-references belong "
+                        "in per-cluster `relationships`, not in "
+                        "binary_report. Re-running cluster analysis "
+                        "usually fixes this."
+                    )
+                else:
+                    log(
+                        f"[!] binary_report uses marketing adjective "
+                        f"'{tok}' — concrete facts ('32 file "
+                        "extensions') are more useful than vague "
+                        "qualifiers ('comprehensive list'). The "
+                        "report still rendered; this is a style note "
+                        "only."
+                    )
 
 
     @staticmethod

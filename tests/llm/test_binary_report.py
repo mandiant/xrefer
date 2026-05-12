@@ -202,53 +202,48 @@ def test_overview_opener_accepts_both_canonical_forms(good_opener_prefix):
     BinaryReport(overview=overview, details=_valid_details())
 
 
-# ── 4. Banned tokens — marketing adjectives + cluster.id. only ────────
+# ── 4. Banned tokens are NOT validated ───────────────────────────────
 #
-# Hedges (likely / appears to / may / etc.) are INTENTIONALLY ALLOWED.
-# origin/main and origin/gsoc_2025 both use these tokens in their own
-# instructions to the LLM; analyst triage prose uses hedges to signal
-# inference vs. direct observation. The banned-token list is now just
-# marketing adjectives + the `cluster.id.` cross-cluster leak.
+# Earlier iterations enforced a marketing-adjective + cluster.id. ban
+# via a @model_validator on BinaryReport that raised. That validator
+# caused real analyses to abort when the LLM used a single banned word
+# in an otherwise-rich report. The ban is now a SOFT post-hoc warning
+# in ClusterAnalyzer._warn_on_sparse_binary_report — the prompt asks
+# the LLM to prefer concrete facts; the warning surfaces slips.
+# Hedge tokens (likely / appears to / may) were never the right thing
+# to ban — origin/main and origin/gsoc_2025 use them in their own
+# framing and analyst prose uses them to signal inference.
 
 
 @pytest.mark.parametrize(
     "adjective",
     [
-        "sophisticated",
-        "advanced",
-        "powerful",
-        "comprehensive",
-        "extensive",
-        "robust",
-        "complex",
-        "specialized",
-        "distinctive",
+        "sophisticated", "advanced", "powerful", "comprehensive",
+        "extensive", "robust", "complex", "specialized", "distinctive",
     ],
 )
-def test_marketing_adjective_in_overview_raises(adjective):
-    bad = f"The binary is a {adjective} credential stealer."
-    with pytest.raises(ValidationError, match="banned token"):
-        BinaryReport(overview=bad, details=_valid_details())
+def test_marketing_adjective_in_overview_is_accepted(adjective):
+    """Marketing adjectives in overview are accepted (validator
+    removed). The post-hoc warning in cluster_analyzer logs the
+    slip without aborting the analysis.
+    """
+    overview = f"The binary is a {adjective} credential stealer that exfiltrates harvested data."
+    BinaryReport(overview=overview, details=_valid_details())
 
 
-def test_marketing_adjective_in_details_raises():
+def test_marketing_adjective_in_details_is_accepted():
     bad_details = (
         "### Section\n\nThe sophisticated unpacker stages a payload in memory.\n"
     )
-    with pytest.raises(ValidationError, match="banned token"):
-        BinaryReport(overview=_valid_overview(), details=bad_details)
+    BinaryReport(overview=_valid_overview(), details=bad_details)
 
 
-def test_cluster_id_leak_in_details_raises():
-    """The literal substring ``cluster.id.`` belongs in per-cluster
-    ``relationships``, not in binary_report.
-    """
+def test_cluster_id_leak_in_details_is_accepted():
+    """``cluster.id.NNNN`` should not appear in binary_report
+    (belongs in per-cluster relationships) — but appearance is a
+    post-hoc warning, not a validation failure."""
     bad_details = "### Section\n\nDelegates to cluster.id.0042 for encryption.\n"
-    with pytest.raises(ValidationError, match="banned token"):
-        BinaryReport(overview=_valid_overview(), details=bad_details)
-
-
-# ── 5. Hedge tokens are ALLOWED ───────────────────────────────────────
+    BinaryReport(overview=_valid_overview(), details=bad_details)
 
 
 @pytest.mark.parametrize(
@@ -263,8 +258,8 @@ def test_cluster_id_leak_in_details_raises():
     ],
 )
 def test_hedge_tokens_are_allowed_in_details(hedge_phrase):
-    """Hedges signal inference vs. observation. They were briefly
-    banned and that was a mistake — analyst-grade prose uses them.
+    """Hedges signal inference vs. observation. Analyst-grade prose
+    uses them; the originals (main, gsoc_2025) use them too.
     """
     details = f"### Section\n\n{hedge_phrase}\n"
     BinaryReport(overview=_valid_overview(), details=details)
@@ -273,6 +268,65 @@ def test_hedge_tokens_are_allowed_in_details(hedge_phrase):
 def test_hedge_token_in_overview_is_allowed():
     overview = "The binary is likely a credential stealer based on its targeted registry queries and HTTP exfiltration endpoints."
     BinaryReport(overview=overview, details=_valid_details())
+
+
+# ── 4b. The post-hoc warning helper ──────────────────────────────────
+
+
+def test_warn_helper_logs_on_marketing_adjective(monkeypatch):
+    """The post-hoc helper in ClusterAnalyzer should log a warning
+    when marketing adjectives slip through, but never raise.
+    """
+    from xrefer.llm.cluster_analyzer import ClusterAnalyzer
+
+    captured: list[str] = []
+
+    def fake_log(msg: str) -> None:
+        captured.append(msg)
+
+    monkeypatch.setattr("xrefer.llm.cluster_analyzer.log", fake_log)
+    ClusterAnalyzer._warn_on_sparse_binary_report(
+        "## Overview\n\nThe binary is a sophisticated credential stealer.\n\n"
+        "## Details\n\n### Section\n\nBody with `cmd.exe`.\n"
+    )
+    assert any("marketing adjective 'sophisticated'" in m for m in captured), captured
+
+
+def test_warn_helper_logs_on_cluster_id_leak(monkeypatch):
+    from xrefer.llm.cluster_analyzer import ClusterAnalyzer
+
+    captured: list[str] = []
+    monkeypatch.setattr(
+        "xrefer.llm.cluster_analyzer.log", lambda msg: captured.append(msg)
+    )
+    ClusterAnalyzer._warn_on_sparse_binary_report(
+        "## Overview\n\nThe binary is a stealer.\n\n"
+        "## Details\n\n### Section\n\nDelegates to cluster.id.0042.\n"
+    )
+    assert any("cluster.id." in m for m in captured), captured
+
+
+def test_warn_helper_silent_on_clean_report(monkeypatch):
+    """A clean (no marketing adjectives, no cluster.id.) report
+    of sufficient length should produce NO warning.
+    """
+    from xrefer.llm.cluster_analyzer import ClusterAnalyzer
+    from xrefer.llm.dspy_modules import BinaryReport
+
+    captured: list[str] = []
+    monkeypatch.setattr(
+        "xrefer.llm.cluster_analyzer.log", lambda msg: captured.append(msg)
+    )
+    # Pad a clean report so it's between SOFT_MIN_LENGTH and
+    # SOFT_MAX_LENGTH so neither length warning fires either.
+    body = "Body text with concrete facts and `code spans`. " * 40
+    md = (
+        "## Overview\n\nThe binary is a test fixture.\n\n"
+        "## Details\n\n### Section\n\n" + body + "\n"
+    )
+    assert BinaryReport.SOFT_MIN_LENGTH <= len(md) <= BinaryReport.SOFT_MAX_LENGTH
+    ClusterAnalyzer._warn_on_sparse_binary_report(md)
+    assert captured == [], captured
 
 
 # ── 6. Length is NOT validated ───────────────────────────────────────

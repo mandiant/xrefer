@@ -21,22 +21,25 @@ import dspy
 from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 
 
-# Substrings banned anywhere in BinaryReport text fields. Marketing
-# adjectives bias the prose toward unfounded authority — concrete
+# Substrings flagged in BinaryReport text. The list seeds a SOFT
+# post-hoc warning in ClusterAnalyzer (see _warn_on_binary_report_issues)
+# — it does NOT fail validation. Earlier iterations enforced this list
+# via a @model_validator on BinaryReport; that turned every LLM slip
+# into a catastrophic analysis abort, which is the wrong trade-off.
+# Prompt guidance now does the heavy lifting; the soft warning catches
+# slips so the analyst knows.
+#
+# Marketing adjectives bias prose toward unfounded authority — concrete
 # facts ('32 file extensions' rather than 'comprehensive list') carry
-# the information without the puffery. The ``cluster.id.`` form
-# belongs in per-cluster ``relationships``, not in the binary-level
-# narrative.
+# the information without the puffery. The ``cluster.id.`` form belongs
+# in per-cluster ``relationships``, not in the binary-level narrative.
 #
 # Hedging tokens (likely / appears to / may / possibly / seems /
-# suggesting / suggests / presumably) are INTENTIONALLY NOT banned.
+# suggesting / suggests / presumably) are INTENTIONALLY NOT included.
 # Both origin/main and origin/gsoc_2025 use hedge tokens in their own
-# instructions (main: "what the cluster appears to do"; gsoc: "likely
-# library/runtime code"), and analyst-grade triage prose uses them
-# to honestly signal inference-vs-observation. Banning hedges forces
-# either omission of useful inferences or restatement as false
-# certainty — neither serves the analyst.
-_BANNED_TOKENS = (
+# instructions; analyst prose uses them to signal inference vs.
+# observation, and banning them would force false certainty.
+BANNED_TOKENS_SOFT = (
     # marketing adjectives (vibes, not facts)
     "sophisticated", "advanced", "powerful", "comprehensive", "extensive",
     "highly optimized", "highly advanced", "robust", "complex",
@@ -100,26 +103,59 @@ class BinaryReport(BaseModel):
             "'Reporting and User Interface'. The LLM picks the sub-"
             "headings; the schema does NOT prescribe a list. \n"
             "\n"
-            "REPORT COMPREHENSIVELY. Every cluster, every interesting "
-            "artifact, every behavior visible in the cluster_data MUST "
-            "be mentioned somewhere in the report. Do NOT summarize "
-            "away information. If the cluster_data shows 32 file "
-            "extensions, list all 32. If five distinct evasion "
-            "techniques, describe each. Hedging language ('likely', "
-            "'appears to', 'may') is fine and signals inference; "
-            "missing information is the worst failure mode. \n"
+            "REPORT COMPREHENSIVELY AND VERBATIM. Every cluster, "
+            "every interesting artifact, every behavior visible in "
+            "the cluster_data MUST be mentioned somewhere in the "
+            "report. Do NOT summarize away information. If the "
+            "cluster_data shows 32 file extensions, list all 32. If "
+            "five distinct evasion techniques, describe each. \n"
             "\n"
-            "When the cluster_data contains observable indicators of "
-            "compromise — concrete strings that appear in the binary "
+            "QUOTE SPECIFIC STRINGS VERBATIM. When the cluster's "
+            "artifacts contain a concrete string (domain, path, "
+            "registry key, mutex name, user-agent, CLI command, API "
+            "or library name, file extension), write the string "
+            "INSIDE BACKTICKS in the prose — do NOT paraphrase or "
+            "generalize. Examples of the difference: \n"
+            "  - GOOD: 'communicates with the domain `tastedata.shop`' \n"
+            "  - BAD:  'communicates with a remote domain' \n"
+            "  - GOOD: 'uses a mutex named `filemanager1`' \n"
+            "  - BAD:  'uses a mutex' \n"
+            "  - GOOD: 'queries `Software\\\\Bitcoin\\\\Bitcoin-Qt` "
+            "and `Software\\\\monero-project\\\\monero-core`' \n"
+            "  - BAD:  'queries registry keys for cryptocurrency "
+            "wallets' \n"
+            "Specific names ARE the value the analyst is reading the "
+            "report to recover. Hand-waved descriptions are the "
+            "regression we are explicitly trying to prevent. Hedging "
+            "language ('likely', 'appears to', 'may') is fine and "
+            "signals inference. \n"
+            "\n"
+            "MANDATORY IoC SUB-SECTION. When the cluster_data "
+            "contains ANY observable indicators of compromise — "
+            "concrete strings that appear in the binary's artifacts "
             "such as domains, IPs, URLs / URL paths, user-agents, "
             "mutexes, registry keys, file paths, file extensions, "
             "commands, service names, scheduled tasks, COM objects, "
-            "or library names — include them as the FINAL sub-section "
-            "under `### Indicators of Compromise (IoCs)` formatted as "
-            "a bulleted list: ``- **<Label>**: `<value>` ``. The "
+            "GUIDs, or library names — you MUST include them as the "
+            "FINAL sub-section under `### Indicators of Compromise "
+            "(IoCs)` formatted as a bulleted list: "
+            "``- **<Label>**: `<value>` ``. List ALL observed values "
+            "(if there are 12 file extensions, list all 12). The "
             "framing is literal (these strings appear in the binary), "
-            "not interpretive (they are known to be malicious). Omit "
-            "the IoC sub-section entirely when no observables apply.\n"
+            "not interpretive (they are known to be malicious). The "
+            "IoC sub-section is omitted ONLY when the binary has no "
+            "such observables at all (a pure compute / parsing "
+            "utility with no network, no hardcoded paths). \n"
+            "\n"
+            "STYLE. Prefer concrete facts ('32 file extensions') "
+            "over marketing adjectives ('comprehensive list'). The "
+            "words 'sophisticated', 'advanced', 'powerful', "
+            "'comprehensive', 'extensive', 'robust', 'complex', "
+            "'specialized', and 'distinctive' carry no information "
+            "the concrete facts can't carry better — avoid them. "
+            "Cluster cross-references (the `cluster.id.NNNN` form) "
+            "belong in the per-cluster `relationships` field, NOT "
+            "in binary_report. \n"
             "\n"
             "Allowed markdown inside details: `###` (sub-headings, "
             "this is the only level — the top-level `##` structure is "
@@ -140,25 +176,14 @@ class BinaryReport(BaseModel):
             )
         return v
 
-    @model_validator(mode="after")
-    def _no_banned_tokens(self) -> "BinaryReport":
-        def _scan(text: str, where: str) -> None:
-            lower = text.lower()
-            for tok in _BANNED_TOKENS:
-                if tok.lower() in lower:
-                    raise ValueError(
-                        f"{where} contains banned token {tok!r}. "
-                        "Replace marketing adjectives with concrete "
-                        "facts ('32 file extensions' not 'comprehensive "
-                        "list'). Cluster cross-references belong in "
-                        "the per-cluster `relationships` field, not in "
-                        "binary_report. (Hedging tokens like 'likely' "
-                        "or 'appears to' are intentionally allowed.)"
-                    )
-
-        _scan(self.overview, "overview")
-        _scan(self.details, "details")
-        return self
+    # NOTE on banned tokens. Earlier iterations enforced a marketing-
+    # adjective + cluster.id. ban via a @model_validator that raised
+    # on any match. That validator caused real analyses to abort when
+    # the LLM used a single banned word in an otherwise-rich report.
+    # The ban is now a SOFT post-hoc warning in ClusterAnalyzer
+    # (see _warn_on_binary_report_issues) — the prompt asks the LLM
+    # to prefer concrete facts over marketing adjectives, and the
+    # warning surfaces slips without aborting the analysis.
 
     # Length is INTENTIONALLY NOT validated. Earlier iterations had a
     # hard [1500, 4500] floor/ceiling validator on the rendered total
@@ -737,17 +762,41 @@ class ClusterAnalyzerSignature(dspy.Signature):
         complex one may merit more. Do NOT pad to hit a target;
         do NOT truncate substantive content to fit one.
 
-    REPORT COMPREHENSIVELY. The most common failure mode of earlier
-    iterations was reporting only one or two narrow observations and
-    leaving the rest of the binary undescribed. Every cluster, every
-    interesting artifact, every behavior visible in the cluster_data
-    MUST be mentioned somewhere in `details`. If 32 file extensions
-    are observed, list all 32. If five distinct evasion techniques,
-    describe each. Hedging language ('likely', 'appears to', 'may')
-    is FINE — it honestly signals inference vs. direct observation,
-    and the originals (origin/main, origin/gsoc_2025) use these
-    tokens in their own framing. Missing information is the worst
-    failure mode.
+    REPORT COMPREHENSIVELY AND VERBATIM. The most common failure
+    mode of earlier iterations was hand-waved descriptions that
+    omitted the specific strings the analyst is reading the report
+    to recover. Every cluster, every interesting artifact, every
+    behavior visible in the cluster_data MUST be mentioned in
+    `details`. If 32 file extensions are observed, list all 32. If
+    five distinct evasion techniques, describe each. When a concrete
+    string (domain, path, registry key, mutex, user-agent, API or
+    library name, file extension) is in the artifacts, QUOTE IT
+    VERBATIM IN BACKTICKS in the prose — do not generalize:
+
+      - GOOD: "communicates with the domain `tastedata.shop` and
+        POSTs to `/ag-ap.php`"
+      - BAD:  "communicates with a remote PHP endpoint"
+      - GOOD: "uses a mutex named `filemanager1`"
+      - BAD:  "uses a mutex"
+      - GOOD: "queries `Software\\\\Bitcoin\\\\Bitcoin-Qt` and
+        `Software\\\\monero-project\\\\monero-core`"
+      - BAD:  "queries cryptocurrency-wallet registry keys"
+
+    Hedging language ('likely', 'appears to', 'may') is FINE — it
+    honestly signals inference vs. direct observation, and the
+    originals (origin/main, origin/gsoc_2025) use these tokens in
+    their own framing. Missing information and generalized
+    descriptions are the worst failure modes.
+
+    MANDATORY IoC SUB-SECTION. When the cluster_data contains ANY
+    domains, IPs, URLs, user-agents, mutexes, registry keys, file
+    paths, file extensions, commands, service names, scheduled
+    tasks, COM objects, GUIDs, or library names that the binary
+    references as runtime observables, the LAST sub-section of
+    `details` MUST be `### Indicators of Compromise (IoCs)` listing
+    every one, formatted as ``- **<Label>**: `<value>` ``. Omit
+    the IoC sub-section ONLY when the binary has no such
+    observables at all.
 
     Evidence basis: your input is the artifacts (strings, APIs,
     libraries, CAPA matches) and call flows shown above — NOT the
