@@ -71,7 +71,10 @@ class PeekViewToggleHandler(idaapi.action_handler_t):
 class ArtifactAnalysisHandler(idaapi.action_handler_t):
     """
     Handler for re-running LLM analysis on artifacts.
-    Forces a fresh analysis of all artifacts regardless of existing results.
+    Forces a fresh analysis of all artifacts regardless of existing
+    results, and bypasses the LLM response cache so the model
+    re-generates its verdict instead of replaying a cached one — the
+    whole point of an explicit re-run.
     """
 
     def activate(self, ctx: Any) -> bool:
@@ -88,9 +91,9 @@ class ArtifactAnalysisHandler(idaapi.action_handler_t):
 
         try:
             idaapi.show_wait_box("HIDECANCEL\n")
-            log("Running artifact analysis...")
+            log("Running artifact analysis (LLM cache bypassed)...")
             xrefer_obj = plugin_instance.xrefer_view.xrefer_obj
-            xrefer_obj.find_interesting_artifacts()
+            xrefer_obj.find_interesting_artifacts(force_no_cache=True)
             xrefer_obj.save_analysis()
 
             # Force view update
@@ -128,7 +131,10 @@ class ArtifactAnalysisHandler(idaapi.action_handler_t):
 class ClusterInterestingFunctionsHandler(idaapi.action_handler_t):
     """
     Handler for running LLM analysis on interesting function clusters.
-    Forces a fresh analysis of cluster relationships and behaviors.
+    Forces a fresh analysis of cluster relationships and behaviors,
+    and bypasses the LLM response cache so the model re-generates its
+    response instead of replaying a cached one — the whole point of
+    an explicit re-run.
     """
 
     def activate(self, ctx: Any) -> bool:
@@ -145,12 +151,12 @@ class ClusterInterestingFunctionsHandler(idaapi.action_handler_t):
 
         try:
             idaapi.show_wait_box("HIDECANCEL")
-            log("\nRunning Cluster Analysis on Interesting Functions...")
+            log("\nRunning Cluster Analysis on Interesting Functions (LLM cache bypassed)...")
 
             if plugin_instance.xrefer_view.xrefer_obj.interesting_artifacts:
                 plugin_instance.xrefer_view.state_machine.clear_cluster_history()
                 xrefer_obj = plugin_instance.xrefer_view.xrefer_obj
-                xrefer_obj.analyze_clusters(xrefer_obj.interesting_artifacts)
+                xrefer_obj.analyze_clusters(xrefer_obj.interesting_artifacts, force_no_cache=True)
                 xrefer_obj.save_analysis()
             else:
                 log("No Interesting Artifacts found for clustering. Please run Artifact Analysis first.")
@@ -190,7 +196,10 @@ class ClusterInterestingFunctionsHandler(idaapi.action_handler_t):
 class ClusterEverythingHandler(idaapi.action_handler_t):
     """
     Handler for running LLM analysis on all function clusters.
-    Forces a fresh analysis of cluster relationships and behaviors.
+    Forces a fresh analysis of cluster relationships and behaviors,
+    and bypasses the LLM response cache so the model re-generates its
+    response instead of replaying a cached one — the whole point of
+    an explicit re-run.
     """
 
     def activate(self, ctx: Any) -> bool:
@@ -199,12 +208,12 @@ class ClusterEverythingHandler(idaapi.action_handler_t):
 
         try:
             idaapi.show_wait_box("HIDECANCEL\n")
-            log("Running Cluster Analysis on all function clusters...")
+            log("Running Cluster Analysis on all function clusters (LLM cache bypassed)...")
 
             # Run clustering for all non-excluded artifact functions
             xrefer_obj = plugin_instance.xrefer_view.xrefer_obj
             plugin_instance.xrefer_view.state_machine.clear_cluster_history()
-            xrefer_obj.cluster_all_non_excluded()
+            xrefer_obj.cluster_all_non_excluded(force_no_cache=True)
 
             # Update view if in cluster-related view
             current_state = plugin_instance.xrefer_view.state_machine.current_state
@@ -228,52 +237,6 @@ class ClusterEverythingHandler(idaapi.action_handler_t):
             return idaapi.AST_ENABLE_ALWAYS
         else:
             return idaapi.AST_DISABLE
-
-
-class ForceClusterEverythingHandler(idaapi.action_handler_t):
-    """
-    Handler for running cluster analysis with the DSPy / LiteLLM
-    response cache BYPASSED. Same scope as ClusterEverythingHandler
-    (all non-excluded artifact functions), but every LLM call is
-    routed through ``LLMProcessor.uncached_lm()`` so the model
-    re-generates its response instead of replaying a cached one. Used
-    when the analyst wants to re-roll the LLM verdict without
-    restarting IDA or deleting the on-disk analysis pickle.
-    """
-
-    def activate(self, ctx: Any) -> bool:
-        from xrefer.plugin import plugin_instance
-
-        try:
-            idaapi.show_wait_box("HIDECANCEL\n")
-            log("Force-running Cluster Analysis (LLM cache bypassed)...")
-
-            xrefer_obj = plugin_instance.xrefer_view.xrefer_obj
-            plugin_instance.xrefer_view.state_machine.clear_cluster_history()
-            xrefer_obj.cluster_all_non_excluded(force_no_cache=True)
-
-            current_state = plugin_instance.xrefer_view.state_machine.current_state
-            if current_state in (
-                plugin_instance.xrefer_view.state_machine.clusters,
-                plugin_instance.xrefer_view.state_machine.cluster_graphs,
-            ):
-                plugin_instance.xrefer_view.update(True)
-
-            log("Force cluster analysis complete")
-            idaapi.hide_wait_box()
-            return True
-
-        except Exception as e:
-            idaapi.hide_wait_box()
-            log(f"[-] Error during force cluster analysis: {str(e)}")
-            return False
-
-    def update(self, ctx: Any) -> int:
-        from xrefer.plugin import plugin_instance
-
-        if plugin_instance.xrefer_view:
-            return idaapi.AST_ENABLE_ALWAYS
-        return idaapi.AST_DISABLE
 
 
 class AboutDialogHandler(idaapi.action_handler_t):
@@ -324,97 +287,152 @@ class AboutDialogHandler(idaapi.action_handler_t):
         """
         Handle about dialog action.
 
-        Creates and shows modal About dialog that follows IDA's theme.
-
-        Args:
-            ctx (Any): IDA context (unused)
-
-        Returns:
-            bool: True after dialog is closed
+        Creates and shows modal About dialog that matches the
+        XReferSettingsDialog aesthetic: palette-aware QSS (accent
+        color, card backgrounds, heading typography), separator
+        above the button row, right-aligned primary Close button.
         """
+        # Pull xrefer's real package version so the dialog stays
+        # honest as releases ship. Falls back to a string literal
+        # if the import dance fails for any reason.
+        try:
+            from xrefer import __version__ as xrefer_version
+        except Exception:
+            xrefer_version = "unknown"
+
+        # Reuse the settings dialog's palette-aware stylesheet so
+        # the About dialog inherits the same accent color, card
+        # backgrounds, focus borders, etc. — a single source of
+        # truth for the plugin's visual language.
+        from xrefer.gui.settings import _build_dialog_qss
+
         dialog = QtWidgets.QDialog()
         dialog.setWindowTitle("About XRefer")
-        dialog.setFixedSize(250, 250)
+        # Sized to just fit the content (logo + 4 lines + button bar)
+        # with a small amount of breathing room. Earlier 420px height
+        # left ~200px of empty space under FLARE.
+        dialog.setFixedSize(400, 320)
+        dialog.setStyleSheet(_build_dialog_qss())
 
-        # Only style the separator and button to maintain consistency
-        # while letting the rest inherit from IDA's theme
-        dialog.setStyleSheet("""
-            QPushButton {
-                padding: 5px 15px;
-            }
-            QFrame[frameShape="4"] {
-                height: 1px;
-            }
-        """)
-
-        # Center dialog
+        # Center on screen
         frame_geom = dialog.frameGeometry()
         center_point = QtWidgets.QApplication.primaryScreen().availableGeometry().center()
         frame_geom.moveCenter(center_point)
         dialog.move(frame_geom.topLeft())
 
-        # Create main layout
-        layout = QtWidgets.QVBoxLayout(dialog)
-        layout.setSpacing(5)
-        layout.setContentsMargins(20, 15, 20, 15)
+        # Root: zero-margin so the separator+button-bar can sit
+        # flush at the bottom edge, matching settings dialog.
+        root = QtWidgets.QVBoxLayout(dialog)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # Add centered logo container
-        logo_container = self._create_logo_widget()
-        layout.addWidget(logo_container)
+        # ── Content area ────────────────────────────────────────
+        content_widget = QtWidgets.QWidget()
+        content = QtWidgets.QVBoxLayout(content_widget)
+        # Tight padding all around — the goal is to fit the content
+        # compactly. The dialog is sized to match, so no extra
+        # ``addSpacing()`` calls between widgets either; everything
+        # rides on the uniform ``setSpacing()`` below.
+        content.setContentsMargins(20, 16, 20, 10)
+        content.setSpacing(5)
 
-        # Add title
-        title_label = QtWidgets.QLabel("XRefer: The Binary Navigator")
-        title_font = title_label.font()
-        title_font.setPointSize(9)
-        title_label.setFont(title_font)
+        # Logo
+        content.addWidget(self._create_logo_widget())
+
+        # Title + version pair, rendered as a SINGLE QLabel with HTML
+        # ``<br>`` between the two lines. We use one QLabel rather
+        # than two-stacked-in-a-tight-VBox because Qt's layout system
+        # enforces a style-driven minimum vertical spacing between
+        # widgets that overrides ``QLayout.setSpacing()`` on at least
+        # some IDA + macOS + Qt-style combinations (verified
+        # empirically — setting setSpacing(2) on a sub-layout had
+        # zero visible effect inside IDA, even though it worked in a
+        # standalone test harness). Inline HTML sidesteps that path:
+        # the line spacing between ``<br>``-separated lines is the
+        # font's natural line-height, which renders tighter than
+        # the inter-widget gap Qt enforces between layout items.
+        #
+        # ``setPointSize(11)`` keeps the label readable without
+        # being as large as IDA's default ~13pt font, which made
+        # the dialog feel bigger than necessary.
+        _title_font = QtGui.QFont()
+        _title_font.setPointSize(11)
+
+        # Soft/muted text color used for the secondary "Version" line
+        # and the "DEVELOPED BY" caption. Matches the ``soft_text``
+        # shade used by the settings dialog's QSS for read-only path
+        # text + group-box titles: a 72% WindowText / 28% Window
+        # blend, which renders clearly readable but visibly recessive
+        # so the eye lands on the primary title and FLARE name first.
+        _pal = QtWidgets.QApplication.palette()
+        _w = _pal.color(QtGui.QPalette.Window)
+        _t = _pal.color(QtGui.QPalette.WindowText)
+        muted = QtGui.QColor(
+            int(_t.red() * 0.72 + _w.red() * 0.28),
+            int(_t.green() * 0.72 + _w.green() * 0.28),
+            int(_t.blue() * 0.72 + _w.blue() * 0.28),
+        ).name()
+
+        title_label = QtWidgets.QLabel(
+            f'<div align="center">'
+            f'<span style="font-size: 13pt; font-weight: 700; letter-spacing: 0.3px;">'
+            f'XRefer: The Binary Navigator'
+            f'</span><br>'
+            f'<span style="font-size: 2pt;">&nbsp;</span><br>'
+            f'<span style="color: {muted};">Version {xrefer_version}</span>'
+            f'</div>'
+        )
+        title_label.setTextFormat(QtCore.Qt.RichText)
         title_label.setAlignment(QtCore.Qt.AlignCenter)
-        layout.addWidget(title_label)
+        title_label.setFont(_title_font)
+        content.addWidget(title_label)
 
-        # Add version
-        version_label = QtWidgets.QLabel("Version 1.0.2")
-        version_font = version_label.font()
-        version_font.setPointSize(9)
-        version_label.setFont(version_font)
-        version_label.setAlignment(QtCore.Qt.AlignCenter)
-        layout.addWidget(version_label)
+        # "DEVELOPED BY" caption + FLARE name. The caption gets the
+        # classic small-uppercase-letterspaced treatment used for
+        # section labels (same shape as the group titles in the
+        # settings dialog) so it reads as a *label* for FLARE rather
+        # than as a peer line. FLARE itself stays bold + letter-
+        # spaced like the title.
+        attribution_label = QtWidgets.QLabel(
+            f'<div align="center">'
+            f'<span style="font-size: 8pt; letter-spacing: 1.2px; color: {muted};">'
+            f'DEVELOPED BY'
+            f'</span><br>'
+            f'<span style="font-size: 2pt;">&nbsp;</span><br>'
+            f'<span style="font-weight: 700; letter-spacing: 0.3px;">'
+            f'FLARE'
+            f'</span>'
+            f'</div>'
+        )
+        attribution_label.setTextFormat(QtCore.Qt.RichText)
+        attribution_label.setAlignment(QtCore.Qt.AlignCenter)
+        attribution_label.setFont(_title_font)
+        content.addWidget(attribution_label)
 
-        # Add separator line
-        separator = QtWidgets.QFrame()
-        separator.setFrameShape(QtWidgets.QFrame.HLine)
-        separator.setFrameShadow(QtWidgets.QFrame.Plain)
-        layout.addWidget(separator)
+        # No addStretch() — the dialog is sized to fit the content
+        # naturally. A stretch here would reopen the empty-space
+        # gap the height reduction was meant to close.
 
-        # Add "Developed by"
-        team_label = QtWidgets.QLabel("Developed by")
-        team_label.setAlignment(QtCore.Qt.AlignCenter)
-        team_font = team_label.font()
-        team_font.setPointSize(9)
-        team_label.setFont(team_font)
-        layout.addWidget(team_label)
+        root.addWidget(content_widget, 1)
 
-        # Add FLARE
-        flare_label = QtWidgets.QLabel("FLARE")
-        flare_font = flare_label.font()
-        flare_font.setPointSize(9)
-        flare_label.setFont(flare_font)
-        flare_label.setAlignment(QtCore.Qt.AlignCenter)
-        layout.addWidget(flare_label)
+        # ── Separator + bottom button bar (matches settings) ────
+        sep = QtWidgets.QFrame()
+        sep.setFrameShape(QtWidgets.QFrame.HLine)
+        sep.setProperty("separator", True)
+        root.addWidget(sep)
 
-        # Add spacing
-        layout.addStretch()
-
-        # Add close button
-        button_layout = QtWidgets.QHBoxLayout()
-        button_layout.setContentsMargins(20, 0, 20, 0)  # Left and right margins only
+        button_bar = QtWidgets.QHBoxLayout()
+        button_bar.setContentsMargins(16, 12, 16, 20)
+        button_bar.setSpacing(8)
+        button_bar.addStretch()
 
         close_button = QtWidgets.QPushButton("Close")
-        close_button.setFixedHeight(25)
+        close_button.setProperty("primary", True)
+        close_button.setDefault(True)  # Enter dismisses
         close_button.clicked.connect(dialog.accept)
-        close_button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)  # Allow horizontal expansion
+        button_bar.addWidget(close_button)
 
-        # Add button without stretching
-        button_layout.addWidget(close_button)
-        layout.addLayout(button_layout)
+        root.addLayout(button_bar)
 
         dialog.exec_()
         return True
