@@ -430,13 +430,19 @@ class XRefer:
 
         self.capa_matches = sifted_list
 
-    def find_interesting_artifacts(self) -> None:
+    def find_interesting_artifacts(self, force_no_cache: bool = False) -> None:
         """
         Analyze entities for potentially interesting/malicious indicators.
 
         Uses LLM analysis to identify potentially significant artifacts
         across different types (APIs, strings, libraries, CAPA matches).
         Considers context and relationships between artifacts.
+
+        Args:
+            force_no_cache: when True, the underlying LLM call bypasses
+                the DSPy/LiteLLM response cache so the model re-generates
+                its verdict. Re-run GUI actions pass True because the
+                point of re-running is to get a fresh response.
 
         Side Effects:
             - Updates self.interesting_artifacts with identified indices
@@ -497,7 +503,9 @@ class XRefer:
                 return
             log(f"Total artifacts for analysis: {len(artifacts)}")
             # Get interesting artifacts
-            interesting_artifacts = ArtifactAnalyzer.find_interesting_artifacts(artifacts)
+            interesting_artifacts = ArtifactAnalyzer.find_interesting_artifacts(
+                artifacts, force_no_cache=force_no_cache
+            )
 
             # Store results
             self.interesting_artifacts = interesting_artifacts
@@ -1364,8 +1372,12 @@ class XRefer:
 
             # Setup and run cluster analysis
             try:
+                # Batch size pulled from user settings; falls back to
+                # the ClusterAnalyzer default if the key is missing (old
+                # settings.json without the new analysis_options group).
+                batch_size = self.settings.get("analysis_options", {}).get("cluster_batch_size", 30)
                 self.cluster_analysis = ClusterAnalyzer.analyze_clusters(
-                    self.clusters, self, force_no_cache=force_no_cache,
+                    self.clusters, self, batch_size=batch_size, force_no_cache=force_no_cache,
                 )
                 # self.cluster_analysis = ClusterAnalyzer.populate_dummy_cluster_analysis(self.clusters)
                 if not self.cluster_analysis:  # Empty results usually means network issue
@@ -1950,8 +1962,21 @@ class XRefer:
                     self.settings["llm_lookups"] = False
                     return
                 log(f"Setting LLM model to: {model_id}")
-                config_1 = ModelConfig(model_id=model_id, api_key=api_key, ignore_token_limit=True)
-                config_2 = ModelConfig(model_id=model_id, api_key=api_key)
+                # Temperature and reasoning-effort are deliberately not
+                # exposed as user settings — we let the provider's API
+                # defaults apply, which is the calibrated configuration
+                # for hybrid reasoning models like Gemini 3. See
+                # ``_build_lm_kwargs`` in plugins/xrefer/llm/processor.py
+                # for the OpenAI-reasoning-model special case.
+                config_1 = ModelConfig(
+                    model_id=model_id,
+                    api_key=api_key,
+                    ignore_token_limit=True,
+                )
+                config_2 = ModelConfig(
+                    model_id=model_id,
+                    api_key=api_key,
+                )
                 assert config_2 is not None
                 ArtifactAnalyzer.set_model_config(config_1)
                 ClusterAnalyzer.set_model_config(config_1)
