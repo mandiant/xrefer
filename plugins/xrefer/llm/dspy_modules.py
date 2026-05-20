@@ -81,54 +81,217 @@ class BinaryReport(BaseModel):
     overview: str = Field(
         ...,
         description=(
-            "One paragraph opening with 'The binary is ' or 'This "
-            "binary is '. State what the binary is and its strongest "
-            "takeaway. No bullets. Code spans (`like this`) are "
-            "permitted; no other markdown."
+            "One paragraph opening with 'The binary is a "
+            "<morphology>...' (where <morphology> is the "
+            "binary_category) with no adjectives between 'is' and "
+            "the morphology: write 'The binary is a ransomware "
+            "that...', NOT 'The binary is a highly structured "
+            "ransomware...'. For binary_category=Undetermined, use "
+            "a neutral noun describing what the binary does (e.g., "
+            "'The binary is a CRC32 utility...'). State the "
+            "strongest takeaway. No bullets. Code spans (`like "
+            "this`) are permitted; no other markdown. Prefer "
+            "concrete claims over puffery throughout — avoid "
+            "vibes-only adjectives like 'sophisticated', "
+            "'advanced', 'comprehensive', 'robust', 'complex'."
         ),
     )
     details: str = Field(
         ...,
         description=(
             "Comprehensive technical report as markdown. Use `###` "
-            "sub-headings to organise the analysis around what the "
-            "binary actually does — there is no fixed list of sub-"
-            "section names.\n"
+            "sub-headings to organise the analysis around the "
+            "binary's behaviours and observed characteristics — "
+            "there is no fixed list of sub-section names.\n"
             "\n"
-            "Cover EVERY aspect of the binary's behaviour visible in "
-            "the cluster_data: every cluster's functionality, every "
-            "library, protocol, algorithm, configuration setting, "
-            "and runtime identifier. Be exhaustive within sub-"
-            "sections — if 32 file extensions are observed, list all "
-            "32; if three encryption algorithms, name each.\n"
+            "Cover EVERY observation the cluster_data supports — "
+            "behavioural AND technical: every cluster's "
+            "functionality, every library, protocol, algorithm, "
+            "configuration setting, runtime identifier, plus any "
+            "toolchain / packer / anti-analysis / build-metadata / "
+            "language / encoding cues the artifacts surface. "
+            "Default to inclusion: if an observation is grounded in "
+            "cluster_data, include it; omit only when speculative "
+            "or unsupported. Be exhaustive within sub-sections — "
+            "if 32 file extensions are observed, list all 32; if "
+            "three encryption algorithms, name each.\n"
             "\n"
             "Quote concrete strings VERBATIM in backticks: domains, "
             "IPs, paths, registry keys, mutex names, user-agents, "
             "library names, CLI flags, hardcoded commands. Do not "
             "generalise ('uses a mutex named `filemanager1`' not "
-            "'uses a mutex').\n"
+            "'uses a mutex'). Prefer concrete facts over puffery: "
+            "'lists 32 file extensions' beats 'comprehensive list'; "
+            "'4 hardcoded C2 domains' beats 'sophisticated network "
+            "communication'. Avoid vibes-only adjectives like "
+            "'sophisticated', 'advanced', 'comprehensive', 'robust', "
+            "'complex'.\n"
             "\n"
             "End with a final sub-section listing the binary's "
-            "observable runtime identifiers (domains, IPs, URLs / "
-            "URL paths, user-agents, mutexes, registry keys, file "
-            "paths, file extensions, commands, service names, "
-            "scheduled tasks, COM CLSIDs / GUIDs, library names) "
-            "when any exist, formatted as ``- **<Label>**: `<value>`"
-            " `` lines. Title it `### Indicators of Compromise "
-            "(IoCs)` when binary_category is explicitly malicious "
-            "(anything other than Undetermined, Utility, Remote "
-            "Control and Administration Tool, Archiver, Sniffer, "
+            "observable runtime identifiers (hardcoded values a "
+            "defender could pivot on) when any exist, formatted "
+            "as ``- **<Label>**: `<value>` [c<N>]`` lines.\n"
+            "\n"
+            "Use the following canonical labels for common IoC "
+            "categories when their values appear in the cluster "
+            "artifacts. The label shown is the **bold label** "
+            "in the bullet — use it verbatim so the inventory "
+            "stays consistent across reports:\n"
+            "  - Network: `Domain`, `IP`, `URL`, `URL Path`, "
+            "`User-Agent`, `HTTP Header`\n"
+            "  - File-system: `File Path`, `Directory`, `File "
+            "Name`, `File Extension`, `File Pattern` "
+            "(glob / regex)\n"
+            "  - Registry (Windows binaries): `Registry Key`, "
+            "`Registry Value` (use this for distinctive value "
+            "names, not for the value's data)\n"
+            "  - Execution: `Command` (full command lines such "
+            "as `vssadmin.exe Delete Shadows /all /quiet`), `CLI "
+            "Flag` (flags the binary's OWN command-line parser "
+            "accepts), `Binary Name` (referenced, dropped, or "
+            "spawned external binaries such as `psexec.exe`, "
+            "`bcdedit.exe`), `Service` (service names created "
+            "or queried), `Scheduled Task`\n"
+            "  - IPC / synchronization: `Mutex`, `Named Pipe`, "
+            "`Event`\n"
+            "  - COM / WMI / UI: `COM CLSID` (formatted "
+            "`{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`), `WMI "
+            "Query`, `Window Title`, `Window Class`\n"
+            "  - Build / metadata: `PDB Path`, `Version` (build "
+            "or version strings)\n"
+            "\n"
+            "The list above is the baseline — emit any category "
+            "whose value(s) appear in the cluster artifacts, AND "
+            "add any other distinctive hardcoded value defenders "
+            "could pivot on (the list is not exhaustive). Do NOT "
+            "pad with values that aren't actually in the "
+            "artifacts.\n"
+            "\n"
+            "Do NOT list imported APIs or library/DLL names in "
+            "this sub-section — those are usage observations, "
+            "not hardcoded detection artifacts a defender can "
+            "search for; APIs and libraries belong in the prose "
+            "body where they describe behaviour.\n"
+            "\n"
+            "Title it `### Indicators of Compromise (IoCs)` when "
+            "binary_category is explicitly malicious (anything "
+            "other than Undetermined, Utility, Remote Control "
+            "and Administration Tool, Archiver, Sniffer, "
             "Cryptocurrency Miner, Decoder, Decrypter, Screen "
-            "Capture Tool, Reconnaissance Tool, Builder); otherwise "
-            "title it `### Observable Runtime Artifacts`. Omit this "
-            "sub-section only when the binary has no such "
-            "identifiers at all.\n"
+            "Capture Tool, Reconnaissance Tool, Builder); "
+            "otherwise title it `### Observable Runtime "
+            "Artifacts`. Omit this sub-section only when the "
+            "binary has no such identifiers at all.\n"
+            "\n"
+            "Where prose needs a subject for the binary, refer to "
+            "it using a short natural noun form of binary_category "
+            "rather than the generic 'the binary' (e.g. 'the "
+            "ransomware', 'this stealer', 'the miner', 'the "
+            "backdoor'). For multi-word categories use a natural "
+            "short form (e.g. 'this tool' for 'Remote Control and "
+            "Administration Tool'). For binary_category="
+            "Undetermined, fall back to 'the binary' or 'this "
+            "binary'. Verbs without a subject are also fine (e.g. "
+            "'Initialises the runtime environment...'); apply the "
+            "morphology noun only where a subject is required.\n"
             "\n"
             "Markdown allowed: `###`, `####`, `-`, `**bold**`, "
             "`` `inline code` ``. No `##` (top-level structure is "
-            "fixed), no code fences, no tables. Do not include "
-            "`cluster.id.NNNN` references — those belong in per-"
-            "cluster relationships, not in this field."
+            "fixed), no code fences, no tables.\n"
+            "\n"
+            "CITATION COVERAGE (applies to `## Details` sub-"
+            "sections; `## Overview` is exempt; the IoC / "
+            "Observable Runtime Artifacts sub-section follows a "
+            "simplified per-bullet rule defined below):\n"
+            "\n"
+            "Every prose sentence in `## Details` sub-sections "
+            "must be covered by exactly one citation group. No "
+            "prose sentence may exist without a citation behind "
+            "it. The boundary where one citation ends marks where "
+            "the next begins; there are no uncited gaps.\n"
+            "\n"
+            "A citation group may span ONE or MORE consecutive "
+            "sentences that share the same evidentiary basis. "
+            "Place a single citation token at the end of the LAST "
+            "sentence in the group, before the period. Do not "
+            "repeat the same citation on every sentence inside a "
+            "group — one token per group.\n"
+            "\n"
+            "Token forms: single cluster `[c5]`; multiple "
+            "`[c4, c6]` or `[c4, c6, c7]`. Cap at three clusters "
+            "per citation. If a claim genuinely involves four or "
+            "more clusters, the claim is too broad — split it "
+            "into narrower per-phase claims, each with its own "
+            "focused citation. Use the smallest accurate set: "
+            "include a cluster ID only when that cluster actually "
+            "carries evidence for the claim; each ID in the "
+            "bracket must be defensible if challenged. The long "
+            "form `cluster.id.NNNN` remains forbidden in "
+            "binary_report — use only the short `[c<N>]` citation "
+            "form. Bullet points follow the same rule as "
+            "sentences: each bullet ends with a citation covering "
+            "its claim.\n"
+            "\n"
+            "ALLOWED examples:\n"
+            "  - Single cluster, one sentence: \"Captures the "
+            "desktop using GDI+ via `BitBlt` and stages the "
+            "bitmap in a memory buffer [c5].\"\n"
+            "  - Single cluster, multi-sentence group: \""
+            "Locates Chrome and Firefox profile directories. "
+            "Reads the `Login Data` SQLite database via "
+            "`sqlite3_open` and `sqlite3_exec` [c4].\"\n"
+            "  - Multi-cluster, one sentence: \"Decrypts stored "
+            "browser credentials using Windows DPAPI via "
+            "`CryptUnprotectData` [c4, c6].\"\n"
+            "  - Three-cluster citation: \"The orchestrator "
+            "dispatches between credential harvesting, screen "
+            "capture, and network exfiltration [c2, c4, c5].\"\n"
+            "\n"
+            "NOT ALLOWED:\n"
+            "  - Uncited prose: \"The remainder of this report "
+            "walks through major behaviours.\" — framing-only "
+            "sentences with no citation must be deleted or merged "
+            "into the next substantive statement under its "
+            "citation.\n"
+            "  - Partial coverage: \"Captures the desktop using "
+            "GDI+. Encodes the bitmap [c5].\" — the first "
+            "sentence has no citation backing it; group both "
+            "under one citation at the end, or cite each "
+            "separately.\n"
+            "  - Over-citation (padding): \"Encrypts files using "
+            "AES-256-CBC [c1, c2, c3, c4, c5].\" — only the "
+            "actual encryptor cluster belongs here; the rest "
+            "fail the defensibility test.\n"
+            "  - Over-citation (claim too broad): \"Performs the "
+            "full attack lifecycle [c2, c4, c5, c6, c7, c9].\" — "
+            "six clusters under one claim means the claim is too "
+            "broad; split into narrower per-phase claims.\n"
+            "\n"
+            "IoC / Observable Runtime Artifacts bullets each "
+            "carry ONE citation, placed at the end of the bullet "
+            "line. Format: ``- **<Label>**: `<value>` [c<N>]``. "
+            "Most IoCs come from a single cluster (the cluster "
+            "whose artifacts contain the hardcoded value), so the "
+            "citation is typically single-cluster. Multi-cluster "
+            "citations like `[c4, c5]` are valid when the value "
+            "genuinely spans clusters (e.g. a mutex created in "
+            "one cluster and checked in another). Do NOT group "
+            "citations across bullets — each bullet carries its "
+            "own citation even when consecutive bullets cite the "
+            "same cluster.\n"
+            "\n"
+            "Self-check before emitting JSON: scan every prose "
+            "sentence and every IoC bullet in `## Details` sub-"
+            "sections. For each prose sentence, confirm one of: "
+            "it ends with a citation token covering its claim, "
+            "OR it is followed (without any uncited intervening "
+            "sentence) by a sentence that ends with a citation "
+            "covering the same claim. For each IoC bullet, "
+            "confirm it ends with a single citation identifying "
+            "the source cluster. If any sentence or bullet is "
+            "uncited, either cite it or remove it. For each "
+            "citation, confirm every cluster ID in the bracket is "
+            "defensibly evidentiary. No exceptions."
         ),
     )
 
@@ -438,12 +601,33 @@ class MitreAttackTechnique(BaseModel):
     rationale: str = Field(
         ...,
         description=(
-            "1-2 sentence justification that cites the SPECIFIC artifacts or behaviors in THIS cluster "
-            "that support the mapping (e.g. 'invokes cmd.exe via CreateProcessW with the /c flag observed "
-            "in cluster strings'). Avoid generic restatements of the technique definition — the rationale "
-            "must reference what was observed, not what the technique generally means. "
-            "If you cannot construct a rationale grounded in this cluster's actual artifacts, OMIT the "
-            "mapping rather than including a speculative one."
+            "1-2 sentences (up to 3 when describing a behavioral chain) justifying the mapping. "
+            "Cite the SPECIFIC artifacts or behaviors in THIS cluster that support it (e.g. "
+            "'invokes cmd.exe via CreateProcessW with the /c flag observed in cluster strings'). "
+            "Avoid generic restatements of the technique definition — the rationale must reference "
+            "what was observed, not what the technique generally means.\n"
+            "\n"
+            "When the cluster's call flow shows a meaningful function-to-function sequence that "
+            "grounds the technique, describe that sequence as a chain of operations in ROLE-BASED "
+            "language — identify each participating function by what it does (e.g. 'a registry-"
+            "read helper', 'a CreateProcessW wrapper', 'the orchestrator'), NOT by address. Raw "
+            "function addresses are meaningless to report readers; describe behaviour, not "
+            "identifiers. Example: 'reads `cmd.exe /c %s` from registry value "
+            "`Software\\Microsoft\\Windows\\CurrentVersion\\Run` via a registry-read helper, then "
+            "passes the formatted string to a CreateProcessW wrapper which executes it'. This is "
+            "the strongest form of grounding when the call flow data supports it.\n"
+            "\n"
+            "BUT: do NOT invent chains. If no such function-to-function sequence is visible in the "
+            "call flow, OR the technique is grounded by a single observable action (e.g. 'calls "
+            "`vssadmin.exe Delete Shadows /all /quiet`' for T1490, or 'writes registry value `Run` "
+            "under `Software\\Microsoft\\Windows\\CurrentVersion`' for T1547.001), fall back to "
+            "the simpler artifact-level rationale. A fabricated chain is worse than no chain at all "
+            "— if you're tempted to write 'a helper probably passes the string to a worker' "
+            "without the call flow edge actually showing that hand-off, write the simpler "
+            "artifact-level rationale instead.\n"
+            "\n"
+            "If you cannot construct a rationale grounded in this cluster's actual artifacts, OMIT "
+            "the mapping rather than including a speculative one."
         ),
     )
 
@@ -471,8 +655,14 @@ class ClusterAnalysis(BaseModel):
         description=(
             "MITRE ATT&CK Enterprise techniques the cluster's observed behaviors map to. "
             "ONLY include techniques actually supported by the cluster's artifacts (APIs, strings, "
-            "CAPA hits, call patterns); do NOT speculate. Empty list is valid and expected for "
-            "pure utility / library / runtime clusters that don't implement adversary behavior. "
+            "CAPA hits, call patterns); do NOT speculate. Conversely, INCLUDE a technique when at "
+            "least one concrete artifact in the cluster directly supports it. A single grounding "
+            "artifact (one API call, one matching string, one CAPA hit, one distinctive command "
+            "line) is sufficient — the bar is 'I can cite a specific artifact in the rationale', "
+            "not 'I have multiple corroborating signals'. Under-inclusion is a real cost: a missed "
+            "grounded technique disappears from the report's MITRE coverage. "
+            "Empty list is valid and expected for pure utility / library / runtime clusters that "
+            "don't implement adversary behavior. "
             "Order entries by tactic kill-chain position (Reconnaissance → Resource Development → "
             "Initial Access → Execution → Persistence → Privilege Escalation → Defense Evasion → "
             "Credential Access → Discovery → Lateral Movement → Collection → Command and Control → "
@@ -531,9 +721,119 @@ class BinaryCategory(enum.Enum):
 
 
 class ClusterAnalysisResponse(BaseModel):
-    """Response model for cluster analysis."""
+    """Stage-1 response — per-cluster analyses only.
+
+    Binary-level synthesis (``binary_description``,
+    ``binary_category``, ``binary_report``) is produced separately
+    by :class:`BinarySynthesizerModule` from these per-cluster
+    results plus aggregated raw artifacts. Splitting the two stages
+    avoids re-asking the LLM for the binary-level fields on every
+    batch (the prior single-stage flow generated them per batch and
+    discarded all but the final batch's values) and lets stage 2
+    synthesize from the whole binary in one view rather than from a
+    single batch's worth of clusters.
+    """
 
     clusters: List[ClusterAnalysisItem] = Field(..., description="List of cluster analyses with their identifiers")
+
+    @model_validator(mode="before")
+    def _coerce_legacy_clusters(cls, value: Dict[str, Any]) -> Dict[str, Any]:
+        clusters = value.get("clusters") if isinstance(value, dict) else None
+        if isinstance(clusters, dict):
+            value["clusters"] = [
+                {"cluster_id": cid, **cdata}
+                for cid, cdata in clusters.items()
+            ]
+        return value
+
+    @model_serializer(mode="wrap")
+    def _serialize_with_cluster_map(self, handler):
+        data = handler(self)
+        cluster_map = {}
+        for entry in data.get("clusters", []):
+            entry = dict(entry)
+            cluster_id = str(entry.pop("cluster_id"))
+            cluster_map[cluster_id] = entry
+        data["clusters"] = cluster_map
+        return data
+
+
+class ClusterAnalyzerSignature(dspy.Signature):
+    """
+    You are analysing a binary by reading its function-cluster
+    structure and per-cluster artifacts (API calls, strings,
+    libraries, CAPA capabilities, and call flows). The binary may or
+    may not be malicious. Describe what the artifacts actually show;
+    do not presume intent.
+
+    Per-cluster outputs (work from deepest subclusters upward):
+      - `label`: short descriptive name. Reflect the functionality
+        of subclusters and referenced clusters too. If a cluster
+        orchestrates most of the binary, say so in the label.
+      - `description`: what the cluster does. No function addresses;
+        no cluster IDs (those go in `relationships`).
+      - `relationships`: how this cluster interacts with referenced
+        clusters. The ONLY field where `cluster.id.NNNN` may appear.
+      - `function_prefix`: one-word prefix for renaming functions.
+      - `library_or_runtime`: 1 for library/runtime code, 0 else.
+      - `mitre_attack`: ATT&CK Enterprise mappings supported by the
+        cluster's artifacts. Each entry: `id`, `tactic`, `name`,
+        `rationale` (1-2 sentences citing observed artifacts). Omit
+        any mapping you cannot ground; if you'd need hedging phrases
+        like "may indicate" or "could suggest" or "is consistent
+        with", omit instead. Empty list is correct for clusters that
+        don't perform technique-shaped behaviour, and for binaries
+        that don't exhibit adversary techniques regardless of class.
+
+    This call produces PER-CLUSTER outputs only. Binary-level
+    synthesis (overall description, category, and full report) is
+    produced in a separate later stage by BinarySynthesizerModule
+    from these per-cluster results plus aggregated raw artifacts.
+    Do NOT produce binary-level fields here.
+    """
+    cluster_data: str = dspy.InputField(description="Raw cluster hierarchy with functions and artifacts (for reference)")
+    analysis: ClusterAnalysisResponse = dspy.OutputField(description="Per-cluster analyses (label, description, relationships, function_prefix, library_or_runtime, mitre_attack) for the requested cluster subset.")
+
+
+
+class ClusterAnalyzerModule(dspy.Module):
+    """DSPy module for cluster analysis with structured inputs."""
+
+    def __init__(self):
+        super().__init__()
+        self.predictor = dspy.Predict(ClusterAnalyzerSignature)
+
+    def forward(self, cluster_data: str) -> ClusterAnalysisResponse:
+        """
+        Analyze clusters using DSPy with structured inputs.
+
+        Args:
+            cluster_data: Formatted cluster hierarchy with functions and artifacts
+
+        Returns:
+            ClusterAnalysisResponse Pydantic model
+        """
+
+        result = self.predictor(
+            cluster_data=cluster_data,
+        )
+        return result.analysis
+
+
+class BinarySynthesisResponse(BaseModel):
+    """Stage-2 response — binary-level synthesis from pre-digested
+    per-cluster work plus aggregated raw artifacts.
+
+    Produces the three binary-level outputs (``binary_description``,
+    ``binary_category``, ``binary_report``) in a single dedicated
+    LLM call so they are generated once, on a view of the WHOLE
+    binary — not regenerated and discarded per batch as the prior
+    single-stage flow did. Serializes ``binary_report`` to a
+    markdown string on ``model_dump()`` so downstream consumers
+    (the HTML report, the IDA cluster header, etc.) keep treating
+    it as a string.
+    """
+
     binary_description: str = Field(
         ...,
         description=(
@@ -544,7 +844,14 @@ class ClusterAnalysisResponse(BaseModel):
             "(`**bold**`, `*italic*`), no backticks for code spans "
             "(`` `code` ``), no code fences. The full description "
             "must read as natural prose. Markdown belongs in "
-            "binary_report, not here."
+            "binary_report, not here. Open with 'The binary is a "
+            "<morphology>...' (where <morphology> is the "
+            "binary_category) with no adjectives between 'is' and "
+            "the morphology: write 'The binary is a ransomware "
+            "that...', NOT 'The binary is a highly structured "
+            "ransomware...'. Prefer concrete claims over puffery — "
+            "avoid vibes-only adjectives like 'sophisticated', "
+            "'advanced', 'comprehensive', 'robust', 'complex'."
         ),
     )
     binary_category: BinaryCategory = Field(
@@ -625,63 +932,52 @@ class ClusterAnalysisResponse(BaseModel):
         ),
     )
 
-    @model_validator(mode="before")
-    def _coerce_legacy_clusters(cls, value: Dict[str, Any]) -> Dict[str, Any]:
-        clusters = value.get("clusters") if isinstance(value, dict) else None
-        if isinstance(clusters, dict):
-            value["clusters"] = [
-                {"cluster_id": cid, **cdata}
-                for cid, cdata in clusters.items()
-            ]
-        return value
-
     @model_serializer(mode="wrap")
-    def _serialize_with_cluster_map(self, handler):
+    def _flatten_binary_report(self, handler):
         data = handler(self)
-        cluster_map = {}
-        for entry in data.get("clusters", []):
-            entry = dict(entry)
-            cluster_id = str(entry.pop("cluster_id"))
-            cluster_map[cluster_id] = entry
-        data["clusters"] = cluster_map
-        # Flatten binary_report to its rendered markdown string so the
-        # rest of the codebase (analyzer.generate_report_data, the IDA
-        # cluster header, the HTML report) keeps treating it as a
-        # string. The structured form lives only inside the LLM/DSPy
-        # boundary.
         if isinstance(self.binary_report, BinaryReport):
             data["binary_report"] = self.binary_report.to_markdown()
         return data
 
 
-class ClusterAnalyzerSignature(dspy.Signature):
+class BinarySynthesizerSignature(dspy.Signature):
     """
-    You are analysing a binary by reading its function-cluster
-    structure and per-cluster artifacts (API calls, strings,
-    libraries, CAPA capabilities, and call flows). The binary may or
-    may not be malicious. Describe what the artifacts actually show;
-    do not presume intent.
+    You are synthesising a binary-level analysis from pre-digested
+    per-cluster work plus the raw artifacts each cluster touches.
+    The per-cluster labels, descriptions, relationships, and MITRE
+    ATT&CK mappings have ALREADY been produced by an earlier
+    analysis pass — you do NOT need to re-derive per-cluster
+    meaning. Your job is the binary-level roll-up.
 
-    Per-cluster outputs (work from deepest subclusters upward):
-      - `label`: short descriptive name. Reflect the functionality
-        of subclusters and referenced clusters too. If a cluster
-        orchestrates most of the binary, say so in the label.
-      - `description`: what the cluster does. No function addresses;
-        no cluster IDs (those go in `relationships`).
-      - `relationships`: how this cluster interacts with referenced
-        clusters. The ONLY field where `cluster.id.NNNN` may appear.
-      - `function_prefix`: one-word prefix for renaming functions.
-      - `library_or_runtime`: 1 for library/runtime code, 0 else.
-      - `mitre_attack`: ATT&CK Enterprise mappings supported by the
-        cluster's artifacts. Each entry: `id`, `tactic`, `name`,
-        `rationale` (1-2 sentences citing observed artifacts). Omit
-        any mapping you cannot ground; if you'd need hedging phrases
-        like "may indicate" or "could suggest" or "is consistent
-        with", omit instead. Empty list is correct for clusters that
-        don't perform technique-shaped behaviour, and for binaries
-        that don't exhibit adversary techniques regardless of class.
+    The binary may or may not be malicious. Describe what the
+    artifacts and per-cluster summaries actually show; do not
+    presume intent.
 
-    Binary-level outputs:
+    Input shape (provided in ``synthesis_input``):
+      - A short binary header with the file format (e.g.
+        "Portable executable for AMD64 (PE)") and the total
+        cluster count.
+      - One block per cluster containing:
+          * label, description, relationships, library_or_runtime
+            flag.
+          * mitre_attack list (technique entries with id, tactic,
+            name, rationale — already grounded per-cluster).
+          * All strings, libraries, CAPA capabilities, and APIs
+            attributed to that cluster's own functions.
+
+    File format is GROUND TRUTH for runtime target. Strings,
+    paths, or references in the cluster artifacts that imply
+    other platforms (ESXi, Linux, macOS) are dead/inert when the
+    file format doesn't match — many malware families ship per-
+    platform builds from a shared codebase, so foreign-platform
+    strings often persist in single-platform builds. Describe
+    what THIS compilation does on its actual target, not what
+    the broader family is known to do on others. Do not call a
+    PE binary "multi-platform" because of ESXi strings; do not
+    call an ELF binary "Windows-capable" because of registry-
+    path strings. The format header is authoritative.
+
+    Outputs:
       - `binary_description`: one paragraph, PLAIN PROSE ONLY (no
         markdown of any kind — no headings, bullets, asterisks, or
         backticks).
@@ -691,11 +987,19 @@ class ClusterAnalyzerSignature(dspy.Signature):
         do not clearly support a malicious category.
       - `binary_report`: a structured BinaryReport (overview +
         details). See the field descriptions for the rules. The
-        core directive: cover EVERY aspect of the binary visible in
-        the cluster_data, quote concrete strings VERBATIM in
-        backticks, and end with the observable-artifacts /
+        core directive: cover EVERY observation the input
+        supports — behavioural and technical alike — default to
+        inclusion when grounded, quote concrete strings VERBATIM
+        in backticks, and end with the observable-artifacts /
         IoC sub-section when the binary has hardcoded runtime
         identifiers.
+
+    The per-cluster `mitre_attack` entries are your source of
+    truth for technique-level grounding when writing Defense
+    Evasion, Command and Control, Impact, etc. sub-sections of
+    the report — reuse those rationales rather than re-deriving
+    them. Cluster `description` and `relationships` fields are
+    your source for cross-cluster behavioural flow.
 
     Example BinaryReport.details for a credential-stealer style
     binary — shows the level of depth, breadth, and verbatim-
@@ -706,85 +1010,83 @@ class ClusterAnalyzerSignature(dspy.Signature):
 
       ### Execution and Orchestration
 
-      Initialises the environment and uses a mutex named
-      `filemanager1` to enforce single-instance execution.
-      Establishes exception handling and dispatches between
-      collection modules.
+      Initialises the runtime environment, establishes exception
+      handling, and uses a mutex named `filemanager1` to enforce
+      single-instance execution [c1]. Dispatches between
+      credential harvesting, screen capture, and network
+      exfiltration modules [c2, c4, c5].
 
       ### Information Stealing and Data Collection
 
       - **System Discovery**: retrieves computer name, current
         user, OS version, and physical memory status via
-        `GetComputerNameW`, `GetUserNameW`, `GlobalMemoryStatusEx`.
+        `GetComputerNameW`, `GetUserNameW`, and
+        `GlobalMemoryStatusEx` [c3].
       - **Storage Enumeration**: identifies logical drives and
         standard system folders (Desktop, AppData) to locate
-        target files.
-      - **Application Targeting**: searches the registry for
-        configuration data:
-        - Cryptocurrency wallets: Bitcoin-Qt, Monero core wallets
-        - Communication: Microsoft Outlook profiles
-        - Remote access: WinSCP sessions, OpenVPN configurations
-        - Gaming: Valve Steam account information
+        target files [c3].
+      - **Application Targeting**: queries the registry for
+        configuration data tied to cryptocurrency wallets
+        (Bitcoin-Qt, Monero), email clients (Microsoft Outlook),
+        remote-access tools (WinSCP, OpenVPN), and gaming
+        platforms (Valve Steam) [c4].
 
       ### Screen Capture
 
       Captures the desktop window using GDI+ — calls `BitBlt` to
-      copy the display context into a bitmap, then encodes and
-      stages it for exfiltration.
+      copy the display context into a bitmap, then encodes the
+      bitmap to a memory stream via `GdipSaveImageToStream` and
+      stages it for exfiltration [c5].
 
       ### Network Communication
 
-      Exfiltrates over HTTP using WinHttp. POSTs to
+      Exfiltrates over HTTP using WinHttp; POSTs to
       `tastedata.shop/ag-ap.php` with a hardcoded User-Agent
-      string mimicking macOS Chrome.
+      string mimicking macOS Chrome [c7].
 
       ### Defense Evasion
 
       - **DLL unhooking**: reads `ntdll.dll` directly from
-        `C:\\windows\\system32\\` to bypass EDR/AV hooks.
+        `C:\\windows\\system32\\` to bypass EDR/AV hooks [c9].
       - **Dynamic API resolution**: resolves functions at runtime
-        via `LoadLibraryA` and `GetProcAddress`.
+        via `LoadLibraryA` and `GetProcAddress` [c9].
       - **Memory protection**: uses `VirtualProtect` to modify
         page permissions, likely to facilitate execution of
-        dynamically loaded code.
+        dynamically loaded code [c9, c11].
 
       ### Indicators of Compromise (IoCs)
 
-      - **Domain**: `tastedata.shop`
-      - **URL Path**: `/ag-ap.php`
-      - **Mutex**: `filemanager1`
-      - **User-Agent**: `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36`
+      - **Domain**: `tastedata.shop` [c7]
+      - **URL Path**: `/ag-ap.php` [c7]
+      - **Mutex**: `filemanager1` [c1]
+      - **User-Agent**: `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36` [c7]
 
-    This example shows the EXPECTED LEVEL of depth and specificity —
-    multiple sub-sections covering distinct functional areas,
-    verbatim strings, exhaustive bullets. Real binaries vary widely
-    in class (compression utilities, debuggers, installers, etc.)
-    and their sub-sections will look very different; match the
-    binary's actual structure rather than copying this example's
-    headings.
+    Real binaries vary widely in class (compression utilities,
+    debuggers, installers, etc.) — pick sub-section headings that
+    fit what you observed, not what this example shows.
     """
-    cluster_data: str = dspy.InputField(description="Raw cluster hierarchy with functions and artifacts (for reference)")
-    analysis: ClusterAnalysisResponse = dspy.OutputField(description="Complete cluster analysis with per-cluster metadata and binary-level insights")
+    synthesis_input: str = dspy.InputField(description="Per-cluster summaries (label, description, relationships, mitre_attack) plus all raw artifacts (strings, libraries, CAPA, APIs) per cluster, with a binary-level header.")
+    synthesis: BinarySynthesisResponse = dspy.OutputField(description="Binary-level synthesis: overall description, category, and structured report.")
 
-class ClusterAnalyzerModule(dspy.Module):
-    """DSPy module for cluster analysis with structured inputs."""
+
+class BinarySynthesizerModule(dspy.Module):
+    """DSPy module for stage-2 binary-level synthesis."""
 
     def __init__(self):
         super().__init__()
-        self.predictor = dspy.Predict(ClusterAnalyzerSignature)
+        self.predictor = dspy.Predict(BinarySynthesizerSignature)
 
-    def forward(self, cluster_data: str) -> ClusterAnalysisResponse:
+    def forward(self, synthesis_input: str) -> BinarySynthesisResponse:
         """
-        Analyze clusters using DSPy with structured inputs.
+        Produce the binary-level synthesis from pre-digested per-
+        cluster summaries and aggregated raw artifacts.
 
         Args:
-            cluster_data: Formatted cluster hierarchy with functions and artifacts
+            synthesis_input: Formatted per-cluster summaries +
+                aggregated raw artifacts, with binary-level header.
 
         Returns:
-            ClusterAnalysisResponse Pydantic model
+            BinarySynthesisResponse Pydantic model.
         """
-
-        result = self.predictor(
-            cluster_data=cluster_data,
-        )
-        return result.analysis
+        result = self.predictor(synthesis_input=synthesis_input)
+        return result.synthesis

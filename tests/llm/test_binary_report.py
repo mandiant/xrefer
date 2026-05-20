@@ -28,6 +28,7 @@ from pydantic import ValidationError
 from xrefer.llm.dspy_modules import (
     BinaryCategory,
     BinaryReport,
+    BinarySynthesisResponse,
     ClusterAnalysisItem,
     ClusterAnalysisResponse,
     MitreAttackTechnique,
@@ -306,6 +307,169 @@ def test_warn_helper_logs_on_cluster_id_leak(monkeypatch):
     assert any("cluster.id." in m for m in captured), captured
 
 
+def test_warn_helper_flags_puffery_in_binary_description(monkeypatch):
+    """The post-hoc helper should also scan ``binary_description``
+    (the standalone summary, separate from binary_report) for
+    marketing adjectives. ``binary_description`` is the marquee
+    summary line shown in the HTML report and the IDA cluster
+    header, so puffery there is especially visible.
+    """
+    from xrefer.llm.cluster_analyzer import ClusterAnalyzer
+
+    captured: list[str] = []
+    monkeypatch.setattr(
+        "xrefer.llm.cluster_analyzer.log", lambda msg: captured.append(msg)
+    )
+    desc = (
+        "The binary is a sophisticated ransomware payload that "
+        "orchestrates a complex lifecycle of credential theft."
+    )
+    # Pass an otherwise-clean report so only the description warning fires.
+    md = (
+        "## Overview\n\nThe binary is a fixture.\n\n"
+        "## Details\n\n### Section\n\nbody.\n"
+    )
+    ClusterAnalyzer._warn_on_sparse_binary_report(
+        md, binary_description=desc
+    )
+    desc_msgs = [m for m in captured if "binary_description" in m]
+    # Both 'sophisticated' and 'complex' are in BANNED_TOKENS_SOFT.
+    tokens_flagged = {tok for tok in ("sophisticated", "complex")
+                      if any(tok in m for m in desc_msgs)}
+    assert tokens_flagged == {"sophisticated", "complex"}, (
+        tokens_flagged, desc_msgs
+    )
+
+
+def test_warn_helper_silent_on_clean_binary_description(monkeypatch):
+    """A binary_description free of banned tokens produces no
+    binary_description warning.
+    """
+    from xrefer.llm.cluster_analyzer import ClusterAnalyzer
+
+    captured: list[str] = []
+    monkeypatch.setattr(
+        "xrefer.llm.cluster_analyzer.log", lambda msg: captured.append(msg)
+    )
+    desc = "The binary is a ransomware that encrypts files using ChaCha20-Poly1305."
+    md = (
+        "## Overview\n\nThe binary is a fixture.\n\n"
+        "## Details\n\n### Section\n\nbody.\n"
+    )
+    ClusterAnalyzer._warn_on_sparse_binary_report(
+        md, binary_description=desc
+    )
+    desc_msgs = [m for m in captured if "binary_description" in m]
+    assert desc_msgs == [], desc_msgs
+
+
+def test_warn_helper_flags_unresolved_citation(monkeypatch):
+    """When a citation references a cluster ID that isn't in the
+    binary's cluster set, the post-hoc helper logs a warning. The
+    web UI is expected to degrade gracefully on these (rendering a
+    broken-link chip) so the warning is informational, not fatal.
+    """
+    from xrefer.llm.cluster_analyzer import ClusterAnalyzer
+
+    captured: list[str] = []
+    monkeypatch.setattr(
+        "xrefer.llm.cluster_analyzer.log", lambda msg: captured.append(msg)
+    )
+    md = (
+        "## Overview\n\nThe binary is a test fixture.\n\n"
+        "## Details\n\n### Section\n\n"
+        "Does the thing [c5]. Does another thing [c5, c99].\n"
+    )
+    ClusterAnalyzer._warn_on_sparse_binary_report(
+        md, valid_cluster_ids={1, 5}
+    )
+    assert any("c99" in m for m in captured), captured
+    # c5 is valid, so it should NOT appear in the unresolved warning.
+    unresolved_msgs = [m for m in captured if "not present" in m]
+    assert len(unresolved_msgs) == 1, unresolved_msgs
+    assert "c5" not in unresolved_msgs[0]
+
+
+def test_warn_helper_silent_on_resolved_citations(monkeypatch):
+    """All cited cluster IDs exist in the valid set → no warning."""
+    from xrefer.llm.cluster_analyzer import ClusterAnalyzer
+
+    captured: list[str] = []
+    monkeypatch.setattr(
+        "xrefer.llm.cluster_analyzer.log", lambda msg: captured.append(msg)
+    )
+    md = (
+        "## Overview\n\nThe binary is a test fixture.\n\n"
+        "## Details\n\n### Section\n\n"
+        "Does the thing [c5]. And another [c1, c5, c7].\n"
+    )
+    ClusterAnalyzer._warn_on_sparse_binary_report(
+        md, valid_cluster_ids={1, 5, 7, 12}
+    )
+    unresolved_msgs = [m for m in captured if "not present" in m]
+    assert unresolved_msgs == [], unresolved_msgs
+
+
+def test_warn_helper_skips_citation_check_when_valid_ids_none(monkeypatch):
+    """Callers that don't have the cluster tree handy can omit the
+    ``valid_cluster_ids`` parameter; the citation check is then a
+    no-op (length and banned-token checks still run).
+    """
+    from xrefer.llm.cluster_analyzer import ClusterAnalyzer
+
+    captured: list[str] = []
+    monkeypatch.setattr(
+        "xrefer.llm.cluster_analyzer.log", lambda msg: captured.append(msg)
+    )
+    md = (
+        "## Overview\n\nThe binary is a test fixture.\n\n"
+        "## Details\n\n### Section\n\nDoes the thing [c99].\n"
+    )
+    ClusterAnalyzer._warn_on_sparse_binary_report(md)  # no valid_cluster_ids
+    unresolved_msgs = [m for m in captured if "not present" in m]
+    assert unresolved_msgs == [], unresolved_msgs
+
+
+def test_citation_regex_matches_documented_forms():
+    """The class-level citation regex must match every form documented
+    in BinaryReport.details and split out the IDs correctly.
+    """
+    from xrefer.llm.cluster_analyzer import ClusterAnalyzer
+
+    cases = [
+        ("Does X [c5].", [5]),
+        ("Does X [c4, c6].", [4, 6]),
+        ("Does X [c4, c6, c7].", [4, 6, 7]),
+        ("Does X [c4,c6].", [4, 6]),  # whitespace after comma is optional
+        ("Does X [c10] and Y [c2, c30].", [10, 2, 30]),
+    ]
+    for text, expected_ids in cases:
+        found: list[int] = []
+        for bracket in ClusterAnalyzer._CITATION_GROUP_RE.finditer(text):
+            for inner in ClusterAnalyzer._CITATION_ID_RE.finditer(bracket.group(0)):
+                found.append(int(inner.group(1)))
+        assert found == expected_ids, (text, found, expected_ids)
+
+
+def test_citation_regex_ignores_non_citation_brackets():
+    """The regex must not match unrelated bracketed content —
+    markdown links, generic numbered footnotes, lone letters, etc.
+    """
+    from xrefer.llm.cluster_analyzer import ClusterAnalyzer
+
+    non_citations = [
+        "[link text](https://example.com)",
+        "[1]",            # missing `c` prefix
+        "[c]",            # missing digit
+        "[Section A]",    # arbitrary bracketed text
+        "[c5",            # unterminated
+        "c5]",            # not bracketed
+    ]
+    for text in non_citations:
+        matches = list(ClusterAnalyzer._CITATION_GROUP_RE.finditer(text))
+        assert matches == [], (text, matches)
+
+
 def test_warn_helper_silent_on_clean_report(monkeypatch):
     """A clean (no marketing adjectives, no cluster.id.) report
     of sufficient length should produce NO warning.
@@ -372,17 +536,41 @@ def test_soft_length_constants_exist():
 
 
 # ── 7. Outer-model serializer flattening ──────────────────────────────
+#
+# The cluster analysis flow is two-stage: stage 1 returns a
+# ``ClusterAnalysisResponse`` with per-cluster fields only, and stage
+# 2 returns a ``BinarySynthesisResponse`` with the binary-level fields
+# (``binary_description``, ``binary_category``, ``binary_report``).
+# Each model has its own serializer; the tests below cover both.
 
 
-def test_cluster_analysis_response_dumps_binary_report_as_markdown_string():
-    """ClusterAnalysisResponse.model_dump() must expose binary_report
-    as the rendered markdown string, not the structured dict — every
-    downstream consumer (HTML report builder, IDA view) reads it as a
+def test_cluster_analysis_response_serializes_clusters_as_map():
+    """``ClusterAnalysisResponse.model_dump()`` flattens the ordered
+    list of per-cluster items into the legacy ``cluster_id`` →
+    ``cluster fields`` dict shape that downstream consumers
+    (analyzer.find_cluster_analysis, the HTML report, the IDA view)
+    expect.
+    """
+    response = ClusterAnalysisResponse(clusters=[_valid_cluster_item()])
+    dumped = response.model_dump()
+    assert isinstance(dumped["clusters"], dict)
+    assert "cluster_1" in dumped["clusters"]
+    # The legacy shape no longer carries binary-level fields — those
+    # are emitted by ``BinarySynthesisResponse`` (see next test).
+    assert "binary_report" not in dumped
+    assert "binary_description" not in dumped
+    assert "binary_category" not in dumped
+
+
+def test_binary_synthesis_response_dumps_binary_report_as_markdown_string():
+    """``BinarySynthesisResponse.model_dump()`` must expose
+    ``binary_report`` as the rendered markdown string, not the
+    structured dict — every downstream consumer (HTML report builder,
+    IDA cluster header, analyzer.generate_report_data) reads it as a
     string.
     """
     report = _valid_report()
-    response = ClusterAnalysisResponse(
-        clusters=[_valid_cluster_item()],
+    response = BinarySynthesisResponse(
         binary_description=(
             "Credential stealer that harvests wallet and mail-client "
             "configuration values."
@@ -394,6 +582,10 @@ def test_cluster_analysis_response_dumps_binary_report_as_markdown_string():
     assert "binary_report" in dumped
     assert isinstance(dumped["binary_report"], str), type(dumped["binary_report"])
     assert dumped["binary_report"] == report.to_markdown()
-    # The legacy cluster-map flattening is unchanged.
-    assert isinstance(dumped["clusters"], dict)
-    assert "cluster_1" in dumped["clusters"]
+    assert dumped["binary_description"].startswith("Credential stealer")
+    # ``binary_category`` may come through as either the enum instance
+    # or its string value depending on Pydantic config; downstream
+    # ``analyzer._normalize_category_value`` accepts both. Use the
+    # same form-agnostic check here.
+    cat = dumped["binary_category"]
+    assert getattr(cat, "value", cat) == BinaryCategory.CREDENTIAL_STEALER.value

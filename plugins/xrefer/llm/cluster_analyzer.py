@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Dict, Iterator, List
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Set
 
 from xrefer.core.helpers import log
 from xrefer.llm.base import ModelConfig, PromptType
@@ -29,6 +30,29 @@ def _null_context() -> Iterator[None]:
     and avoid version-skew issues with the rest of the file's style.
     """
     yield
+
+
+def _measure(text: str, model: Optional[str]) -> str:
+    """Return a short human-readable size string for ``text``.
+
+    Prefers a provider-specific token count via ``litellm.token_counter``
+    when a model is known and the call succeeds. Falls back to a
+    character count when the model is unknown OR the tokenizer for the
+    provider isn't shipped with the installed litellm version (some
+    less-common providers fall through to a generic estimator that
+    litellm itself logs warnings about).
+    """
+    if model:
+        try:
+            import litellm
+            n = litellm.token_counter(model=model, text=text)
+            if isinstance(n, int) and n > 0:
+                return f"{n} tokens (model: {model})"
+        except Exception:
+            # Any failure (missing tokenizer, transient import issue,
+            # network call internally) falls through to char count.
+            pass
+    return f"{len(text)} chars"
 
 
 if TYPE_CHECKING:
@@ -63,25 +87,42 @@ class ClusterAnalyzer:
         cls,
         clusters: List["FunctionalCluster"],
         xrefer_obj,
-        batch_size = 30,
+        batch_size: int = 30,
         force_no_cache: bool = False,
     ) -> Dict[str, Any]:
         """
-        Analyze cluster hierarchy using LLM.
+        Analyze cluster hierarchy using a two-stage LLM flow.
 
-        If the cluster count is larger than 50, we split the analysis into multiple
-        batches (each with up to 50 clusters). Each batch includes all clusters for context,
-        but the LLM is instructed to fully respond only for the subset in that batch.
-        The binary_description, binary_category, and binary_report fields are requested each time.
+        Stage 1 — per-cluster analysis (always, possibly batched):
+            Each batch produces label / description / relationships /
+            function_prefix / library_or_runtime / mitre_attack for its
+            subset of clusters. The full cluster_data is shown in every
+            batch so cross-cluster context is available, but the LLM is
+            told to only fully respond for the focal subset. No binary-
+            level fields are requested here.
 
-        If the cluster count is <= 50, we request all at once with no partial instructions.
+        Stage 2 — binary-level synthesis (always, single call):
+            The stage-1 per-cluster outputs plus aggregated raw
+            artifacts (all strings, libraries, CAPA hits, APIs per
+            cluster) are fed to a dedicated synthesizer that produces
+            binary_description, binary_category, and the structured
+            binary_report. Stage 2 sees the WHOLE binary in one view,
+            so its synthesis isn't biased by which batch the
+            high-signal clusters happened to fall in.
+
+        The two-stage split also eliminates the prior flow's wasted
+        work: the single-stage prompt asked the LLM to produce
+        binary_description / binary_category on every batch (only the
+        final batch's values were kept) and binary_report on the final
+        batch only (earlier batches produced a discard-bound stub).
 
         Args:
-            force_no_cache: when True, bypass DSPy/LiteLLM response cache
-                for every call in this run. Each batch is sent through a
-                temporary LM that has caching disabled, guaranteeing fresh
-                LLM output even for prompt+input combinations the cache
-                has already seen. Used by the "force re-analyze" UI flow.
+            force_no_cache: when True, bypass DSPy/LiteLLM response
+                cache for every call in this run. Both stages wrap
+                their LLM calls in ``processor.uncached_lm()`` so the
+                temporary cache=False / randomized-cache_seed LM is
+                in effect for the duration of each call. Used by the
+                "force re-analyze" UI flow.
         """
         processor = cls._get_processor()
 
@@ -97,109 +138,164 @@ class ClusterAnalyzer:
             count_clusters(cluster)
 
         if cluster_count == 0:
-            # No clusters to analyze
             return {}
-
-        # `nullcontext`-style: when force_no_cache is False, do nothing;
-        # otherwise wrap every processor call below in the uncached LM.
-        cache_ctx = processor.uncached_lm() if force_no_cache else _null_context()
 
         if force_no_cache:
             log("Force re-analyze: bypassing DSPy / LiteLLM response cache for this run.")
 
-        if cluster_count <= batch_size:
-            # Single request scenario, no partial instructions
-            cluster_data = cls.format_cluster_data(clusters, xrefer_obj, start_idx=0, end_idx=cluster_count)
-            log(f"Generated cluster data ({len(cluster_data)} chars)")
-            with cache_ctx:
-                results = processor.process_items(cluster_data, prompt_type=PromptType.CLUSTER_ANALYZER, ignore_token_limit=True)
-            results = dict(results)  # Ensure it's a dict # TODO: Drop dict across the codebase for better developer experience.
-            cls._warn_on_sparse_binary_report(results.get("binary_report"))
-            return results
-        else:
-            # Multiple batch scenario
-            all_clusters_result = {}
-            binary_description = None
-            binary_category = None
-            binary_report = None
-            log(f"Going to process {cluster_count} clusters through the LLM. This will take some time...")
+        def cache_ctx():
+            return processor.uncached_lm() if force_no_cache else _null_context()
 
-            # Process clusters in batches of batch_size
+        # Model identifier for token counting. Pull from the active
+        # processor's ModelConfig so the count is provider-specific
+        # (gpt tokenizer for openai/, gemini tokenizer for gemini/,
+        # etc.). Falls back to char count inside ``_measure`` when
+        # litellm doesn't ship the tokenizer for this model.
+        model_id = processor.config.model_id if processor.config else None
+
+        # ── Stage 1: per-cluster analyses ────────────────────────────
+        stage1_clusters: Dict[str, Any] = {}
+
+        if cluster_count <= batch_size:
+            cluster_data = cls.format_cluster_data(clusters, xrefer_obj, start_idx=0, end_idx=cluster_count)
+            log(f"Stage 1: generated cluster data ({_measure(cluster_data, model_id)})")
+            with cache_ctx():
+                results = processor.process_items(
+                    cluster_data,
+                    prompt_type=PromptType.CLUSTER_ANALYZER,
+                    ignore_token_limit=True,
+                )
+            results = dict(results)
+            stage1_clusters.update(results.get("clusters", {}))
+        else:
+            log(
+                f"Stage 1: going to process {cluster_count} clusters through "
+                "the LLM. This will take some time..."
+            )
             for start in range(0, cluster_count, batch_size):
                 end = min(start + batch_size, cluster_count)
-                log(f"Processing clusters {start + 1} to {end} in this batch")
+                log(f"Stage 1: processing clusters {start + 1} to {end} in this batch")
 
-                cluster_data = cls.format_cluster_data(clusters, xrefer_obj, start_idx=start, end_idx=end)
-                log(f"Generated cluster data ({len(cluster_data)} chars)")
-                # Wrap each batch in the uncached LM context when
-                # force_no_cache is on. The processor swaps in a
-                # cache=False / randomized-cache_seed LM for the
-                # duration of this single batch and restores after.
-                batch_ctx = processor.uncached_lm() if force_no_cache else _null_context()
-                with batch_ctx:
-                    results = processor.process_items(cluster_data, prompt_type=PromptType.CLUSTER_ANALYZER, ignore_token_limit=True)
-                results = dict(results)  # Ensure it's a dict
+                cluster_data = cls.format_cluster_data(
+                    clusters, xrefer_obj, start_idx=start, end_idx=end
+                )
+                log(f"Stage 1: generated cluster data ({_measure(cluster_data, model_id)})")
+                with cache_ctx():
+                    results = processor.process_items(
+                        cluster_data,
+                        prompt_type=PromptType.CLUSTER_ANALYZER,
+                        ignore_token_limit=True,
+                    )
+                results = dict(results)
+                stage1_clusters.update(results.get("clusters", {}))
 
-                # Extract clusters from partial result
-                partial_clusters = results.get("clusters", {})
-                # Merge cluster analyses
-                for cid, cdata in partial_clusters.items():
-                    all_clusters_result[cid] = cdata
+        if not stage1_clusters:
+            log("[-] Error: No cluster data received after stage 1")
+            return {}
 
-                # Update binary fields from the latest batch.
-                # binary_description / binary_category are updated each
-                # batch (the LLM sees the same context, so later
-                # batches generally give a slightly-refined value).
-                if "binary_description" in results:
-                    binary_description = results["binary_description"]
-                if "binary_category" in results:
-                    binary_category = results["binary_category"]
-                # binary_report is only kept from the FINAL batch.
-                # Earlier batches were told (via the partial-batch
-                # note in format_cluster_data) that their binary_report
-                # is a discard-bound placeholder; gating the assignment
-                # here makes that contract explicit on the consumer
-                # side so a non-compliant LLM that still emits a real
-                # report on a partial batch can't leak it through.
-                if "binary_report" in results and end == cluster_count:
-                    binary_report = results["binary_report"]
+        # ── Stage 2: binary-level synthesis ──────────────────────────
+        log("Stage 2: synthesising binary-level analysis from per-cluster results")
+        synthesis_input = cls.format_synthesis_input(clusters, xrefer_obj, stage1_clusters)
+        log(f"Stage 2: generated synthesis input ({_measure(synthesis_input, model_id)})")
+        with cache_ctx():
+            synthesis = processor.process_items(
+                synthesis_input,
+                prompt_type=PromptType.BINARY_SYNTHESIZER,
+                ignore_token_limit=True,
+            )
+        synthesis = dict(synthesis)
 
-            # After processing all batches, ensure required fields are present
-            if not all_clusters_result:
-                log("[-] Error: No cluster data received after all batches")
-                return {}
+        binary_description = synthesis.get("binary_description")
+        binary_category = synthesis.get("binary_category")
+        binary_report = synthesis.get("binary_report")
 
-            if binary_description is None or binary_category is None:
-                log("[-] Error: Missing binary_description or binary_category after batched analysis")
-                return {}
+        if binary_description is None or binary_category is None:
+            log(
+                "[-] Error: Missing binary_description or binary_category after "
+                "stage 2 synthesis"
+            )
+            return {}
 
-            final_result = {"clusters": all_clusters_result, "binary_description": binary_description, "binary_category": binary_category}
-            if binary_report is not None:
-                final_result["binary_report"] = binary_report
-                cls._warn_on_sparse_binary_report(binary_report)
+        final_result: Dict[str, Any] = {
+            "clusters": stage1_clusters,
+            "binary_description": binary_description,
+            "binary_category": binary_category,
+        }
+        if binary_report is not None:
+            final_result["binary_report"] = binary_report
+            # Walk the full cluster tree (top-level + subclusters) to
+            # build the valid-ID set for the citation-resolution
+            # warning. synthesis_input contained every cluster, so a
+            # citation against any of them is legitimate; anything
+            # else is a hallucination.
+            valid_ids: Set[int] = set()
 
-            return final_result
+            def _collect_ids(cs: List["FunctionalCluster"]) -> None:
+                for c in cs:
+                    valid_ids.add(c.id)
+                    _collect_ids(c.subclusters)
 
+            _collect_ids(clusters)
+            cls._warn_on_sparse_binary_report(
+                binary_report,
+                valid_cluster_ids=valid_ids,
+                binary_description=binary_description,
+            )
+
+        return final_result
+
+
+    # Regex for the citation token forms documented in
+    # BinaryReport.details (e.g. `[c5]`, `[c4, c6]`, `[c4, c6, c7]`).
+    # Comma is required between IDs; whitespace after the comma is
+    # tolerated. Matches the whole bracketed group so the caller can
+    # extract individual `c<N>` tokens from match.group(0).
+    _CITATION_GROUP_RE = re.compile(r"\[c\d+(?:\s*,\s*c\d+)*\]")
+    _CITATION_ID_RE = re.compile(r"c(\d+)")
 
     @staticmethod
-    def _warn_on_sparse_binary_report(binary_report: Any) -> None:
-        """Soft post-hoc check on the final binary_report markdown
-        string. Logs non-fatal warnings for length out-of-band AND
-        for marketing-adjective / cluster-id-leak token usage.
+    def _warn_on_sparse_binary_report(
+        binary_report: Any,
+        valid_cluster_ids: Optional[Set[int]] = None,
+        binary_description: Optional[str] = None,
+    ) -> None:
+        """Soft post-hoc checks on the final binary_report markdown
+        string and (optionally) the standalone ``binary_description``
+        summary. Logs non-fatal warnings for length out-of-band,
+        marketing-adjective / cluster-id-leak token usage, and
+        cluster citations that don't resolve to any cluster in this
+        binary.
 
-        Neither length nor banned tokens are validated by Pydantic —
-        Pydantic field/model-validator constraints aren't reflected
-        in the JSON schema the LLM sees, so the model can't reliably
-        aim for them. Earlier iterations enforced both as hard
-        validators and caused real analyses to abort on small slips.
-        Prompt guidance now does the heavy lifting; these warnings
-        surface anomalies so the analyst can decide whether to
-        re-run analysis.
+        None of these are validated by Pydantic — Pydantic
+        constraints aren't reflected in the JSON schema the LLM
+        sees, so the model can't reliably aim for them. Earlier
+        iterations enforced length and banned tokens as hard
+        validators and caused real analyses to abort on small
+        slips. Prompt guidance now does the heavy lifting; these
+        warnings surface anomalies so the analyst can decide
+        whether to re-run.
 
         ``binary_report`` is the already-rendered markdown string —
-        the outer ``ClusterAnalysisResponse`` serializer flattens
+        the stage-2 ``BinarySynthesisResponse`` serializer flattens
         the structured form via ``to_markdown()`` before this
         function sees it.
+
+        Args:
+            binary_report: the rendered markdown string.
+            valid_cluster_ids: set of cluster IDs that exist in
+                this binary's cluster tree. When provided, the
+                citation-resolution check fires for any `[c<N>]`
+                whose N isn't in the set. When None, the citation
+                check is skipped (used when the caller doesn't
+                have the cluster tree handy).
+            binary_description: the standalone summary field. When
+                provided, the marketing-adjective scan also runs
+                against this string — historically the marquee
+                line that surfaces in the HTML report and the IDA
+                cluster header, so puffery there is especially
+                visible. The cluster-id-leak token doesn't apply
+                here (cluster.id. never appears in
+                binary_description by construction).
         """
         if not isinstance(binary_report, str) or not binary_report:
             return
@@ -241,10 +337,12 @@ class ClusterAnalyzer:
                 if tok == "cluster.id.":
                     log(
                         "[!] binary_report contains a `cluster.id.` "
-                        "reference. Cluster cross-references belong "
-                        "in per-cluster `relationships`, not in "
-                        "binary_report. Re-running cluster analysis "
-                        "usually fixes this."
+                        "reference. The verbose long form is "
+                        "forbidden in binary_report — use the short "
+                        "`[c<N>]` citation form instead. Cluster "
+                        "cross-references in their long form belong "
+                        "in per-cluster `relationships`. Re-running "
+                        "cluster analysis usually fixes this."
                     )
                 else:
                     log(
@@ -255,6 +353,54 @@ class ClusterAnalyzer:
                         "report still rendered; this is a style note "
                         "only."
                     )
+
+        # Marketing-adjective scan on binary_description. This is
+        # the standalone summary field — historically the marquee
+        # analyst-facing line — and the prompt does include an
+        # anti-puffery rule for it, but the field has its own LLM
+        # output path so slips need their own surface. The cluster-
+        # id-leak token is intentionally skipped here (it can't
+        # appear in binary_description by construction).
+        if isinstance(binary_description, str) and binary_description:
+            desc_lower = binary_description.lower()
+            for tok in banned:
+                if tok == "cluster.id.":
+                    continue
+                if tok.lower() in desc_lower:
+                    log(
+                        f"[!] binary_description uses marketing "
+                        f"adjective '{tok}' — binary_description "
+                        "is the marquee summary; concrete claims "
+                        "('encrypts files using ChaCha20-Poly1305') "
+                        "are more useful than vague qualifiers "
+                        "('sophisticated cryptographic primitives'). "
+                        "The description still rendered; this is a "
+                        "style note only."
+                    )
+
+        # Citation-resolution warning. Only runs when the caller
+        # supplied the set of valid cluster IDs. Surfaces any
+        # `[c<N>]` whose N doesn't match a cluster in this binary —
+        # typically caused by the LLM hallucinating an ID that
+        # wasn't in synthesis_input. The web UI / HTML renderer is
+        # expected to degrade gracefully (render as a non-link
+        # chip with a "missing" tooltip), so this is informational
+        # rather than fatal.
+        if valid_cluster_ids is not None:
+            unresolved: Set[int] = set()
+            for bracket in ClusterAnalyzer._CITATION_GROUP_RE.finditer(binary_report):
+                for inner in ClusterAnalyzer._CITATION_ID_RE.finditer(bracket.group(0)):
+                    cid = int(inner.group(1))
+                    if cid not in valid_cluster_ids:
+                        unresolved.add(cid)
+            if unresolved:
+                joined = ", ".join(f"c{i}" for i in sorted(unresolved))
+                log(
+                    f"[!] binary_report cites cluster IDs not present "
+                    f"in this binary's cluster set: {joined}. The "
+                    "renderer will treat these as broken-link chips. "
+                    "Re-running cluster analysis usually fixes this."
+                )
 
 
     @staticmethod
@@ -345,44 +491,20 @@ class ClusterAnalyzer:
             ps_note = f"IMPORTANT: Enumerate and ensure you return results for all clusters with IDs {','.join(map(str, range(start_idx + 1, end_idx + 1)))}"
             full_range = start_idx == 0 and end_idx == len(clusters)
             if not full_range:
-                # For partial batches we tell the LLM that
-                # binary_report is going to be discarded (the final
-                # batch produces the kept report). The schema still
-                # requires a valid BinaryReport here — the consumer
-                # gates the assignment, so even a non-compliant LLM
-                # that emits a real report can't leak it through.
-                is_final_batch = end_idx == len(clusters)
-                if is_final_batch:
-                    binary_report_instruction = (
-                        "This is the FINAL batch — produce the kept "
-                        "binary_report here. Apply every BinaryReport "
-                        "field description as written; this is the "
-                        "report the analyst sees."
-                    )
-                else:
-                    binary_report_instruction = (
-                        "binary_report from this batch WILL BE "
-                        "DISCARDED — the report is produced by the "
-                        "final batch only. Return a minimal "
-                        "BinaryReport that still satisfies every "
-                        "field description (overview opens with 'The "
-                        "binary is' or 'This binary is' and fits the "
-                        "length/structure rules, at least one "
-                        "behavior section with an evidence-descriptive "
-                        "heading, empty observed_artifacts is fine). "
-                        "Do not invest effort in this batch's "
-                        "binary_report — describe the binary's "
-                        "overall shape at a high level only."
-                    )
+                # Stage 1 produces per-cluster outputs only — the
+                # binary-level fields (binary_description /
+                # binary_category / binary_report) are produced by
+                # the separate stage-2 synthesizer call in
+                # analyze_clusters. So the partial-batch note here
+                # only needs to scope cluster-level work; there is
+                # no longer any binary-level instruction to thread
+                # through.
                 note = (
-                    f"NOTE: Analyze ALL clusters to understand overall functionality and relationships. "
-                    f"However, when producing the final JSON response, ONLY provide the full cluster-level analysis "
-                    f"(label, description, relationships, function_prefix, library_or_runtime, mitre_attack) for clusters "
-                    f"with indices in the range [{start_idx + 1}, {end_idx}]. For all other clusters outside this subset, "
-                    f"do NOT provide their full analysis. Still, as instructed, provide binary_description and "
-                    f"binary_category for the entire binary. "
-                    f"{binary_report_instruction} "
-                    f"All clusters are provided below for context. "
+                    f"NOTE: All clusters are provided below for cross-cluster context. "
+                    f"When producing the response, ONLY provide cluster-level analysis "
+                    f"(label, description, relationships, function_prefix, library_or_runtime, mitre_attack) "
+                    f"for clusters with indices in the range [{start_idx + 1}, {end_idx}]. "
+                    f"For clusters outside this subset, do NOT provide analysis — they appear below for context only."
                 )
 
             formatted = '''Structure is organized hierarchically with primary clusters and their subclusters.
@@ -404,6 +526,180 @@ References to subclusters indicate where complex behavior is encapsulated.
 
         finally:
             # Restore original exclusions state
+            xrefer_obj.settings["enable_exclusions"] = original_exclusion_state
+
+    @staticmethod
+    def format_synthesis_input(
+        clusters: List["FunctionalCluster"],
+        xrefer_obj: "XRefer",
+        stage1_clusters: Dict[str, Any],
+    ) -> str:
+        """Format the input for the stage-2 binary synthesizer call.
+
+        Stage 2 receives:
+          - A short binary-level header (total cluster count).
+          - One block per cluster (recursing through subclusters)
+            containing:
+              * stage-1 fields (label, library_or_runtime,
+                description, relationships, mitre_attack) — the
+                LLM's own per-cluster synthesis from stage 1.
+              * All raw artifacts (strings, libraries, CAPA
+                capabilities, APIs) attributed to that cluster's
+                OWN nodes (subcluster nodes are emitted in the
+                subcluster's own block, so the union is exact
+                with no duplication).
+
+        Rationale for sending all artifacts (no interestingness
+        filter): the artifact-analyzer's "interesting indexes"
+        filter is itself LLM-generated and misses items. Sending
+        all strings / libs / CAPA / APIs keeps stage 2 free of
+        upstream LLM-judgement filtering. Function addresses,
+        per-function attribution, call flows, and caller-count
+        rankings are stage-1 concerns and are NOT sent — that
+        function-level wiring is the bulk of stage 1's cluster_data
+        token cost, and stage 2 doesn't need it for binary-level
+        synthesis.
+
+        Args:
+            clusters: Top-level cluster list (subclusters are walked
+                recursively, one block per cluster).
+            xrefer_obj: XRefer instance providing the per-function
+                artifact getters (get_apis_for_function, etc.).
+            stage1_clusters: The stage-1 cluster map keyed by
+                ``cluster_<id>`` strings, as returned by
+                ``ClusterAnalysisResponse.model_dump()['clusters']``.
+
+        Returns:
+            str: The full prompt input for the stage-2 LLM call.
+        """
+        # Mirrors format_cluster_data: temporarily disable exclusions
+        # so the artifact aggregation sees everything.
+        original_exclusion_state = xrefer_obj.settings["enable_exclusions"]
+        try:
+            xrefer_obj.settings["enable_exclusions"] = False
+
+            def aggregate_artifacts(cluster: "FunctionalCluster") -> Dict[str, List[str]]:
+                """Collect all artifacts for cluster's OWN nodes
+                (excluding nodes that are subcluster-refs — those
+                contribute to their subcluster's own block).
+                Deduplicates while preserving insertion order.
+                """
+                apis: Dict[str, None] = {}
+                libs: Dict[str, None] = {}
+                strings: Dict[str, None] = {}
+                capa: Dict[str, None] = {}
+                for node in cluster.nodes:
+                    if node in cluster.cluster_refs:
+                        continue
+                    for a in (xrefer_obj.get_apis_for_function(node) or []):
+                        apis[a] = None
+                    for lib in (xrefer_obj.get_libs_for_function(node) or []):
+                        libs[lib] = None
+                    for s in (xrefer_obj.get_strings_for_function(node) or []):
+                        strings[s] = None
+                    for c in (xrefer_obj.get_capa_for_function(node) or []):
+                        capa[c] = None
+                return {
+                    "strings": list(strings),
+                    "libraries": list(libs),
+                    "capa": list(capa),
+                    "apis": list(apis),
+                }
+
+            def format_cluster_block(cluster: "FunctionalCluster") -> List[str]:
+                lines: List[str] = []
+                lines.append(f"=== cluster.id.{cluster.id} ===")
+
+                stage1 = stage1_clusters.get(f"cluster_{cluster.id}")
+                if stage1 is None:
+                    # Stage 1 didn't produce an entry for this
+                    # cluster (LLM dropped it from its batch).
+                    # Emit a placeholder so stage 2 still sees the
+                    # cluster's artifacts even without per-cluster
+                    # synthesis.
+                    lines.append("Label: (stage 1 did not return a label for this cluster)")
+                    lines.append("Library/Runtime: 0")
+                    lines.append("Description: (stage 1 did not return a description)")
+                    lines.append("Relationships: (stage 1 did not return relationships)")
+                else:
+                    label = stage1.get("label", "")
+                    description = stage1.get("description", "")
+                    relationships = stage1.get("relationships", "")
+                    library_or_runtime = stage1.get("library_or_runtime", 0)
+                    mitre = stage1.get("mitre_attack", []) or []
+
+                    lines.append(f"Label: {label}")
+                    lines.append(f"Library/Runtime: {library_or_runtime}")
+                    lines.append(f"Description: {description}")
+                    lines.append(f"Relationships: {relationships}")
+                    if mitre:
+                        lines.append("MITRE:")
+                        for m in mitre:
+                            if not isinstance(m, dict):
+                                continue
+                            mid = m.get("id", "?")
+                            tactic = m.get("tactic", "?")
+                            mname = m.get("name", "?")
+                            rationale = m.get("rationale", "")
+                            lines.append(
+                                f"  - {mid} ({tactic}) {mname} — {rationale}"
+                            )
+
+                artifacts = aggregate_artifacts(cluster)
+                for key, label_name in [
+                    ("strings", "Strings"),
+                    ("libraries", "Libraries"),
+                    ("capa", "CAPA"),
+                    ("apis", "APIs"),
+                ]:
+                    values = artifacts[key]
+                    if values:
+                        lines.append(f"{label_name}:")
+                        for v in values:
+                            lines.append(f"  - {v}")
+                lines.append("")
+                return lines
+
+            def walk(cluster: "FunctionalCluster", acc: List[str]) -> None:
+                acc.extend(format_cluster_block(cluster))
+                for sub in cluster.subclusters:
+                    walk(sub, acc)
+
+            def total_cluster_count(cs: List["FunctionalCluster"]) -> int:
+                count = 0
+                stack: List["FunctionalCluster"] = list(cs)
+                while stack:
+                    c = stack.pop()
+                    count += 1
+                    stack.extend(c.subclusters)
+                return count
+
+            # File-format string from the backend (e.g. "Portable
+            # executable for AMD64 (PE)"). Stage 2's prompt treats
+            # this as ground truth for runtime target, so the LLM
+            # doesn't infer cross-platform behaviour from inert
+            # strings that survive in single-platform builds of
+            # cross-platform malware families.
+            file_format = ""
+            try:
+                file_format = xrefer_obj._backend.filetype() or ""
+            except Exception:
+                # Backend missing or filetype() unimplemented — fall
+                # back to omitting the header line rather than
+                # aborting synthesis.
+                file_format = ""
+
+            header_lines: List[str] = ["=== BINARY ==="]
+            if file_format:
+                header_lines.append(f"File format: {file_format}")
+            header_lines.append(f"Total clusters: {total_cluster_count(clusters)}")
+            header_lines.append("")
+            body: List[str] = []
+            for cluster in clusters:
+                walk(cluster, body)
+
+            return "\n".join(header_lines + body)
+        finally:
             xrefer_obj.settings["enable_exclusions"] = original_exclusion_state
 
     @staticmethod
