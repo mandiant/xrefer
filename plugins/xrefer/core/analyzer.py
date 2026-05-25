@@ -45,7 +45,8 @@ try:
     from idaapi import hide_wait_box, show_wait_box
 except ImportError:
     def show_wait_box(message: str, *args, **kwargs) -> None:
-        print(f"Wait: {message.removeprefix('HIDECANCEL\n')}", *args, **kwargs)
+        msg = message.removeprefix('HIDECANCEL\n')
+        print(f"Wait: {msg}", *args, **kwargs)
     def hide_wait_box(*args, **kwargs) -> None:
         print("Wait box hidden", *args, **kwargs)
 

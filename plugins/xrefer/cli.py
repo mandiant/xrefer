@@ -11,7 +11,7 @@ from importlib.util import find_spec
 from pathlib import Path
 from typing import Any, Literal
 
-BACKEND = Literal["ida", "binaryninja", "ghidra"]
+BACKEND = Literal["ida", "binaryninja", "ghidra", "smda"]
 
 
 class BackendNotAvailableError(Exception):
@@ -21,7 +21,7 @@ class BackendNotAvailableError(Exception):
 def detect_available_backends() -> list[str]:
     """Detect which backends are available on the system."""
     backends = []
-    for spec, name in [("idapro", "ida"), ("binaryninja", "binaryninja"), ("pyghidra", "ghidra")]:
+    for spec, name in [("idapro", "ida"), ("binaryninja", "binaryninja"), ("pyghidra", "ghidra"), ("smda", "smda")]:
         if find_spec(spec) is not None:
             backends.append(name)
     return backends
@@ -331,6 +331,56 @@ def _analyze_ghidra(
         return xrefer_obj
 
 
+def setup_smda_backend():
+    """Set up SMDA backend requirements."""
+    try:
+        import smda  # noqa: F401
+    except ImportError as e:
+        raise BackendNotAvailableError(f"SMDA backend not available: {e}")
+
+    import xrefer.backend as backend_module
+    from xrefer.backend.factory import BackendManager
+
+    backend_module.Backend = None
+    return {"backend_module": backend_module, "BackendManager": BackendManager}
+
+
+def analysis_smda(file_path: Path, modules: dict[str, Any] | None = None, *, xrefer_kwargs: dict[str, Any] | None = None):
+    """Run XRefer analysis with SMDA backend."""
+    backend_module = modules["backend_module"]
+    BackendManager = modules["BackendManager"]
+
+    backend_manager = BackendManager()
+    backend = backend_manager.create_backend("smda", path=file_path)
+    backend_manager.set_active_backend(backend)
+    backend_module.Backend = backend
+
+    from xrefer.core.analyzer import XRefer
+
+    params: dict[str, Any] = {"auto_analyze": True}
+    if xrefer_kwargs:
+        params.update(xrefer_kwargs)
+
+    xrefer_obj = XRefer(**params)
+    _print_completion_summary(xrefer_obj)
+    return xrefer_obj
+
+
+def _analyze_smda(
+    file_path: Path,
+    auto_analysis: bool = True,
+    save_changes: bool = False,
+    force_analysis: bool = False,
+    *,
+    xrefer_kwargs: dict[str, Any] | None = None,
+):
+    """Analyze with SMDA backend."""
+    modules = setup_smda_backend()
+    cleanup_previous_analysis(file_path, "smda", force_analysis)
+    print(f"[+] Running SMDA disassembly on {file_path} ...")
+    return analysis_smda(file_path, modules=modules, xrefer_kwargs=xrefer_kwargs)
+
+
 def parse_entry_point(value: str) -> int:
     """Parse entry point argument accepting decimal or hex strings."""
     try:
@@ -461,6 +511,8 @@ def cli():
                 analysis_result = _analyze_ida(file_path, args.auto_analysis, args.save, args.force, xrefer_kwargs=xrefer_kwargs)
             elif args.backend == "binaryninja":
                 analysis_result = _analyze_binaryninja(file_path, args.auto_analysis, args.save, args.force, xrefer_kwargs=xrefer_kwargs)
+            elif args.backend == "smda":
+                analysis_result = _analyze_smda(file_path, args.auto_analysis, args.save, args.force, xrefer_kwargs=xrefer_kwargs)
             elif args.backend == "ghidra":
                 print(
                     """
