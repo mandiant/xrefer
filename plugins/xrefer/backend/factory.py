@@ -87,12 +87,10 @@ class BackendManager:
     """Manages available backends and provides unified access."""
 
     def __init__(self):
-        from .smda.backend import SMDABackendFactory
         self._factories: Dict[str, BackendFactory] = {
             "ida": IDABackendFactory(),
             "binaryninja": BinaryNinjaBackendFactory(),
             "ghidra": GhidraBackendFactory(),
-            "smda": SMDABackendFactory(),
         }
         self._active_backend: Optional[BackEnd] = None
 
