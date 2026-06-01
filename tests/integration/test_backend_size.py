@@ -93,6 +93,14 @@ def _ida_backend(path: str):
 
 
 @contextmanager
+def _vivisect_backend(path: str):
+    """Yield Vivisect backend (pure-Python, no extra teardown needed)."""
+    from xrefer.backend.vivisect.backend import VivisectBackend
+
+    yield VivisectBackend(path=path)
+
+
+@contextmanager
 def _backend_context(backend_id: str, path: str):
     """Factory: yield backend without running full analysis."""
     if backend_id == "binaryninja":
@@ -107,13 +115,17 @@ def _backend_context(backend_id: str, path: str):
         with _ida_backend(path) as backend:
             yield backend
         return
+    if backend_id == "vivisect":
+        with _vivisect_backend(path) as backend:
+            yield backend
+        return
     raise ValueError(f"Unknown backend: {backend_id}")
 
 
 @pytest.mark.integration
 @pytest.mark.requires_binary
 @pytest.mark.parametrize("sample_id,expected_size", SAMPLE_BINARIES_SIZE)
-@pytest.mark.parametrize("backend_id", ["binaryninja", "ghidra", "ida"])
+@pytest.mark.parametrize("backend_id", ["binaryninja", "ghidra", "ida", "vivisect"])
 def test_backend_size_method(backend_id: str, sample_id: str, expected_size: int):
     """Test backend.size returns correct file size."""
     _require_backends({backend_id})

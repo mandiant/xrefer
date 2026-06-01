@@ -87,10 +87,12 @@ class BackendManager:
     """Manages available backends and provides unified access."""
 
     def __init__(self):
+        from .vivisect.backend import VivisectBackendFactory
         self._factories: Dict[str, BackendFactory] = {
             "ida": IDABackendFactory(),
             "binaryninja": BinaryNinjaBackendFactory(),
             "ghidra": GhidraBackendFactory(),
+            "vivisect": VivisectBackendFactory(),
         }
         self._active_backend: Optional[BackEnd] = None
 

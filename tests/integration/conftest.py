@@ -46,6 +46,8 @@ def backend_factory():
             return _open_ghidra(path)
         if backend_id == "ida":
             return _open_ida()
+        if backend_id == "vivisect":
+            return _open_vivisect(path)
         raise ValueError(f"Unknown backend: {backend_id}")
 
     return _create_backend
@@ -84,6 +86,13 @@ def _open_ida():
     from xrefer.backend.ida.backend import IDABackend
 
     return IDABackend()
+
+
+def _open_vivisect(path: str):
+    """Open a binary with vivisect and return VivisectBackend instance."""
+    from xrefer.backend.vivisect.backend import VivisectBackend
+
+    return VivisectBackend(path=path)
 
 
 @pytest.fixture

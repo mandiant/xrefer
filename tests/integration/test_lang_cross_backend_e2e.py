@@ -94,6 +94,13 @@ def _ida_backend(path: str):
 
 
 @contextmanager
+def _vivisect_backend(path: str):
+    from xrefer.backend.vivisect.backend import VivisectBackend
+
+    yield VivisectBackend(path=path)
+
+
+@contextmanager
 def _backend_context(backend_id: str, path: str):
     if backend_id == "binaryninja":
         with _binaryninja_backend(path) as backend:
@@ -105,6 +112,10 @@ def _backend_context(backend_id: str, path: str):
         return
     if backend_id == "ida":
         with _ida_backend(path) as backend:
+            yield backend
+        return
+    if backend_id == "vivisect":
+        with _vivisect_backend(path) as backend:
             yield backend
         return
     raise ValueError(f"Unknown backend: {backend_id}")
@@ -156,7 +167,7 @@ def _debug_dump(backend_id: str, snapshot: dict):
 def test_lang_consistency_across_real_backends(sample_id):
     # Require at least two backends to make a meaningful comparison
     avail = _available_backend_ids()
-    need_any = {"binaryninja", "ghidra", "ida"}
+    need_any = {"binaryninja", "ghidra", "ida", "vivisect"}
     usable = [b for b in avail if b in need_any]
     if len(usable) < 2:
         _require_backends(need_any)  # will skip or fail fast depending on strict mode

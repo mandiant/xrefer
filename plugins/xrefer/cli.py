@@ -11,7 +11,7 @@ from importlib.util import find_spec
 from pathlib import Path
 from typing import Any, Literal
 
-BACKEND = Literal["ida", "binaryninja", "ghidra"]
+BACKEND = Literal["ida", "binaryninja", "ghidra", "vivisect"]
 
 
 class BackendNotAvailableError(Exception):
@@ -21,7 +21,7 @@ class BackendNotAvailableError(Exception):
 def detect_available_backends() -> list[str]:
     """Detect which backends are available on the system."""
     backends = []
-    for spec, name in [("idapro", "ida"), ("binaryninja", "binaryninja"), ("pyghidra", "ghidra")]:
+    for spec, name in [("idapro", "ida"), ("binaryninja", "binaryninja"), ("pyghidra", "ghidra"), ("vivisect", "vivisect")]:
         if find_spec(spec) is not None:
             backends.append(name)
     return backends
@@ -332,6 +332,56 @@ def _analyze_ghidra(
 
 
 
+def setup_vivisect_backend():
+    """Set up Vivisect backend requirements."""
+    try:
+        import vivisect  # noqa: F401
+    except ImportError as e:
+        raise BackendNotAvailableError(f"Vivisect backend not available: {e}")
+
+    import xrefer.backend as backend_module
+    from xrefer.backend.factory import BackendManager
+
+    backend_module.Backend = None
+    return {"backend_module": backend_module, "BackendManager": BackendManager}
+
+
+def analysis_vivisect(file_path: Path, modules: dict[str, Any] | None = None, *, xrefer_kwargs: dict[str, Any] | None = None):
+    """Run XRefer analysis with Vivisect backend."""
+    backend_module  = modules["backend_module"]
+    BackendManager  = modules["BackendManager"]
+
+    backend_manager = BackendManager()
+    backend         = backend_manager.create_backend("vivisect", path=str(file_path))
+    backend_manager.set_active_backend(backend)
+    backend_module.Backend = backend
+
+    from xrefer.core.analyzer import XRefer
+
+    params: dict[str, Any] = {"auto_analyze": True}
+    if xrefer_kwargs:
+        params.update(xrefer_kwargs)
+
+    xrefer_obj = XRefer(**params)
+    _print_completion_summary(xrefer_obj)
+    return xrefer_obj
+
+
+def _analyze_vivisect(
+    file_path: Path,
+    auto_analysis: bool = True,
+    save_changes: bool = False,
+    force_analysis: bool = False,
+    *,
+    xrefer_kwargs: dict[str, Any] | None = None,
+):
+    """Analyze with Vivisect backend."""
+    modules = setup_vivisect_backend()
+    cleanup_previous_analysis(file_path, "vivisect", force_analysis)
+    print(f"[+] Running Vivisect disassembly on {file_path} ...")
+    return analysis_vivisect(file_path, modules=modules, xrefer_kwargs=xrefer_kwargs)
+
+
 def parse_entry_point(value: str) -> int:
     """Parse entry point argument accepting decimal or hex strings."""
     try:
@@ -472,6 +522,8 @@ def cli():
                     file=sys.stderr,
                 )
                 analysis_result = _analyze_ghidra(file_path, args.auto_analysis, args.save, args.force, xrefer_kwargs=xrefer_kwargs)
+            elif args.backend == "vivisect":
+                analysis_result = _analyze_vivisect(file_path, args.auto_analysis, args.save, args.force, xrefer_kwargs=xrefer_kwargs)
             else:
                 print(f"[x] Error: Unknown backend: {args.backend}")
                 sys.exit(1)
