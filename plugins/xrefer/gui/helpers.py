@@ -364,7 +364,59 @@ class CollapseIndicator(QtWidgets.QWidget):
         self.reposition()
 
 
-from xrefer.core.helpers import convert_int_to_hex, create_table_from_rows, enrich_string_data_core, find_cluster_analysis, get_visible_width, sort_clusters, word_wrap_text, set_log_function
+from xrefer.core.helpers import convert_int_to_hex, create_table_from_rows, enrich_string_data_core, find_cluster_analysis, get_visible_width, render_markdown_segments, sort_clusters, strip_cluster_citations, word_wrap_text, set_log_function
+
+
+def render_markdown_report_lines(md: str, width: int = 85, indent: str = "") -> List[str]:
+    """Render the ``binary_report`` markdown into IDA-colored lines for
+    the custom viewer.
+
+    Maps the style vocabulary from
+    :func:`xrefer.core.helpers.render_markdown_segments` to ``SCOLOR_*``
+    codes and prefixes each line with ``indent``. Returns lines ready
+    for ``simplecustviewer_t.AddLine`` -- headings, bullets and
+    ``**bold**``/```code``` spans become colored runs so the report
+    reads as structured text instead of an unbroken blob. Prose renders
+    in the string color; HTML-only ``[c5]``/``[c4, c6]`` cluster
+    citations are stripped first. The parsing is backend-agnostic; only
+    the color mapping lives here.
+    """
+    md = strip_cluster_citations(md)
+    style_color = {
+        "h2": ida_lines.SCOLOR_DATNAME,
+        "h3": ida_lines.SCOLOR_DNAME,
+        "h4": ida_lines.SCOLOR_PREFIX,
+        "rule": ida_lines.SCOLOR_AUTOCMT,
+        "bold": ida_lines.SCOLOR_VOIDOP,
+        "code": ida_lines.SCOLOR_DEMNAME,
+        "bullet": ida_lines.SCOLOR_SYMBOL,
+        "plain": ida_lines.SCOLOR_DSTR,
+    }
+    inner_width = max(20, width - len(indent))
+    lines: List[str] = []
+    for seg_line in render_markdown_segments(md, inner_width):
+        if not seg_line:
+            lines.append("")
+            continue
+        # Coalesce consecutive same-color segments so each run is wrapped
+        # in a single COLSTR (fewer color toggles, shorter lines).
+        parts = []
+        buf_text = ""
+        buf_color = None
+        for style, text in seg_line:
+            if not text:
+                continue
+            color = style_color.get(style)
+            if buf_text and color == buf_color:
+                buf_text += text
+            else:
+                if buf_text:
+                    parts.append(ida_lines.COLSTR(buf_text, buf_color) if buf_color else buf_text)
+                buf_text, buf_color = text, color
+        if buf_text:
+            parts.append(ida_lines.COLSTR(buf_text, buf_color) if buf_color else buf_text)
+        lines.append(f"{indent}{''.join(parts)}")
+    return lines
 
 
 def enrich_string_data(str_indexes: List[int], entity_list: List[str], lookup: bool = True, max_threads: int = 50) -> List[Tuple[str, str, int, str, dict, list]]:
@@ -693,181 +745,6 @@ def format_api_call_for_ida(rec: ApiCall) -> str:
     return f"{addr}: {name}{colorize_api_call(rec.call_str)} x {rec.count}"
 
 
-def create_function_rows_for_interesting_artifacts(func_ea: int, artifacts: List[Tuple], xrefer_obj) -> List[List[str]]:
-    """
-    Create properly aligned rows for a function's artifacts with tree structure.
-    Each artifact is colored based on its type (API, string, CAPA, etc.)
-
-    Args:
-        func_ea: Function effective address
-        artifacts: List of artifacts (type_id, content) tuples
-        xrefer_obj: XRefer instance for color tag lookup
-
-    Returns:
-        List of formatted rows with proper tree structure and alignment
-    """
-    rows = []
-    first_artifact = artifacts[0]
-
-    # Get current address string
-    addr_str = f"0x{func_ea:x}"
-
-    # Fixed components
-    arrow_str = "◄───────┐"
-    min_padding = 2  # Minimum spaces between address and arrow
-
-    # Calculate total width based on address length
-    total_width = len(addr_str) + min_padding + len(arrow_str)
-
-    # Create first row
-    colored_addr = f"\x01{ida_lines.SCOLOR_CREFTAIL}{addr_str}\x02{ida_lines.SCOLOR_CREFTAIL}"
-    colored_arrow = f"{' ' * min_padding}\x01{ida_lines.SCOLOR_LIBNAME}{arrow_str}\x02{ida_lines.SCOLOR_LIBNAME}"
-
-    # Color first artifact based on its type
-    artifact_color = xrefer_obj.color_tags[xrefer_obj.table_names[first_artifact[0]]]
-    colored_artifact = f"\x01{artifact_color}{first_artifact[1]}\x02{artifact_color}"
-    colored_func_name = f"\x01{ida_lines.SCOLOR_DEMNAME}{idc.get_func_name(ida_idaapi.ea_t(func_ea))}\x02{ida_lines.SCOLOR_DEMNAME}"
-
-    first_row = [f"{colored_addr}{colored_arrow}", f" {colored_artifact}", colored_func_name]
-    rows.append(first_row)
-
-    # Calculate dynamic vertical indent to align with the end of arrow
-    vertical_indent = " " * (total_width - 1)  # -1 to align with the vertical part of ┐
-
-    # Process remaining artifacts
-    seen_artifacts = {(first_artifact[0], first_artifact[1])}  # Track seen artifacts by type and content
-
-    for artifact in artifacts[1:]:
-        # Skip if we've already seen this artifact
-        if (artifact[0], artifact[1]) in seen_artifacts:
-            continue
-
-        seen_artifacts.add((artifact[0], artifact[1]))
-
-        # Color artifact based on its type
-        artifact_color = xrefer_obj.color_tags[xrefer_obj.table_names[artifact[0]]]
-        colored_artifact = f"\x01{artifact_color}{artifact[1]}\x02{artifact_color}"
-
-        # Last connector should be └, others should be │
-        connector = "└" if len(seen_artifacts) == len(artifacts) else "│"
-        connector = f"{vertical_indent}\x01{ida_lines.SCOLOR_LIBNAME}{connector}\x02{ida_lines.SCOLOR_LIBNAME}"
-
-        row = [connector, f" {colored_artifact}", ""]
-        rows.append(row)
-
-    return rows
-
-
-def prepare_interesting_artifacts_table_rows(func_artifacts_dict, xrefer_obj):
-    """
-    Prepare complete table rows with proper spacing between function groups.
-
-    Args:
-        func_artifacts_dict: Dictionary of functions and their artifacts
-        xrefer_obj: XRefer instance for color tags
-
-    Returns:
-        List of formatted and aligned table rows
-    """
-    rows = []
-
-    # Create a map of unique artifact sets for each function
-    unique_artifacts = {}
-    for func_ea, artifacts in func_artifacts_dict.items():
-        # Use tuple of (type_id, content) as key for uniqueness
-        unique_set = []
-        seen = set()
-        for artifact in artifacts:
-            key = (artifact[0], artifact[1])
-            if key not in seen:
-                seen.add(key)
-                unique_set.append(artifact)
-        unique_artifacts[func_ea] = unique_set
-
-    # Sort functions by number of unique artifacts
-    sorted_funcs = sorted(unique_artifacts.items(), key=lambda x: len(x[1]), reverse=True)
-
-    # Generate rows for each function
-    for i, (func_ea, unique_artifact_list) in enumerate(sorted_funcs):
-        func_rows = create_function_rows_for_interesting_artifacts(func_ea, unique_artifact_list, xrefer_obj)
-        rows.extend(func_rows)
-
-        # Add separator between functions, except for the last one
-        if i < len(sorted_funcs) - 1:
-            rows.append(["", "", ""])  # Empty row for spacing
-
-    return rows
-
-
-def create_interesting_artifacts_table(headings, rows, color):
-    """
-    Create complete table with headers and content, maintaining alignment.
-
-    Handles:
-    - Header formatting with proper column widths
-    - Separator lines under headers
-    - Content alignment accounting for color codes
-    - Consistent spacing between columns
-    - Proper indentation throughout table
-
-    Uses color-aware width calculations to ensure alignment remains consistent
-    regardless of different color codes used for different types of artifacts.
-
-    Args:
-        headings: List of column headers
-        rows: List of data rows
-        color: IDA color code for headers
-
-    Returns:
-        List of formatted table lines with proper alignment
-    """
-    col_widths = [0] * len(headings)
-
-    # Include headers in width calculations
-    for i, heading in enumerate(headings):
-        col_widths[i] = len(heading)
-
-    # Calculate widths from data rows
-    for row in rows:
-        for i, cell in enumerate(row):
-            if i < len(col_widths):
-                col_widths[i] = max(col_widths[i], get_visible_width(cell))
-
-    # Add padding between columns
-    col_widths = [w + 2 for w in col_widths]
-
-    # Format headers
-    formatted_rows = []
-    header_row = []
-    for i, heading in enumerate(headings):
-        padding = " " * (col_widths[i] - len(heading))
-        header_row.append(f"\x01{color}{heading}{padding}\x02{color}")
-    formatted_rows.append("".join(header_row))
-
-    # Add header separator
-    separator_row = []
-    for width in col_widths:
-        separator_row.append(f"\x01{color}{'-' * (width - 1)}\x02{color} ")
-    formatted_rows.append("".join(separator_row))
-
-    # Add empty line after header
-    formatted_rows.append("")
-
-    # Format data rows
-    for row in rows:
-        formatted_cells = []
-        for i, cell in enumerate(row):
-            if i < len(col_widths):
-                visible_length = get_visible_width(cell)
-                padding = " " * (col_widths[i] - visible_length)
-                formatted_cells.append(f"{cell}{padding}")
-        formatted_rows.append("".join(formatted_cells))
-
-    formatted_rows.append("")
-    formatted_rows.append("".join(separator_row))
-    return formatted_rows
-
-
 def _collect_library_cluster_ids(clusters: List["FunctionalCluster"]) -> Set[int]:
     """Walk a cluster forest and return the IDs of every cluster (or
     subcluster, recursively) marked ``is_library``. Used by the cluster
@@ -1147,8 +1024,8 @@ def create_cluster_relationship_graph(
 
 def create_cluster_table(headings: List[str], rows: List[List[Any]], color: int) -> List[str]:
     """
-    Create formatted table for clusters with consistent alignment.
-    Similar to create_interesting_artifacts_table but specialized for cluster format.
+    Create formatted table for clusters with consistent alignment,
+    accounting for IDA color codes when measuring column widths.
     """
     # Calculate max widths for each column
     col_widths = [len(h) for h in headings]
@@ -1575,87 +1452,124 @@ def help_text() -> List[str]:
                 The Binary Navigator (XRefer) - Help
  ------------------------------------------------------------------------------------------
 
- KEYS AVAILABLE IN ALL MODES:
- [ESC]      Return to previous state or switch focus back to IDA code view
- [ENTER]    Return to home view
- [H]        Show/hide this help
- [D]        Add selected artifacts (APIs/libs/strings/CAPA) to exclusions
- [U]        Toggle exclusions globally
- [E]        Expand or collapse current table sections
- (MOUSE)    Click/double-click/hover items or nodes to interact, select artifacts, show details
+ GLOBAL KEYS (available in every view):
+ [ESC]      Go back one view, or (at home) switch focus back to IDA
+ [ENTER]    Return to the home view (per-function tables)
+ [H]        Show / hide this help
+ [N]        Rename the function / reference under the cursor
+ (MOUSE)    Click = expand row / open cluster / show call details;
+            Double-click = select artifact or jump to address; Hover = tooltip
 
  ----------------------------------------
 
- HOME VIEW (initial state):
- [S]    Enter search mode to filter the current display by typing text
- [T]    Enter trace mode; press repeatedly to cycle through function/path/full API call scopes
- [C]    Show clusters; press again to toggle between cluster table and cluster relationship graph
- [I]    Show interesting artifacts identified by analysis
- [X]    When on an artifact, show its cross-references listing
- [B]    With artifacts selected, find boundary methods that contain all selected items
- [L]    Show last boundary scan results
+ HOME VIEW (initial state — per-function cross-reference tables):
+ [S]    Search / filter the current view (then type to filter)
+ [T]    Trace API calls; press again to cycle function -> path -> full scope
+ [C]    Cluster relationship graph
+ [O]    Show orphan artifacts (no path to an entry point)
+ [X]    Cross-reference listing for the artifact under the cursor
+ [G]    Artifact path graph for the artifact under the cursor
+ [P]    Call focus (when the cursor is on a 0x... call address)
+ [V]    Neighborhood: clusters reachable from the cursor function
+ [M]    Intermediate paths through the cursor function (when it links a cluster)
+ [J]    Jump to the cluster containing this function
+ [B]    Boundary scan: find functions containing all selected artifacts
+ [L]    Show the last boundary scan results
+ [D]    Add selected artifacts (APIs/libs/strings/CAPA) to exclusions
+ [U]    Toggle exclusions on / off
+ [E]    Expand / collapse table sections
 
  ----------------------------------------
 
- SEARCH MODE:
+ SEARCH MODE ([S] from home):
  Type to filter the current content
- [ESC/ENTER] Exit search mode and return to home view
+ [X]    Cross-references for the artifact under the cursor
+ [G]    Artifact path graph for the artifact under the cursor
+ [ESC/ENTER] Exit search and return home
 
  ----------------------------------------
 
  TRACE SCOPES (after pressing [T] in home view):
- Press [T] repeatedly to cycle:
-  - Function scope: API calls in current function
-  - Path scope: Calls along paths to this function
-  - Full scope: All recorded calls in trace
+ [T]    Cycle scope: function -> path -> full -> function
+          - function: API calls in the current function
+          - path:     calls along paths reaching this function
+          - full:     all recorded calls in the trace
+ [U]    Toggle exclusions on / off
  [ESC/ENTER] Return to home view
 
  ----------------------------------------
 
  CLUSTERS & CLUSTER GRAPHS (after pressing [C] in home view):
- [C]    Switch between cluster table and cluster relationship graph view
- [J]    Enable/disable cluster sync with navigation
+ [C]    Toggle between cluster table and cluster relationship graph
+ [L]    Show / hide library clusters
+ [R]    Toggle cluster description / full report view
+ [J]    Toggle cluster sync (follow the IDA cursor across clusters)
+ [G]    Pin / unpin the cluster graph
+ [M]    Intermediate paths through the cursor function
+ [A]    While in intermediate-paths view: scope this cluster <-> all clusters
+ [V]    Neighborhood: clusters reachable from the cursor function
+ [ESC]  Step back through visited clusters;  [ENTER] returns home
+
+ ----------------------------------------
+
+ ARTIFACT PATH GRAPH (after pressing [G] on an artifact):
+ [G]    Pin / unpin the graph
+ [S]    Toggle simplified / normal graph representation
+ [V]    Neighborhood: clusters reachable from the cursor function
+ (MOUSE) Hover / click / double-click nodes for details or navigation
  [ESC/ENTER] Return to home view
 
  ----------------------------------------
 
- GRAPH VIEWS (after pressing [G] on an artifact in home view):
- [G]    Show path graph to artifact; press again to pin/unpin the graph
- [S]    Toggle simplified/normal graph representation
- (MOUSE) Hover/click/dbl-click nodes for details or navigation
+ NEIGHBORHOOD VIEW (after pressing [V]):
+ Shows the cursor function centered, with adjacent clusters around it
+ [V]    Exit the neighborhood view
+ [M]    Intermediate paths through the cursor function
+ [ESC/ENTER] Return to the previous view / home
+
+ ----------------------------------------
+
+ ORPHAN ARTIFACTS (after pressing [O] in home view):
+ [E]    Expand / collapse table sections
+ [O]    Exit the orphans view
  [ESC/ENTER] Return to home view
 
  ----------------------------------------
 
- INTERESTING ARTIFACTS (after pressing [I] in home view):
+ CALL FOCUS (after pressing [P] on a 0x... call in home view):
+ Shows context specific to the selected call instruction
  [ESC/ENTER] Return to home view
 
  ----------------------------------------
 
- XREF LISTING (after pressing [X] on artifact in home view):
+ XREF LISTING (after pressing [X] on an artifact):
+ Detailed cross-reference listing for the selected artifact
  [ESC/ENTER] Return to home view
 
  ----------------------------------------
 
  BOUNDARY SCANS (after pressing [B] with artifacts selected in home view):
- [L]    Show results of the last boundary scan
+ Double-click artifacts to select them, then press [B]
+ [L]    Re-show the last boundary scan results (from home)
  [ESC/ENTER] Return to home view
 
  ----------------------------------------
 
  MOUSE INTERACTIONS:
-  - Click items to expand or access sub-details
-  - Double-click artifacts to select them for operations
-  - Hover over items or graph nodes for tooltips and context
+  - Click: expand a row ([+]/[-]), open a cluster id, or show call details (->/v)
+  - Double-click: select / deselect an artifact, or jump to an address
+  - Hover: tooltip with details
+  - Right-click: copy / export actions (e.g. copy strings)
 
  ----------------------------------------
 
  TIPS & NOTES:
-  - Pressing [ESC] multiple times often steps you back to home view
-  - Some keys like [T], [C], [G], [I] cycle through related modes each press
-  - Selected artifacts remain chosen until toggled off by double-clicking them again
-  - Use exclusions ([D], [U]) to refine displayed artifacts
-  - Experiment with cluster graphs, traces, and paths for deeper insight
+  - Selection is by double-click; selected artifacts stay selected until
+    double-clicked again. [B] (boundary) and [D] (exclude) act on the selection.
+  - Pressing [ESC] repeatedly steps back through your view history to home
+  - Keys like [T], [C], [G] cycle or toggle related modes each press
+  - Refine what is shown with exclusions: [D] adds the selection, [U] toggles all
+  - Experiment with cluster graphs, neighborhoods, traces, and paths for insight
 
  ----------------------------------------
 

@@ -56,21 +56,33 @@ FILE_FILTERS = {
 }
 
 
-# Compatibility criteria for the LLM model dropdown. Models must satisfy ALL:
+# Compatibility criteria for the LLM model dropdown. A model is shown only if
+# it satisfies ALL of:
 #   - chat-completion API (DSPy uses chat endpoints)
 #   - >=1M input tokens (cluster prompts get large on real binaries)
 #   - >=16k output tokens (matches the codebase's per-provider max_tokens floor)
 #   - structured output capability (DSPy Predict + Pydantic OutputField needs
 #     either JSON-schema response_format or function-calling fallback)
-# Restricted to direct-API providers users typically have keys for, to avoid
-# 100+ regional/gateway duplicates from Bedrock/Azure/OpenRouter/etc.
-# Anthropic is excluded: litellm reports max_input_tokens=1_000_000 for Claude 4.x
-# entries, but that 1M is beta-gated (requires the anthropic-beta:context-1m-...
-# header AND API tier 4+). The default for those models is 200k, so listing them
-# in a curated dropdown would over-promise and fail at runtime on real prompts.
+#   - single-API-key auth: xrefer collects exactly ONE api_key and calls
+#     dspy.LM(model, api_key), so litellm.validate_environment(model, api_key)
+#     must report nothing else missing. This is the *real* reason AWS-Bedrock,
+#     Azure and Vertex models are out — they need access keys / endpoints / GCP
+#     projects xrefer has no field for, not a lone api_key.
+# The provider allowlist is the first cut: it keeps the dropdown free of the
+# 100+ gateway/reseller duplicates (OpenRouter / Vercel / deepinfra / etc.) that
+# merely re-list the same models, and of a few providers litellm reports as
+# single-key when they really need a host/endpoint (azure_ai / oci / databricks).
+# validate_environment (in _curated_llm_models) is the enforced auth gate on top.
+# Anthropic is included: Claude 4.x reports max_input_tokens=1_000_000, and that
+# 1M window is beta-gated (needs the anthropic-beta:context-1m-2025-08-07 header
+# AND API tier 4+). xrefer sends that header automatically for >=1M Claude models
+# from the LLM call path (LLMProcessor._build_lm_kwargs), so the dropdown's 1M
+# promise holds at runtime. Tier 4+ stays the user's responsibility.
+# dashscope (Alibaba Qwen) is the one non-big-4 direct single-key provider that
+# currently ships >=1M structured-output models, so it's allowed too.
 _LLM_MIN_INPUT_TOKENS = 1_000_000
 _LLM_MIN_OUTPUT_TOKENS = 16_000
-_LLM_ALLOWED_PROVIDERS = frozenset({"openai", "gemini", "xai"})
+_LLM_ALLOWED_PROVIDERS = frozenset({"openai", "gemini", "xai", "anthropic", "dashscope"})
 
 
 def _curated_llm_models() -> List[str]:
@@ -108,6 +120,18 @@ def _curated_llm_models() -> List[str]:
             continue
         if "/" not in name:  # normalize bare names to provider/model form
             name = f"{provider}/{name}"
+        # Hard single-API-key gate (see criteria comment above). xrefer has
+        # exactly one api_key field, so a model is only usable if a lone
+        # api_key leaves validate_environment with nothing missing. Runs last
+        # — it's the most expensive check, so only already-filtered candidates
+        # reach it. The placeholder key stands in for "the key the user will
+        # supply"; we only care whether ONE key is sufficient, not its value.
+        try:
+            env = litellm.validate_environment(model=name, api_key="xrefer-probe-key")
+            if not env.get("keys_in_environment"):
+                continue
+        except Exception:
+            continue
         if name in seen:
             continue
         seen.add(name)
@@ -976,6 +1000,17 @@ class XReferSettingsDialog(QDialog):
         if line_edit:
             line_edit.setPlaceholderText("Select or type a model id…")
 
+        # Refresh button: re-downloads litellm's model catalog so models
+        # newer than the installed litellm version appear, then rebuilds
+        # the dropdown. Wired into the model row in llm_grid below.
+        self.refresh_models_btn = QPushButton("Refresh")
+        self.refresh_models_btn.setToolTip(
+            "Download the latest model catalog from litellm and rebuild the "
+            "list (falls back to the bundled catalog if offline)"
+        )
+        self.refresh_models_btn.setEnabled(self.settings["llm_lookups"])
+        self.refresh_models_btn.clicked.connect(self.refresh_model_list)
+
         self.api_key_edit = QLineEdit(self.settings["api_key"])
         self.api_key_edit.setEnabled(self.settings["llm_lookups"])
         self.api_key_edit.setEchoMode(QLineEdit.Password)
@@ -997,8 +1032,14 @@ class XReferSettingsDialog(QDialog):
             "output budget shrinks as the batch grows). Default 30."
         )
 
+        model_row = QHBoxLayout()
+        model_row.setContentsMargins(0, 0, 0, 0)
+        model_row.setSpacing(6)
+        model_row.addWidget(self.llm_model_combo, 1)
+        model_row.addWidget(self.refresh_models_btn, 0)
+
         llm_grid.addWidget(QLabel("LLM Model ID:"), 0, 0)
-        llm_grid.addWidget(self.llm_model_combo, 0, 1)
+        llm_grid.addLayout(model_row, 0, 1)
         llm_grid.addWidget(QLabel("API Key:"), 1, 0)
         llm_grid.addWidget(self.api_key_edit, 1, 1)
         llm_grid.addWidget(QLabel("Cluster Batch Size:"), 2, 0)
@@ -1203,8 +1244,54 @@ class XReferSettingsDialog(QDialog):
         """Toggle LLM-related controls based on checkbox state"""
         enabled = state == Qt.Checked
         self.llm_model_combo.setEnabled(enabled)
+        self.refresh_models_btn.setEnabled(enabled)
         self.api_key_edit.setEnabled(enabled)
         self.cluster_batch_size_spin.setEnabled(enabled)
+
+    def refresh_model_list(self) -> None:
+        """Re-download litellm's model catalog and rebuild the dropdown.
+
+        The dropdown is normally populated from ``litellm.model_cost`` — the
+        catalog table baked into the *installed* litellm package. This
+        re-fetches litellm's live catalog
+        (``model_prices_and_context_window.json``) so models newer than the
+        installed litellm version show up, reassigns ``litellm.model_cost``,
+        and repopulates the combo through the same ``_curated_llm_models``
+        filter used at startup.
+
+        Synchronous on purpose: IDA's Qt loop is single-threaded and xrefer
+        must not touch IDA/Qt from a worker thread (see the async-experiment
+        post-mortems in memory). A wait cursor covers the one-shot fetch;
+        litellm falls back to its bundled catalog if the network is
+        unavailable, so this never hard-fails.
+        """
+        combo = self.llm_model_combo
+        typed = combo.currentText()
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            try:
+                import litellm
+                url = getattr(
+                    litellm,
+                    "model_cost_map_url",
+                    "https://raw.githubusercontent.com/BerriAI/litellm/main/"
+                    "model_prices_and_context_window.json",
+                )
+                fresh = litellm.get_model_cost_map(url)
+                if isinstance(fresh, dict) and fresh:
+                    litellm.model_cost = fresh
+            except Exception as exc:
+                print(f"[XRefer] Model list refresh: catalog fetch failed "
+                      f"({exc}); using cached catalog")
+            models = _curated_llm_models()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(models)
+            combo.setCurrentText(typed)  # preserve the user's selection
+            combo.blockSignals(False)
+            print(f"[XRefer] Model list refreshed: {len(models)} compatible models")
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def toggle_path_default(self, path_type, state):
         """Toggle path edit read-only state based on Default checkbox"""

@@ -18,7 +18,6 @@ from enum import Enum
 
 class PromptType(Enum):
     CATEGORIZER = "categorizer"
-    ARTIFACT_ANALYZER = "artifact_analyzer"
     CLUSTER_ANALYZER = "cluster_analyzer"
     BINARY_SYNTHESIZER = "binary_synthesizer"
 

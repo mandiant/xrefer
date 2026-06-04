@@ -41,7 +41,6 @@ class XReferStateMachine(StateMachine):
     pinned_simplified_graph = State("pinned simplified graph")
     boundary_results = State("boundary results")
     last_boundary_results = State("last boundary results")
-    interesting_artifacts = State("interesting artifacts")
     orphans = State("orphans")
     clusters = State("clusters")
     pinned_cluster_graphs = State("pinned cluster graphs")
@@ -55,11 +54,10 @@ class XReferStateMachine(StateMachine):
     start_search = base.to(search)
     start_call_focus = base.to(call_focus)
     start_trace = base.to(trace_scope_function)
-    start_graph = base.to(graph) | search.to(graph) | interesting_artifacts.to(graph)
-    start_xref_listing = base.to(xref_listing) | search.to(xref_listing) | interesting_artifacts.to(xref_listing)
+    start_graph = base.to(graph) | search.to(graph)
+    start_xref_listing = base.to(xref_listing) | search.to(xref_listing)
     start_boundary_results = base.to(boundary_results)
     start_last_boundary_results = base.to(last_boundary_results)
-    start_interesting_artifacts = base.to(interesting_artifacts)
     start_orphans = base.to(orphans)
     start_cluster_graphs = (
         base.to(cluster_graphs)
@@ -98,7 +96,6 @@ class XReferStateMachine(StateMachine):
         | last_boundary_results.to(help)
         | xref_listing.to(help)
         | trace_scope_full.to(help)
-        | interesting_artifacts.to(help)
         | orphans.to(help)
         | clusters.to(help)
         | cluster_graphs.to(help)
@@ -116,9 +113,6 @@ class XReferStateMachine(StateMachine):
     toggle_unpinned_cluster_graph = pinned_cluster_graphs.to(cluster_graphs)
     toggle_pinned_neighborhood_graph = neighborhood_graph.to(pinned_neighborhood_graph)
     toggle_unpinned_neighborhood_graph = pinned_neighborhood_graph.to(neighborhood_graph)
-
-    # interesting artifact transitions
-    toggle_on_interesting_artifacts = clusters.to(interesting_artifacts)
 
     # cluster transitions
     toggle_on_cluster_graphs = clusters.to(cluster_graphs)
@@ -142,7 +136,6 @@ class XReferStateMachine(StateMachine):
     revert_help_to_boundary_results = help.to(boundary_results)
     revert_help_to_last_boundary_results = help.to(last_boundary_results)
     revert_help_to_xref_listing = help.to(xref_listing)
-    revert_help_to_interesting_artifacts = help.to(interesting_artifacts)
     revert_help_to_orphans = help.to(orphans)
     revert_help_to_interesting_clusters = help.to(clusters)
     revert_help_to_interesting_cluster_graphs = help.to(cluster_graphs)
@@ -168,10 +161,6 @@ class XReferStateMachine(StateMachine):
     revert_xref_listing_to_search = xref_listing.to(search)
     revert_graph_to_search = graph.to(search)
 
-    # interesting artifacts revert transitions
-    revert_graph_to_interesting_artifacts = graph.to(interesting_artifacts)
-    revert_xref_listing_to_interesting_artifacts = xref_listing.to(interesting_artifacts)
-
     # base transition
     to_base = (
         search.to(base)
@@ -183,7 +172,6 @@ class XReferStateMachine(StateMachine):
         | last_boundary_results.to(base)
         | xref_listing.to(base)
         | help.to(base)
-        | interesting_artifacts.to(base)
         | orphans.to(base)
         | clusters.to(base)
         | cluster_graphs.to(base)

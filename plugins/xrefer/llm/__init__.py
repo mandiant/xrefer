@@ -13,14 +13,12 @@
 # limitations under the License.
 
 from . import base, processor
-from .artifact_analyzer import ArtifactAnalyzer
 from .cluster_analyzer import ClusterAnalyzer
 from .categorizer import Categorizer, CATEGORIES
 
 __all__ = [
     "base",
     "processor",
-    "ArtifactAnalyzer",
     "ClusterAnalyzer",
     "Categorizer",
     "CATEGORIES",
