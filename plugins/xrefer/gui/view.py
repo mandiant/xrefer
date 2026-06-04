@@ -5169,7 +5169,15 @@ class XReferView(idaapi.simplecustviewer_t):
             simplified_nodes = set()
 
             for xref in xrefs:
-                xref_func: ida_funcs.func_t = ida_funcs.get_func(xref)
+                # ``xref`` is sourced from ``entity_xrefs`` which holds
+                # ``xrefer.backend.base.Address`` instances — an int
+                # subclass introduced by the gsoc_2025 backend
+                # abstraction. IDA 9.3's SWIG bindings strict-typecheck
+                # ``ea_t`` and reject int subclasses, so we explicitly
+                # cast to a plain int (then wrap via ``ida_idaapi.ea_t``
+                # to match the pattern used at every other ea-crossing
+                # site in this file).
+                xref_func: ida_funcs.func_t = ida_funcs.get_func(ida_idaapi.ea_t(int(xref)))
                 if not xref_func:
                     continue
 
