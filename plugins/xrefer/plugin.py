@@ -62,9 +62,7 @@ class XReferPlugin(idaapi.plugin_t):
             initialized = True
             register_menu_action("Edit/XRefer/Run Analysis/", "XRefer:start_analysis_default", "Default Entrypoint", StartHandler())
             register_menu_action("Edit/XRefer/Run Analysis/", "XRefer:start_analysis_custom", "Custom Entrypoint", StartHandlerCustomEntrypoint())
-            register_menu_action("Edit/XRefer/Run Analysis/", "XRefer:cluster_everything", "(Re-)run Cluster Analysis on all Functions (default)", ClusterEverythingHandler())
-            register_menu_action("Edit/XRefer/Run Analysis/", "XRefer:rerun_cluster_analysis", "(Re-)run Cluster Analysis on Interesting Functions", ClusterInterestingFunctionsHandler())
-            register_menu_action("Edit/XRefer/Run Analysis/", "XRefer:rerun_artifact_analysis", "(Re-)run Artifact Analysis", ArtifactAnalysisHandler())
+            register_menu_action("Edit/XRefer/Run Analysis/", "XRefer:cluster_everything", "(Re-)run Cluster Analysis", ClusterEverythingHandler())
             register_menu_action("Edit/XRefer/", "XRefer:show_window", "Show Window", ShowWindowHandler())
             register_menu_action("Edit/XRefer/", "XRefer:dump_indirect_calls", "Dump Indirect Calls", DumpIndirectCallsHandler())
             register_menu_action("Edit/XRefer/", "XRefer:sync_imagebase", "Re-sync Imagebase", SyncImageBaseHandler())

@@ -520,51 +520,6 @@ class CategorizerModule(dspy.Module):
         return categorization_
 
 
-class ArtifactAnalysisResponse(BaseModel):
-    """Response model for artifact analysis."""
-
-    interesting_indexes: List[int] = Field(..., description="List of artifact indices identified as interesting from a security perspective")
-
-
-class ArtifactAnalyzerSignature(dspy.Signature):
-    """
-    Identify interesting artifacts from a security analysis perspective.
-
-    You will be given artifacts organized by type (Strings, APIs, CAPA capabilities, Libraries).
-    Your task is to identify which artifacts are potentially interesting from a security,
-    reverse engineering, or malware analysis perspective.
-
-    Consider artifacts interesting if they:
-    - Indicate suspicious or malicious behavior
-    - Reveal implementation details useful for analysis
-    - Show uncommon or security-relevant functionality
-    - Provide insights into the binary's purpose
-    """
-
-    artifacts: Dict[str, Dict[int, str]] = dspy.InputField(description="Artifacts organized by type (Strings, APIs, CAPA, Libraries)")
-    analysis: ArtifactAnalysisResponse = dspy.OutputField(description="List of indices for artifacts deemed interesting")
-
-class ArtifactAnalyzerModule(dspy.Module):
-    """DSPy module for artifact analysis with structured inputs."""
-
-    def __init__(self):
-        super().__init__()
-        self.predictor = dspy.Predict(ArtifactAnalyzerSignature)
-
-    def forward(self, artifacts: Dict[str, Dict[int, str]]) -> ArtifactAnalysisResponse:
-        """
-        Analyze artifacts using DSPy with structured inputs.
-
-        Args:
-            artifacts: Dict of artifacts organized by type (Strings, APIs, CAPA, Libraries)
-
-        Returns:
-            ArtifactAnalysisResponse Pydantic model
-        """
-        result = self.predictor(artifacts=artifacts)
-        return result.analysis
-
-
 class MitreAttackTechnique(BaseModel):
     """Single MITRE ATT&CK technique mapping for a cluster.
 

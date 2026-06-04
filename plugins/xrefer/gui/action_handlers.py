@@ -68,131 +68,6 @@ class PeekViewToggleHandler(idaapi.action_handler_t):
         return idaapi.AST_ENABLE_ALWAYS
 
 
-class ArtifactAnalysisHandler(idaapi.action_handler_t):
-    """
-    Handler for re-running LLM analysis on artifacts.
-    Forces a fresh analysis of all artifacts regardless of existing
-    results, and bypasses the LLM response cache so the model
-    re-generates its verdict instead of replaying a cached one — the
-    whole point of an explicit re-run.
-    """
-
-    def activate(self, ctx: Any) -> bool:
-        """
-        Handle re-run artifact analysis action.
-
-        Args:
-            ctx (Any): IDA context (unused)
-
-        Returns:
-            bool: True after analysis is complete
-        """
-        from xrefer.plugin import plugin_instance
-
-        try:
-            idaapi.show_wait_box("HIDECANCEL\n")
-            log("Running artifact analysis (LLM cache bypassed)...")
-            xrefer_obj = plugin_instance.xrefer_view.xrefer_obj
-            xrefer_obj.find_interesting_artifacts(force_no_cache=True)
-            xrefer_obj.save_analysis()
-
-            # Force view update
-            current_state = plugin_instance.xrefer_view.state_machine.current_state
-            if current_state == plugin_instance.xrefer_view.state_machine.interesting_artifacts:
-                plugin_instance.xrefer_view.update(True)
-
-            log("Artifact analysis complete")
-            idaapi.hide_wait_box()
-            return True
-
-        except Exception as e:
-            idaapi.hide_wait_box()
-            log(f"[-] Error during artifact analysis: {str(e)}")
-            return False
-
-    def update(self, ctx: Any) -> int:
-        """
-        Update handler state.
-
-        Args:
-            ctx (Any): IDA context (unused)
-
-        Returns:
-            int: AST_ENABLE_ALWAYS if view exists, AST_DISABLE otherwise
-        """
-        from xrefer.plugin import plugin_instance
-
-        if plugin_instance.xrefer_view:
-            return idaapi.AST_ENABLE_ALWAYS
-        else:
-            return idaapi.AST_DISABLE
-
-
-class ClusterInterestingFunctionsHandler(idaapi.action_handler_t):
-    """
-    Handler for running LLM analysis on interesting function clusters.
-    Forces a fresh analysis of cluster relationships and behaviors,
-    and bypasses the LLM response cache so the model re-generates its
-    response instead of replaying a cached one — the whole point of
-    an explicit re-run.
-    """
-
-    def activate(self, ctx: Any) -> bool:
-        """
-        Handle re-run cluster analysis action.
-
-        Args:
-            ctx (Any): IDA context (unused)
-
-        Returns:
-            bool: True after analysis is complete
-        """
-        from xrefer.plugin import plugin_instance
-
-        try:
-            idaapi.show_wait_box("HIDECANCEL")
-            log("\nRunning Cluster Analysis on Interesting Functions (LLM cache bypassed)...")
-
-            if plugin_instance.xrefer_view.xrefer_obj.interesting_artifacts:
-                plugin_instance.xrefer_view.state_machine.clear_cluster_history()
-                xrefer_obj = plugin_instance.xrefer_view.xrefer_obj
-                xrefer_obj.analyze_clusters(xrefer_obj.interesting_artifacts, force_no_cache=True)
-                xrefer_obj.save_analysis()
-            else:
-                log("No Interesting Artifacts found for clustering. Please run Artifact Analysis first.")
-
-            # Force view update
-            current_state = plugin_instance.xrefer_view.state_machine.current_state
-            if current_state in (plugin_instance.xrefer_view.state_machine.clusters, plugin_instance.xrefer_view.state_machine.cluster_graphs):
-                plugin_instance.xrefer_view.update(True)
-
-            log("Cluster analysis complete.")
-            idaapi.hide_wait_box()
-            return True
-
-        except Exception as e:
-            idaapi.hide_wait_box()
-            log(f"[-] Error during cluster analysis: {str(e)}")
-            return False
-
-    def update(self, ctx: Any) -> int:
-        """
-        Update handler state.
-
-        Args:
-            ctx (Any): IDA context (unused)
-
-        Returns:
-            int: AST_ENABLE_ALWAYS if view exists, AST_DISABLE otherwise
-        """
-        from xrefer.plugin import plugin_instance
-
-        if plugin_instance.xrefer_view:
-            return idaapi.AST_ENABLE_ALWAYS
-        else:
-            return idaapi.AST_DISABLE
-
-
 class ClusterEverythingHandler(idaapi.action_handler_t):
     """
     Handler for running LLM analysis on all function clusters.
@@ -491,74 +366,66 @@ class StartHandler(idaapi.action_handler_t):
         return idaapi.AST_ENABLE_ALWAYS
 
 
-class CopyInterestingStringsHandler(idaapi.action_handler_t):
-    """
-    Handler for copying all interesting strings to clipboard.
+class _CopyStringsHandlerBase(idaapi.action_handler_t):
+    """Base for the right-click "Copy ... strings to clipboard" actions.
 
-    When activated, copies all full strings marked as interesting
-    to the system clipboard.
+    Subclasses set ``category`` (forwarded to ``XRefer.collect_strings``)
+    and ``noun`` (used in the status log). The classification itself
+    lives in the backend-agnostic core layer; this only joins the
+    results and pushes them onto the Qt clipboard.
     """
+
+    category: str = "all"
+    noun: str = "strings"
 
     def activate(self, ctx: Any) -> bool:
-        """
-        Handle copying interesting strings to clipboard.
-
-        Collects all interesting strings and copies their full versions
-        to the system clipboard if any are available.
-
-        Args:
-            ctx (Any): IDA context (unused)
-
-        Returns:
-            bool: True if operation completed successfully
-        """
         from xrefer.plugin import plugin_instance
 
         try:
-            interesting_strings = []
-
-            # Collect interesting strings from artifacts
-            for idx in plugin_instance.xrefer_view.xrefer_obj.interesting_artifacts:
-                entity = plugin_instance.xrefer_view.xrefer_obj.entities[idx]
-                # Check if it's a string (type 3) and has full version
-                if entity[2] == 3:  # String type
-                    if len(entity) > 6:  # Has full string
-                        interesting_strings.append(entity[6])  # Get full string
-                    else:
-                        interesting_strings.append(entity[1])  # Fallback to truncated version
-
-            if not interesting_strings:
-                log("No interesting strings available for copy")
+            view = plugin_instance.xrefer_view
+            if view is None or getattr(view, "xrefer_obj", None) is None:
+                log("XRefer analysis not loaded")
                 return False
-
-            # Copy to clipboard using Qt
-            text = "\n".join(interesting_strings)
-            clipboard = QtWidgets.QApplication.clipboard()
-            clipboard.setText(text)
-
-            log(f"{len(interesting_strings)} interesting strings copied to clipboard")
+            strings = view.xrefer_obj.collect_strings(self.category)
+            if not strings:
+                log(f"No {self.noun} available for copy")
+                return False
+            QtWidgets.QApplication.clipboard().setText("\n".join(strings))
+            log(f"{len(strings)} {self.noun} copied to clipboard")
             return True
-
         except Exception as e:
             log(f"[-] Error copying strings to clipboard: {str(e)}")
             return False
 
     def update(self, ctx: Any) -> int:
-        """
-        Update handler state.
-
-        Args:
-            ctx (Any): IDA context (unused)
-
-        Returns:
-            int: AST_ENABLE_ALWAYS if view exists, AST_DISABLE otherwise
-        """
         from xrefer.plugin import plugin_instance
 
-        if plugin_instance.xrefer_view:
-            return idaapi.AST_ENABLE_ALWAYS
-        else:
-            return idaapi.AST_DISABLE
+        return idaapi.AST_ENABLE_ALWAYS if plugin_instance.xrefer_view else idaapi.AST_DISABLE
+
+
+class CopyAllStringsHandler(_CopyStringsHandlerBase):
+    category = "all"
+    noun = "strings"
+
+
+class CopyDirectStringsHandler(_CopyStringsHandlerBase):
+    category = "direct"
+    noun = "directly referenced strings"
+
+
+class CopyDirectIndirectStringsHandler(_CopyStringsHandlerBase):
+    category = "direct_indirect"
+    noun = "directly/indirectly referenced strings"
+
+
+class CopyOrphanStringsHandler(_CopyStringsHandlerBase):
+    category = "orphan"
+    noun = "orphan strings"
+
+
+class CopyUncategorizedStringsHandler(_CopyStringsHandlerBase):
+    category = "uncategorized"
+    noun = "uncategorized strings"
 
 
 class StartHandlerCustomEntrypoint(idaapi.action_handler_t):

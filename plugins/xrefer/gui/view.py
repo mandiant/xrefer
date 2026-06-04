@@ -36,14 +36,15 @@ from qtpy import QtCore, QtGui, QtWidgets
 from xrefer._vendor import ascii_graphs
 from xrefer.core.analyzer import ApiCall, XRefer
 from xrefer.core.helpers import (find_cluster_analysis, get_addr_from_text, longest_line_length, parse_cluster_id, remove_non_displayable, strip_color_codes,
-                                 wrap_substring_with_string)
+                                 word_wrap_text, wrap_substring_with_string)
 from xrefer.core.settings import XReferSettingsManager
-from xrefer.gui.action_handlers import ArtifactAnalysisHandler, ClusterEverythingHandler, ClusterInterestingFunctionsHandler, CopyInterestingStringsHandler, PeekViewToggleHandler
+from xrefer.gui.action_handlers import (ClusterEverythingHandler, CopyAllStringsHandler, CopyDirectIndirectStringsHandler, CopyDirectStringsHandler,
+                                        CopyOrphanStringsHandler, CopyUncategorizedStringsHandler, PeekViewToggleHandler)
 from xrefer.gui.help import ContextHelp
 from xrefer.gui.helpers import (CollapseEventFilter, CollapseIndicator, FocusEventFilter, KeyEventFilter, colorize_api_call, create_cluster_relationship_graph,
-                                create_colored_table_from_cols, create_interesting_artifacts_table, create_xrefs_table_colored, draw_cluster_hierarchy, find_cluster_analysis,
-                                format_api_call_for_ida, help_text, log, patch_asciinet, prepare_interesting_artifacts_table_rows, qt_object_alive, register_popup_action,
-                                set_focus_to_code, set_xref_coverage_color, twidget_to_qt)
+                                create_colored_table_from_cols, create_xrefs_table_colored, draw_cluster_hierarchy, find_cluster_analysis,
+                                format_api_call_for_ida, help_text, log, patch_asciinet, qt_object_alive, register_popup_action,
+                                render_markdown_report_lines, set_focus_to_code, set_xref_coverage_color, twidget_to_qt)
 from xrefer.gui.legacy.shim import format_ribbon
 from xrefer.gui.state_machine import XReferStateMachine
 
@@ -99,10 +100,18 @@ class XReferView(idaapi.simplecustviewer_t):
             r"\x20*"  # Any number of trailing spaces
         )
         self.address_regex: re.Pattern = re.compile(r"0x[0-9a-fA-F]+")
+        # Imports and libraries are both categorized into the same
+        # Categorizer CATEGORIES, so two separate indirect tables would
+        # repeat every category header. Present them as one merged table
+        # (built by _merge_indirect_tables); import vs library stays
+        # visually distinct via the existing row colors.
+        self.merged_indirect_name: str = "INDIRECT IMPORT & LIBRARY XREFS"
+        # Same redundancy in the orphans view: orphan imports and orphan
+        # libraries both group by category, so merge them too.
+        self.merged_orphan_name: str = "ORPHAN IMPORTS & LIBRARIES"
         self.table_states: OrderedDict[str, int] = OrderedDict(
             [
-                (self.xrefer_obj.table_names[2], 1),  # INDIRECT IMPORT XREFS
-                (self.xrefer_obj.table_names[1], 1),  # INDIRECT LIBRARY XREFS
+                (self.merged_indirect_name, 1),       # merged INDIRECT IMPORT + LIBRARY XREFS
                 (self.xrefer_obj.table_names[3], 1),  # INDIRECT STRING XREFS
                 (self.xrefer_obj.table_names[4], 1),  # INDIRECT CAPA XREFS
                 ("DIRECT XREFS", 1),
@@ -110,8 +119,7 @@ class XReferView(idaapi.simplecustviewer_t):
                 # (handle_key_e, the [+]/[-] click handler, get_parent_table)
                 # all key off membership in this dict, so registering them
                 # here is enough — no separate state-tracking dicts needed.
-                ("ORPHAN IMPORTS", 1),
-                ("ORPHAN LIBRARIES", 1),
+                (self.merged_orphan_name, 1),
                 ("ORPHAN STRINGS", 1),
                 ("ORPHAN CAPA RULES", 1),
             ]
@@ -128,10 +136,10 @@ class XReferView(idaapi.simplecustviewer_t):
         # base-view loop. Orphan tables live in the same ``table_states``
         # dict (so the [+]/[-] click handler "just works") but are NOT
         # iterated as part of per-function rendering — that loop must
-        # see only the original 5 entries.
+        # see only these per-function entries. The indirect import and
+        # library tables are presented as one merged table.
         self.table_names: List[str] = [
-            self.xrefer_obj.table_names[2],
-            self.xrefer_obj.table_names[1],
+            self.merged_indirect_name,
             self.xrefer_obj.table_names[3],
             self.xrefer_obj.table_names[4],
             "DIRECT XREFS",
@@ -141,14 +149,16 @@ class XReferView(idaapi.simplecustviewer_t):
         # function names or these orphan names as parents of a "(+)" /
         # "(-)" sub-toggle line).
         self.orphan_table_names: List[str] = [
-            "ORPHAN IMPORTS",
-            "ORPHAN LIBRARIES",
+            self.merged_orphan_name,
             "ORPHAN STRINGS",
             "ORPHAN CAPA RULES",
         ]
         # Maps orphan table name -> EntityType id (1=lib, 2=import,
         # 3=string, 4=capa) so the renderer can pick the right color
-        # tag and source list.
+        # tag and source list. The merged imports+libraries table is
+        # handled separately (it spans two types), so it is not listed
+        # here; ORPHAN IMPORTS / ORPHAN LIBRARIES remain as the source
+        # types used when building the merged table.
         self._orphan_table_to_type: Dict[str, int] = {
             "ORPHAN IMPORTS": 2,
             "ORPHAN LIBRARIES": 1,
@@ -165,7 +175,7 @@ class XReferView(idaapi.simplecustviewer_t):
         self.rebase_hook: Optional[RebaseHook] = None
         self.func_ea: Optional[int] = None
         self.state_machine: XReferStateMachine = XReferStateMachine()
-        self.table_index_offset: int = 4  # default state starts from direct xrefs
+        self.table_index_offset: int = len(self.table_names) - 1  # default starts from direct xrefs (last entry)
         self.table_count: int = len(self.table_names)
         # 8 spaces aligns expanded-table row content with the heading text that
         # follows the "----" continuation marker; see draw_function_context_table_heading.
@@ -409,24 +419,18 @@ class XReferView(idaapi.simplecustviewer_t):
                 menu_path: str = "XRefer/"
                 menu_id = "XRefer:cluster_everything"
                 tooltip = "Cluster all functions with non-excluded artifacts"
-                label = "(Re-)run Cluster Analysis on all Functions (default)"
+                label = "(Re-)run Cluster Analysis"
                 register_popup_action(form, popup, menu_path, menu_id, label, ClusterEverythingHandler(), tooltip)
-                menu_id = "XRefer:rerun_cluster_analysis"
-                tooltip = "Cluster only functions that have been filtered through LLM Artifact Analysis"
-                label = "(Re-)run Cluster Analysis on Interesting Functions"
-                register_popup_action(form, popup, menu_path, menu_id, label, ClusterInterestingFunctionsHandler(), tooltip)
-                menu_id = "XRefer:rerun_artifact_analysis"
-                tooltip = "(Re-)run LLM analysis on artifacts"
-                label = "(Re-)run Artifact Analysis"
-                register_popup_action(form, popup, menu_path, menu_id, label, ArtifactAnalysisHandler(), tooltip)
                 menu_id = "XRefer:toggle_peek"
                 tooltip = "Enable peeking of downstream cross-references of a clicked function in disassembly/pseudocode view"
                 label = "Enable Peek View"
                 register_popup_action(form, popup, menu_path, menu_id, label, PeekViewToggleHandler(), tooltip)
-                menu_id = "XRefer:copy_interesting_strings"
-                tooltip = "Copy all relevant strings to the clipboard"
-                label = "Copy all relevant strings to clipboard"
-                register_popup_action(form, popup, menu_path, menu_id, label, CopyInterestingStringsHandler(), tooltip)
+                copy_menu_path: str = "XRefer/Copy Strings/"
+                register_popup_action(form, popup, copy_menu_path, "XRefer:copy_all_strings", "Copy all strings to clipboard", CopyAllStringsHandler(), "Copy every string discovered in the binary")
+                register_popup_action(form, popup, copy_menu_path, "XRefer:copy_direct_strings", "Copy directly referenced strings to clipboard", CopyDirectStringsHandler(), "Copy strings reached through at least one direct cross-reference")
+                register_popup_action(form, popup, copy_menu_path, "XRefer:copy_direct_indirect_strings", "Copy directly and indirectly referenced strings to clipboard", CopyDirectIndirectStringsHandler(), "Copy strings reached through direct or indirect cross-references")
+                register_popup_action(form, popup, copy_menu_path, "XRefer:copy_orphan_strings", "Copy orphan strings to clipboard", CopyOrphanStringsHandler(), "Copy strings with no resolved use site reachable from an entry point")
+                register_popup_action(form, popup, copy_menu_path, "XRefer:copy_uncategorized_strings", "Copy uncategorized strings to clipboard", CopyUncategorizedStringsHandler(), "Copy simple strings that carry no language-derived category")
 
         class RebaseHook(ida_idp.IDB_Hooks):
             def __init__(self, xrefer_view: "XReferView"):
@@ -892,7 +896,6 @@ class XReferView(idaapi.simplecustviewer_t):
             ord("E"): self.handle_key_e,
             ord("G"): self.handle_key_g,
             ord("H"): self.handle_key_h,
-            ord("I"): self.handle_key_i,
             ord("J"): self.handle_key_j,
             ord("L"): self.handle_key_l,
             ord("M"): self.handle_key_m,
@@ -1083,23 +1086,6 @@ class XReferView(idaapi.simplecustviewer_t):
             bool: True if help was displayed
         """
         return self.state_machine.start_help()
-
-    def handle_key_i(self, shift: bool) -> bool:
-        """
-        Handle 'i' key press for interesting artifacts view.
-        Now only handles toggling the interesting artifacts view on/off.
-
-        Args:
-            shift (bool): Whether shift key is pressed
-
-        Returns:
-            bool: True if state was changed
-        """
-        if self.state_machine.current_state == self.state_machine.base:
-            return self.state_machine.start_interesting_artifacts()
-        elif self.state_machine.current_state == self.state_machine.interesting_artifacts:
-            return self.state_machine.to_base()
-        return False
 
     def handle_key_j(self, shift: bool) -> bool:
         """
@@ -1533,7 +1519,6 @@ class XReferView(idaapi.simplecustviewer_t):
             self.state_machine.trace_scope_function,
             self.state_machine.trace_scope_path,
             self.state_machine.trace_scope_full,
-            self.state_machine.interesting_artifacts,
         ):
             return False
 
@@ -1884,99 +1869,6 @@ class XReferView(idaapi.simplecustviewer_t):
             for line in self.last_boundary_scan_results:
                 self.AddLine("    %s" % line)
 
-    def draw_interesting_artifacts(self) -> None:
-        """Draw interesting artifacts view with consistent alignment and headers."""
-        self.ClearLines()
-        self.print_ribbon()
-
-        interesting_indices = self.xrefer_obj.interesting_artifacts
-        if not interesting_indices:
-            self.AddLine("    NO INTERESTING ARTIFACTS FOUND")
-            return
-
-        # Group artifacts
-        func_artifacts, orphan_func_artifacts, orphan_artifacts = self.xrefer_obj._group_interesting_artifacts(interesting_indices)
-
-        # Calculate totals
-        total_artifacts = len(self.xrefer_obj.entities)
-        total_artifact_funcs = len(func_artifacts)
-
-        if self.xrefer_obj.settings["enable_exclusions"]:
-            total_flagged_artifacts = len(interesting_indices - self.xrefer_obj.excluded_entities)
-        else:
-            total_flagged_artifacts = len(interesting_indices)
-
-        # Draw main header with consistent indentation
-        header_indent = "    "
-        if total_artifact_funcs > 0:
-            color_num = ida_lines.SCOLOR_VOIDOP  # Define color code separately
-            header = (
-                f"INTERESTING FUNCTIONS DISCOVERED → "
-                f"{ida_lines.COLSTR(str(total_artifact_funcs), color_num)} "
-                f"(FLAGGED {ida_lines.COLSTR(str(total_flagged_artifacts), color_num)} "
-                f"OUT OF {ida_lines.COLSTR(str(total_artifacts), color_num)} "
-                f"ARTIFACTS)"
-            )
-        else:
-            header = "INTERESTING ARTIFACTS"
-        self.AddLine(f"{header_indent}{ida_lines.COLSTR(header, ida_lines.SCOLOR_DATNAME)}")
-
-        self.AddLine("")
-        self.print_llm_disclaimer(1)
-
-        # Draw main artifacts table with proper coloring
-        if func_artifacts:
-            rows = prepare_interesting_artifacts_table_rows(func_artifacts, self.xrefer_obj)
-            headings = ["Function Address", "Flagged Artifacts", "Function Name"]
-            table = create_interesting_artifacts_table(headings, rows, ida_lines.SCOLOR_DATNAME)
-
-            # Add padding for consistent indentation
-            for line in table:
-                if line.strip():  # Only add padding for non-empty lines
-                    self.AddLine(f"{header_indent}{line}")
-                else:
-                    self.AddLine("")  # Empty lines don't need padding
-        else:
-            self.AddLine(f"{header_indent}NO INTERESTING ARTIFACTS FOUND")
-
-        # Draw orphan sections with headers
-        self.AddLine("")
-        self.AddLine("")
-        orphan_header = "INTERESTING ORPHAN ARTIFACTS (WITH FUNCTIONS)"
-        self.AddLine(f"{header_indent}{ida_lines.COLSTR(orphan_header, ida_lines.SCOLOR_DATNAME)}")
-        self.AddLine("")
-
-        # Orphan description with consistent indentation
-        orphan_desc_lines = [
-            "=> Orphan references are those for which a path has not yet been discovered to",
-            "the entrypoint(s). Either they are connected to the entrypoint(s) via indirect",
-            "calls not obvious statically or a different entrypoint needs to be analyzed <=",
-        ]
-        for line in orphan_desc_lines:
-            self.AddLine(f"{header_indent}{ida_lines.COLSTR(line, ida_lines.SCOLOR_VOIDOP)}")
-        self.AddLine("")
-
-        # Draw orphan artifacts table with headers
-        if orphan_func_artifacts:
-            rows = prepare_interesting_artifacts_table_rows(orphan_func_artifacts, self.xrefer_obj)
-            headings = ["Function Address", "Flagged Artifacts", "Function Name"]
-            table = create_interesting_artifacts_table(headings, rows, ida_lines.SCOLOR_DATNAME)
-            for line in table:
-                self.AddLine(f"{header_indent}{line}")
-        else:
-            self.AddLine(f"{header_indent}NO INTERESTING ORPHAN FUNCTION ARTIFACTS FOUND")
-
-        # Draw completely orphaned artifacts section with header
-        self.AddLine("")
-        complete_orphan_header = "INTERESTING ORPHAN ARTIFACTS (NO FUNCTIONS)"
-        self.AddLine(f"{header_indent}{ida_lines.COLSTR(complete_orphan_header, ida_lines.SCOLOR_DATNAME)}")
-        self.AddLine(f"{header_indent}{ida_lines.COLSTR('-' * len(complete_orphan_header), ida_lines.SCOLOR_DATNAME)}")
-
-        if orphan_artifacts:
-            self._print_artifact_list(sorted(orphan_artifacts, key=lambda x: (x[0], x[1])))
-        else:
-            self.AddLine(f"{header_indent}NO INTERESTING COMPLETELY ORPHANED ARTIFACTS FOUND")
-
     def draw_orphans(self) -> None:
         """Draw the orphan-artifacts view.
 
@@ -2023,13 +1915,18 @@ class XReferView(idaapi.simplecustviewer_t):
             self.AddLine(f"{INDENT}NO ORPHAN ARTIFACTS FOUND")
             return
 
-        # Build and render one table per orphan type.
+        # Build and render the orphan tables. The merged imports+libraries
+        # table spans two entity types, so it is built specially; the rest
+        # map 1:1 to a single type.
         for table_name in self.orphan_table_names:
-            type_id = self._orphan_table_to_type[table_name]
-            indices = orphan_groups.get(type_id, [])
-            if not indices:
-                continue
-            built = self._build_orphan_table(table_name, type_id, indices)
+            if table_name == self.merged_orphan_name:
+                built = self._build_merged_orphan_table(orphan_groups)
+            else:
+                type_id = self._orphan_table_to_type[table_name]
+                indices = orphan_groups.get(type_id, [])
+                if not indices:
+                    continue
+                built = self._build_orphan_table(table_name, type_id, indices)
             if built is None:
                 continue
             self._draw_orphan_table(table_name, built)
@@ -2091,6 +1988,40 @@ class XReferView(idaapi.simplecustviewer_t):
 
         return {"heading": heading, "rows": per_group_rows}
 
+    def _build_merged_orphan_table(self, orphan_groups: Dict[int, List[int]]) -> Optional[Dict[str, Any]]:
+        """Build one orphan table combining orphan imports (type 2) and
+        orphan libraries (type 1), grouped by their shared category — the
+        same redundancy fix applied to the per-function indirect tables.
+
+        Each source type is built via :meth:`_build_orphan_table` so it
+        keeps its own row color (imports vs libraries); the per-category
+        rows are then concatenated (imports first). Returns None when
+        there are no orphan imports or libraries.
+        """
+        import_indices = orphan_groups.get(2, [])  # EntityType.IMPORT
+        lib_indices = orphan_groups.get(1, [])      # EntityType.LIBRARY
+        imp_built = self._build_orphan_table(self.merged_orphan_name, 2, import_indices) if import_indices else None
+        lib_built = self._build_orphan_table(self.merged_orphan_name, 1, lib_indices) if lib_indices else None
+        if imp_built is None and lib_built is None:
+            return None
+
+        merged_rows: "OrderedDict[str, List[str]]" = OrderedDict()
+        for built in (imp_built, lib_built):
+            if not built:
+                continue
+            for category, rows in built["rows"].items():
+                merged_rows.setdefault(category, []).extend(rows)
+
+        # Re-sort categories alphabetically: each source table sorted its
+        # own categories, but their union needs one consistent ordering.
+        sorted_rows: "OrderedDict[str, List[str]]" = OrderedDict()
+        for category in sorted(merged_rows.keys(), key=lambda s: s.lower()):
+            sorted_rows[category] = merged_rows[category]
+
+        self._align_merged_name_columns(sorted_rows)
+        heading = (imp_built or lib_built)["heading"]
+        return {"heading": heading, "rows": sorted_rows}
+
     def _draw_orphan_table(self, table_name: str, built: Dict[str, Any]) -> None:
         """Render a single orphan table honouring the top-level expand
         state in ``self.table_states[table_name]`` and the per-group
@@ -2129,25 +2060,6 @@ class XReferView(idaapi.simplecustviewer_t):
                 self.AddLine(ida_lines.COLSTR("    %s %s" % (ida_lines.COLSTR("(+)", ida_lines.SCOLOR_DATNAME), group_key), ida_lines.SCOLOR_ASMDIR))
 
         self.AddLine("")
-
-    def _print_artifact_list(self, artifacts: List[Tuple[int, str]]) -> None:
-        """
-        Print formatted list of artifacts with appropriate coloring.
-
-        Args:
-            artifacts: List of tuples containing (artifact_type, artifact_name)
-        """
-        type_to_color = {
-            1: self.xrefer_obj.color_tags[self.xrefer_obj.table_names[1]],  # Lib
-            2: self.xrefer_obj.color_tags[self.xrefer_obj.table_names[2]],  # API
-            3: self.xrefer_obj.color_tags[self.xrefer_obj.table_names[3]],  # String
-            4: self.xrefer_obj.color_tags[self.xrefer_obj.table_names[4]],  # Capa
-        }
-
-        for artifact_type, artifact_name in artifacts:
-            color = type_to_color[artifact_type]
-            colored_name = f"\x01{color}{artifact_name}\x02{color}"
-            self.AddLine(f"    {colored_name}")
 
     def draw_clusters(self) -> None:
         """Draw clusters view with comprehensive headers."""
@@ -2202,37 +2114,15 @@ class XReferView(idaapi.simplecustviewer_t):
         if isinstance(binary_cat, enum.Enum):
             binary_cat = binary_cat.name
 
-        # Choose between description or report based on toggle
-        if self.state_machine.cluster_manager.is_showing_report():
-            binary_desc = cluster_analysis.get("binary_report", "Not available")
-            desc_label = "Binary Report: "
-        else:
-            binary_desc = cluster_analysis.get("binary_description", "Not available")
-            desc_label = "Binary Description: "
-
         # Print category on one line
         self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_DNAME}Binary Category: \x02{ida_lines.SCOLOR_DNAME}\x01{ida_lines.SCOLOR_VOIDOP}{binary_cat}\x02{ida_lines.SCOLOR_VOIDOP}")
 
-        # Print description with proper wrapping
-        desc_label = "Binary Description: "
-        desc_offset = len(desc_label)  # Length of the description label
-        first_line_width = LINE_WIDTH - desc_offset  # Width for first line accounting for label
-
-        # Handle first line - should appear after the label
-        desc_lines = []
-        remaining_desc = binary_desc
-
-        # First line handling
-        self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_DNAME}{desc_label}\x02{ida_lines.SCOLOR_DNAME}\x01{ida_lines.SCOLOR_DSTR}{binary_desc[:first_line_width]}\x02{ida_lines.SCOLOR_DSTR}")
-
-        # Handle remaining lines
-        remaining_desc = binary_desc[first_line_width:]
-        desc_indent = INDENT
-
-        while remaining_desc:
-            chunk = remaining_desc[:LINE_WIDTH]
-            remaining_desc = remaining_desc[LINE_WIDTH:]
-            self.AddLine(f"{desc_indent}\x01{ida_lines.SCOLOR_DSTR}{chunk}\x02{ida_lines.SCOLOR_DSTR}")
+        # Report (markdown) or plain description, per the R toggle
+        showing_report = self.state_machine.cluster_manager.is_showing_report()
+        binary_desc = cluster_analysis.get(
+            "binary_report" if showing_report else "binary_description", "Not available"
+        )
+        self._emit_binary_summary_body(binary_desc, showing_report, INDENT, LINE_WIDTH)
 
         self.AddLine(f"{INDENT}(Press R to toggle between binary description and report)")
         self.AddLine("")
@@ -2251,6 +2141,39 @@ class XReferView(idaapi.simplecustviewer_t):
 
         self.Jump(0, 0)
         self.Refresh()
+
+    def _emit_binary_summary_body(self, binary_desc: str, showing_report: bool, indent: str, line_width: int) -> None:
+        """Emit the binary report (markdown) or plain description.
+
+        When the R-toggle is on the report view, ``binary_desc`` is the
+        LLM's markdown ``binary_report``; it is rendered through the
+        bare-bones markdown renderer (headings, bullets, bold/code) so
+        it reads as structured text instead of an unbroken blob. If
+        rendering raises for any reason, fall back to plain word-wrap so
+        the view never breaks. The plain ``binary_description`` keeps the
+        established label-inline style.
+        """
+        if showing_report:
+            self.AddLine(f"{indent}\x01{ida_lines.SCOLOR_DNAME}Binary Report:\x02{ida_lines.SCOLOR_DNAME}")
+            self.AddLine("")
+            try:
+                for line in render_markdown_report_lines(binary_desc, line_width, indent):
+                    self.AddLine(line)
+                return
+            except Exception as e:
+                log(f"[-] Report markdown render failed; showing plain text: {str(e)}")
+                for wrapped in word_wrap_text(binary_desc, line_width):
+                    self.AddLine(f"{indent}\x01{ida_lines.SCOLOR_DSTR}{wrapped}\x02{ida_lines.SCOLOR_DSTR}")
+                return
+
+        desc_label = "Binary Description: "
+        first_line_width = line_width - len(desc_label)
+        self.AddLine(f"{indent}\x01{ida_lines.SCOLOR_DNAME}{desc_label}\x02{ida_lines.SCOLOR_DNAME}\x01{ida_lines.SCOLOR_DSTR}{binary_desc[:first_line_width]}\x02{ida_lines.SCOLOR_DSTR}")
+        remaining = binary_desc[first_line_width:]
+        while remaining:
+            chunk = remaining[:line_width]
+            remaining = remaining[line_width:]
+            self.AddLine(f"{indent}\x01{ida_lines.SCOLOR_DSTR}{chunk}\x02{ida_lines.SCOLOR_DSTR}")
 
     def _get_intermediate_paths_containing_function(self, func_ea: int, scope_cluster_id: Optional[int] = None) -> List[Tuple[int, List[int], int]]:
         """
@@ -2751,30 +2674,16 @@ class XReferView(idaapi.simplecustviewer_t):
         if isinstance(binary_cat, enum.Enum):
             binary_cat = str(binary_cat.name)
 
-        # Choose between description or report based on toggle
-        if self.state_machine.cluster_manager.is_showing_report():
-            binary_desc = cluster_analysis.get("binary_report", "Not available")
-            desc_label = "Binary Report: "
-        else:
-            binary_desc = cluster_analysis.get("binary_description", "Not available")
-            desc_label = "Binary Description: "
-
         # Print category with special highlighting for important classifications
         cat_color = ida_lines.SCOLOR_VOIDOP
         self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_DNAME}Binary Category: \x02{ida_lines.SCOLOR_DNAME}\x01{cat_color}{binary_cat}\x02{cat_color}")
 
-        # Print wrapped description
-        desc_label = "Binary Description: "
-        desc_offset = len(desc_label)
-        first_line_width = LINE_WIDTH - desc_offset
-
-        self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_DNAME}{desc_label}\x02{ida_lines.SCOLOR_DNAME}\x01{ida_lines.SCOLOR_DSTR}{binary_desc[:first_line_width]}\x02{ida_lines.SCOLOR_DSTR}")
-
-        remaining_desc = binary_desc[first_line_width:]
-        while remaining_desc:
-            chunk = remaining_desc[:LINE_WIDTH]
-            remaining_desc = remaining_desc[LINE_WIDTH:]
-            self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_DSTR}{chunk}\x02{ida_lines.SCOLOR_DSTR}")
+        # Report (markdown) or plain description, per the R toggle
+        showing_report = self.state_machine.cluster_manager.is_showing_report()
+        binary_desc = cluster_analysis.get(
+            "binary_report" if showing_report else "binary_description", "Not available"
+        )
+        self._emit_binary_summary_body(binary_desc, showing_report, INDENT, LINE_WIDTH)
 
         self.AddLine(f"{INDENT}(Press R to toggle between binary description and report)")
         self.AddLine("")
@@ -4408,9 +4317,6 @@ class XReferView(idaapi.simplecustviewer_t):
         elif current_state == self.state_machine.search:
             # Search shows current filter text
             content = f"[ search ]: {self.state_machine.search_filter}"
-        elif current_state == self.state_machine.interesting_artifacts:
-            # Added handling for interesting_artifacts
-            content = f"[ interesting artifacts ]{esc_str}{h_str}"
         elif current_state == self.state_machine.clusters:
             # Added handling for clusters state (cluster table view)
             content = f"[ clusters ]{esc_str}{h_str}"
@@ -4587,7 +4493,6 @@ class XReferView(idaapi.simplecustviewer_t):
             self.state_machine.pinned_simplified_graph: self.draw_paths_graph,
             self.state_machine.boundary_results: self.draw_boundary_scan_results,
             self.state_machine.last_boundary_results: self.draw_last_boundary_scan_results,
-            self.state_machine.interesting_artifacts: self.draw_interesting_artifacts,
             self.state_machine.orphans: self.draw_orphans,
             self.state_machine.clusters: self.draw_clusters,
             self.state_machine.cluster_graphs: self.draw_cluster_graph,
@@ -4603,7 +4508,32 @@ class XReferView(idaapi.simplecustviewer_t):
 
         # Get appropriate handler or use default table context
         state_handler = state_actions.get(self.state_machine.current_state, self.handle_table_context)
-        state_handler()
+
+        # Graph rendering (artifact path graphs via G, cluster graphs,
+        # neighborhood graphs) can be slow for large/complex graphs —
+        # the ASCII layout especially. Put up IDA's wait box so the user
+        # gets "Generating graph..." feedback instead of a seemingly
+        # frozen UI. Simple graphs render instantly and the box just
+        # flashes. This is all synchronous on the main thread, so the
+        # show/hide pair is safe (unlike background-thread wait-box use).
+        graph_states = {
+            self.state_machine.graph,
+            self.state_machine.simplified_graph,
+            self.state_machine.pinned_graph,
+            self.state_machine.pinned_simplified_graph,
+            self.state_machine.cluster_graphs,
+            self.state_machine.pinned_cluster_graphs,
+            self.state_machine.neighborhood_graph,
+            self.state_machine.pinned_neighborhood_graph,
+        }
+        if self.state_machine.current_state in graph_states:
+            idaapi.show_wait_box("HIDECANCEL\nGenerating graph...")
+            try:
+                state_handler()
+            finally:
+                idaapi.hide_wait_box()
+        else:
+            state_handler()
 
         # Auto-resize if in appropriate state
         self.auto_resize_for_graph_content()
@@ -4713,6 +4643,76 @@ class XReferView(idaapi.simplecustviewer_t):
             else:
                 self.handle_no_context_available()
 
+    def _align_merged_name_columns(self, rows_by_category: "OrderedDict[str, List[str]]") -> None:
+        """Normalise the name-column width across a merged xref table so
+        import and library addresses line up.
+
+        Imports and libraries are tabulated as separate tables, each
+        sizing its first (name) column to its own longest entry, so when
+        their rows share a category the address columns start at
+        different offsets. Each colored row has the shape
+        ``\\x01<tag><name+padding>\\x02<tag><addresses>``; this re-pads
+        the narrower rows' name column in place to the widest one across
+        the whole merged table, so the addresses align. (Sub-columns of
+        multi-address rows keep whatever spacing their source table gave
+        them.)
+        """
+        def name_col_width(row: str) -> int:
+            if len(row) < 3 or row[0] != "\x01":
+                return -1
+            end = row.find("\x02", 2)
+            return end - 2 if end >= 0 else -1
+
+        widths = [w for rows in rows_by_category.values() for w in map(name_col_width, rows) if w >= 0]
+        if not widths:
+            return
+        target = max(widths)
+        for rows in rows_by_category.values():
+            for i, row in enumerate(rows):
+                w = name_col_width(row)
+                if 0 <= w < target:
+                    end = row.find("\x02", 2)
+                    rows[i] = row[:end] + (" " * (target - w)) + row[end:]
+
+    def _merge_indirect_tables(self, func_ea: int) -> None:
+        """Collapse the separate INDIRECT IMPORT XREFS and INDIRECT
+        LIBRARY XREFS tables into one merged table.
+
+        Both are grouped by the same Categorizer categories, so showing
+        them separately repeats every category header. This concatenates
+        each category's rows (imports first, then libraries) and
+        relabels the heading, leaving ``core``/``table_data`` generation
+        untouched. Imports vs libraries stay distinguishable by their
+        existing row colors. Idempotent — safe to call repeatedly.
+        """
+        td = self.xrefer_obj.table_data.get(func_ea)
+        if td is None or self.merged_indirect_name in td:
+            return
+
+        import_name = self.xrefer_obj.table_names[2]
+        lib_name = self.xrefer_obj.table_names[1]
+        imp_tbl = td.pop(import_name, None)
+        lib_tbl = td.pop(lib_name, None)
+
+        merged_rows: "OrderedDict[str, List[str]]" = OrderedDict()
+        for tbl in (imp_tbl, lib_tbl):
+            if not tbl:
+                continue
+            for category, rows in tbl.get("rows", {}).items():
+                if rows:
+                    merged_rows.setdefault(category, []).extend(rows)
+
+        # Reuse a source heading's exact formatting, relabeled to the
+        # merged name (prefer imports' heading; fall back to libraries').
+        heading: List[str] = []
+        for tbl, src_name in ((imp_tbl, import_name), (lib_tbl, lib_name)):
+            if tbl and tbl.get("heading"):
+                heading = [line.replace(src_name, self.merged_indirect_name) for line in tbl["heading"]]
+                break
+
+        self._align_merged_name_columns(merged_rows)
+        td[self.merged_indirect_name] = {"heading": heading, "rows": merged_rows}
+
     def draw_function_context_tables(self, func_ea: int) -> bool:
         """
         Draw all relevant tables for a function.
@@ -4727,6 +4727,12 @@ class XReferView(idaapi.simplecustviewer_t):
         if func_ea not in self.xref_coverage_dict:
             self.xref_coverage_dict[func_ea] = self.generate_xref_coverage_dict(func_ea)
 
+        # Ensure the per-function tables exist, then collapse the indirect
+        # import/library pair into one merged table before rendering.
+        if func_ea not in self.xrefer_obj.table_data:
+            self.xrefer_obj.table_data[func_ea] = self.xrefer_obj.create_sorted_table(func_ea)
+        self._merge_indirect_tables(func_ea)
+
         for table_index in range(self.table_count):
             table_start_index: int = (table_index + self.table_index_offset) % self.table_count
             table_name: str = self.table_names[table_start_index]
@@ -4734,6 +4740,7 @@ class XReferView(idaapi.simplecustviewer_t):
                 table_data = self.xrefer_obj.table_data[func_ea][table_name]
             except KeyError:
                 self.xrefer_obj.table_data[func_ea] = self.xrefer_obj.create_sorted_table(func_ea)
+                self._merge_indirect_tables(func_ea)
                 table_data = self.xrefer_obj.table_data[func_ea][table_name]
 
             if table_data:

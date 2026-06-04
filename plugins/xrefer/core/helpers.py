@@ -392,6 +392,197 @@ def word_wrap_text(text: str, width: int) -> List[str]:
     return lines
 
 
+# MARKDOWN RENDERING (bare-bones, IDA-free)
+#
+# The ``binary_report`` produced by the LLM is a constrained markdown
+# subset: ``##``/``###``/``####`` ATX headings, ``-``/``*`` and ``N.``
+# lists, ``**bold**`` and ``code`` inline spans, and blank-line
+# separated paragraphs (see llm/dspy_modules.py:BinaryReport). This
+# renderer turns that markdown into a flat list of "segment lines" --
+# each line is a list of ``(style, text)`` tuples -- so a frontend (the
+# IDA custom viewer) can map styles to its own coloring without
+# re-parsing. Pure Python: no IDA, no third-party deps.
+
+_MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
+_MD_BULLET_RE = re.compile(r"^(\s*)[-*]\s+(.*)$")
+_MD_ORDERED_RE = re.compile(r"^(\s*)(\d+)\.\s+(.*)$")
+_MD_HRULE_RE = re.compile(r"^\s*([-*_])(?:\s*\1){2,}\s*$")
+_MD_INLINE_RE = re.compile(r"\*\*.+?\*\*|`[^`]+`")
+
+# Style vocabulary emitted by render_markdown_segments(); a frontend
+# maps each of these to its own styling. An empty segment line ([])
+# denotes a blank line.
+MD_STYLES = ("plain", "bold", "code", "h2", "h3", "h4", "bullet", "rule")
+
+
+def _strip_inline_markers(text: str) -> str:
+    """Drop inline ``**`` and `````` markers, keeping the inner text."""
+    return text.replace("**", "").replace("`", "")
+
+
+def _parse_inline_markdown(text: str) -> List[Tuple[str, str]]:
+    """Split a run of text into ``(style, text)`` segments, recognising
+    ``**bold**`` and ``code`` spans. Unmatched markers stay plain."""
+    segments: List[Tuple[str, str]] = []
+    pos = 0
+    for m in _MD_INLINE_RE.finditer(text):
+        if m.start() > pos:
+            segments.append(("plain", text[pos:m.start()]))
+        token = m.group(0)
+        if token.startswith("**"):
+            segments.append(("bold", token[2:-2]))
+        else:
+            segments.append(("code", token[1:-1]))
+        pos = m.end()
+    if pos < len(text):
+        segments.append(("plain", text[pos:]))
+    return segments
+
+
+def _wrap_styled_segments(segments: List[Tuple[str, str]], width: int) -> List[List[Tuple[str, str]]]:
+    """Greedy word-wrap styled segments to ``width`` visible columns.
+    Returns a list of lines, each a list of ``(style, text)`` segments
+    with single-space ``("plain", " ")`` separators between words."""
+    words: List[Tuple[str, str]] = []
+    for style, txt in segments:
+        for word in txt.split():
+            words.append((style, word))
+    if not words:
+        return [[("plain", "")]]
+
+    lines: List[List[Tuple[str, str]]] = []
+    cur: List[Tuple[str, str]] = []
+    cur_len = 0
+    for style, word in words:
+        wlen = len(word)
+        if cur and cur_len + 1 + wlen > width:
+            lines.append(cur)
+            cur, cur_len = [], 0
+        if cur:
+            cur.append(("plain", " "))
+            cur_len += 1
+        cur.append((style, word))
+        cur_len += wlen
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def render_markdown_segments(md: str, width: int = 80) -> List[List[Tuple[str, str]]]:
+    """Render the ``binary_report`` markdown subset into styled segment
+    lines.
+
+    Each output line is a list of ``(style, text)`` tuples where style
+    is one of :data:`MD_STYLES`; an empty list denotes a blank line.
+    ``width`` controls word-wrapping of paragraphs and list items. No
+    IDA dependency -- the frontend maps styles to colors.
+    """
+    if not md or not md.strip():
+        return []
+    width = max(20, int(width))
+    src = md.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    out: List[List[Tuple[str, str]]] = []
+
+    def emit_blank() -> None:
+        # Collapse runs of blank lines into a single separator.
+        if out and out[-1] != []:
+            out.append([])
+
+    i, n = 0, len(src)
+    while i < n:
+        line = src[i].rstrip()
+        if not line.strip():
+            emit_blank()
+            i += 1
+            continue
+
+        if _MD_HRULE_RE.match(line):
+            out.append([("rule", "─" * width)])
+            i += 1
+            continue
+
+        hm = _MD_HEADING_RE.match(line)
+        if hm:
+            level = len(hm.group(1))
+            style = "h2" if level <= 2 else ("h3" if level == 3 else "h4")
+            text = _strip_inline_markers(hm.group(2))
+            out.extend(_wrap_styled_segments([(style, text)], width))
+            if level <= 2:
+                # Underline h1/h2 section headers for a clear visual break.
+                out.append([("h2", "─" * min(width, len(text)))])
+            i += 1
+            continue
+
+        bm = _MD_BULLET_RE.match(line)
+        om = _MD_ORDERED_RE.match(line) if not bm else None
+        if bm or om:
+            if bm:
+                indent_spaces = len(bm.group(1))
+                glyph = "• "
+                content = bm.group(2)
+            else:
+                indent_spaces = len(om.group(1))
+                glyph = f"{om.group(2)}. "
+                content = om.group(3)
+            depth = indent_spaces // 2
+            lead = "  " * depth
+            hang = len(lead) + len(glyph)
+            wrapped = _wrap_styled_segments(_parse_inline_markdown(content), max(10, width - hang))
+            for idx, wl in enumerate(wrapped):
+                if idx == 0:
+                    out.append([("plain", lead), ("bullet", glyph)] + wl)
+                else:
+                    out.append([("plain", " " * hang)] + wl)
+            i += 1
+            continue
+
+        # Paragraph: gather consecutive non-blank, non-block lines and
+        # re-wrap them as one flowing block.
+        para = [line]
+        i += 1
+        while i < n:
+            nxt = src[i].rstrip()
+            if (not nxt.strip()
+                    or _MD_HEADING_RE.match(nxt)
+                    or _MD_BULLET_RE.match(nxt)
+                    or _MD_ORDERED_RE.match(nxt)
+                    or _MD_HRULE_RE.match(nxt)):
+                break
+            para.append(nxt)
+            i += 1
+        out.extend(_wrap_styled_segments(_parse_inline_markdown(" ".join(para)), width))
+
+    # Trim leading/trailing blank separators.
+    while out and out[0] == []:
+        out.pop(0)
+    while out and out[-1] == []:
+        out.pop()
+    return out
+
+
+# Cluster citations like ``[c5]`` / ``[c4, c6]`` / ``[c2, c4, c5]`` are
+# emitted in the binary_report for the HTML renderer, where they link to
+# clusters. In the plain IDA viewer they are noise, so strip them before
+# rendering. See llm/dspy_modules.py for the citation token spec.
+_CLUSTER_CITATION_RE = re.compile(r"\s*\[\s*c\d+(?:\s*,\s*c\d+)*\s*\]", re.IGNORECASE)
+
+
+def strip_cluster_citations(text: str) -> str:
+    """Remove cluster-citation tokens (``[c5]``, ``[c4, c6]``,
+    ``[c2, c4, c5]``) from report text.
+
+    These citations are only meaningful in the HTML report, where they
+    resolve to cluster links; in the plain IDA custom viewer they add
+    noise, so they are stripped before markdown rendering. A single
+    space immediately preceding a citation is consumed too, so
+    ``"... survives reboot [c1, c91]."`` renders as
+    ``"... survives reboot."``.
+    """
+    if not text:
+        return text
+    return _CLUSTER_CITATION_RE.sub("", text)
+
+
 # COLOR CODE AND DISPLAY UTILITIES
 
 

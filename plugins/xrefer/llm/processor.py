@@ -28,7 +28,7 @@ import httpx
 
 from xrefer.core.helpers import check_internet_connectivity, log
 from xrefer.llm.base import ModelConfig, PromptType
-from xrefer.llm.dspy_modules import ArtifactAnalysisResponse, ArtifactAnalyzerModule, BinarySynthesisResponse, BinarySynthesizerModule, CategorizationResponse, CategorizerModule, ClusterAnalysisResponse, ClusterAnalyzerModule
+from xrefer.llm.dspy_modules import BinarySynthesisResponse, BinarySynthesizerModule, CategorizationResponse, CategorizerModule, ClusterAnalysisResponse, ClusterAnalyzerModule
 
 
 # Tracks whether the LiteLLM success callback below has been
@@ -44,9 +44,9 @@ def _log_llm_io(kwargs, completion_response, start_time, end_time) -> None:
 
     Logs provider-reported prompt and completion token counts so the
     analyst can see exactly how many tokens each call consumed —
-    regardless of which prompt type (categorizer, artifact_analyzer,
-    cluster_analyzer, binary_synthesizer, or any future addition)
-    originated the call. The counts come from the provider's own
+    regardless of which prompt type (categorizer, cluster_analyzer,
+    binary_synthesizer, or any future addition) originated the call.
+    The counts come from the provider's own
     response.usage block, so they're authoritative (not a local
     tokenizer estimate).
 
@@ -213,6 +213,14 @@ class LLMProcessor:
             lm_kwargs["temperature"] = 1.0
             lm_kwargs["max_tokens"] = 16000
 
+        # ── Model catalog info (best-effort) ─────────────────────────
+        # Reused for both the output-token cap and the Anthropic 1M
+        # beta-header decision below. Empty dict for unknown/custom ids.
+        try:
+            info = litellm.get_model_info(config.model_id)
+        except Exception:
+            info = {}
+
         # ── Max output tokens, from the model's own declared cap ─────
         # OpenAI reasoning branch already set this above. For other
         # models, read the catalog's declared output cap so a Gemini
@@ -221,12 +229,28 @@ class LLMProcessor:
         # unset (provider default applies) if the lookup fails.
         if "max_tokens" not in lm_kwargs:
             try:
-                info = litellm.get_model_info(config.model_id)
                 cap = info.get("max_output_tokens") or info.get("max_tokens")
                 if cap:
                     lm_kwargs["max_tokens"] = int(cap)
             except Exception:
                 pass
+
+        # ── Anthropic 1M context window (beta-gated) ─────────────────
+        # Claude's 1M input window requires the request to carry the
+        # `anthropic-beta: context-1m-2025-08-07` header AND an API key
+        # at tier 4+. litellm forwards anthropic-beta values passed via
+        # extra_headers but does NOT auto-add this one, so we send it
+        # ourselves — only for Anthropic models whose catalog entry
+        # actually advertises >=1M input. That avoids attaching it to a
+        # 200k Claude (Anthropic would 400) or to a non-Anthropic
+        # provider. Tier 4+ stays the user's responsibility; a lower-
+        # tier key is rejected by Anthropic for 1M requests.
+        try:
+            if (info.get("litellm_provider") == "anthropic"
+                    and int(info.get("max_input_tokens") or 0) >= 1_000_000):
+                lm_kwargs["extra_headers"] = {"anthropic-beta": "context-1m-2025-08-07"}
+        except Exception:
+            pass
 
         return lm_kwargs
 
@@ -242,9 +266,9 @@ class LLMProcessor:
         self.lm = dspy.LM(**self._lm_kwargs)
         dspy.settings.configure(lm=self.lm)
         # Lazy registration of the LiteLLM success callback so every
-        # subsequent LLM call (categorizer, artifact_analyzer,
-        # cluster_analyzer, binary_synthesizer, the API-key validation
-        # call, anything else) logs its provider-reported prompt and
+        # subsequent LLM call (categorizer, cluster_analyzer,
+        # binary_synthesizer, the API-key validation call, anything
+        # else) logs its provider-reported prompt and
         # response token counts.
         _ensure_llm_io_callback_registered()
 
@@ -303,18 +327,6 @@ class LLMProcessor:
             log(f"API validation failed: {e}")
             return False
 
-    def _create_artifacts_dict(self, items: List[Dict[str, Any]]) -> Dict[str, Dict[int, str]]:
-        """Convert artifacts list to structured dict."""
-        artifacts = {"Strings": {}, "APIs": {}, "CAPA": {}, "Libraries": {}}
-        type_map = {"string": "Strings", "api": "APIs", "capa": "CAPA", "lib": "Libraries"}
-
-        for item in items:
-            category = type_map.get(item["type"])
-            if category:
-                artifacts[category][item["index"]] = item["content"]
-
-        return artifacts
-
     def _process_single(self, items: List[Any], prompt_type: PromptType, config: Optional[ProcessConfig]=None) -> Dict[str, Any]:
         """
         Process items using DSPy module.
@@ -323,10 +335,6 @@ class LLMProcessor:
             if prompt_type == PromptType.CATEGORIZER:
                 response: "CategorizationResponse" = CategorizerModule()(items=items, categories=config.categories, item_type=config.item_type)
                 return response.model_dump()
-            elif prompt_type == PromptType.ARTIFACT_ANALYZER:
-                artifacts = self._create_artifacts_dict(items)
-                response: "ArtifactAnalysisResponse" = ArtifactAnalyzerModule()(artifacts=artifacts)
-                return set(response.interesting_indexes)
             elif prompt_type == PromptType.CLUSTER_ANALYZER:
                 response: "ClusterAnalysisResponse" = ClusterAnalyzerModule()(cluster_data=items[0])
                 return response.model_dump()
@@ -346,8 +354,6 @@ You can:
             # Return empty result instead of raising - let caller handle gracefully
             if prompt_type == PromptType.CATEGORIZER:
                 return {}
-            elif prompt_type == PromptType.ARTIFACT_ANALYZER:
-                return set()
             elif prompt_type == PromptType.CLUSTER_ANALYZER:
                 return {}
             elif prompt_type == PromptType.BINARY_SYNTHESIZER:
