@@ -1,0 +1,12 @@
+This directory vendors `ascii_graphs`: a pure-Python, 1:1 port of the
+`ascii-graphs` Scala library (https://github.com/mdr/ascii-graphs, MIT) — the
+rendering engine that previously reached xrefer via `asciinet` + a JVM.
+
+It is bundled here so xrefer renders ASCII graphs with no Java dependency.
+
+  * Canonical source / tests: the ascii-graphs-py repository.
+  * Internal imports are namespaced to `xrefer._vendor.ascii_graphs`.
+  * Treat as read-only: do not refactor in place — re-sync from the canonical
+    repo instead. Excluded from xrefer's ruff/coverage gates by design (the code
+    deliberately mirrors the Scala structure to stay byte-exact).
+  * License: MIT (see the canonical repo's LICENSE).

@@ -20,7 +20,6 @@ import weakref
 from collections import OrderedDict, defaultdict
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
-import asciinet
 import ida_bytes
 import ida_funcs
 import ida_idaapi
@@ -34,6 +33,7 @@ import idc
 import networkx as nx
 from qtpy import QtCore, QtGui, QtWidgets
 
+from xrefer._vendor import ascii_graphs
 from xrefer.core.analyzer import ApiCall, XRefer
 from xrefer.core.helpers import (find_cluster_analysis, get_addr_from_text, longest_line_length, parse_cluster_id, remove_non_displayable, strip_color_codes,
                                  wrap_substring_with_string)
@@ -2544,9 +2544,9 @@ class XReferView(idaapi.simplecustviewer_t):
         try:
             # Generate ASCII graph
             if len(graph.nodes()) == 1:
-                graph_lines = ["", "", *asciinet.graph_to_ascii(graph).splitlines(), "", ""]
+                graph_lines = ["", "", *ascii_graphs.graph_to_ascii(graph).splitlines(), "", ""]
             else:
-                graph_lines = asciinet.graph_to_ascii(graph).splitlines()
+                graph_lines = ascii_graphs.graph_to_ascii(graph).splitlines()
 
             normal_count = sum(1 for info in node_classifications.values() if info["type"] == "normal")
             intermediate_count = sum(1 for info in node_classifications.values() if info["type"] == "intermediate")
@@ -2798,9 +2798,9 @@ class XReferView(idaapi.simplecustviewer_t):
             try:
                 # For single node case, add some padding to make it visible
                 if len(graph.nodes()) == 1:
-                    graph_lines = ["", "", *asciinet.graph_to_ascii(graph).splitlines(), "", ""]
+                    graph_lines = ["", "", *ascii_graphs.graph_to_ascii(graph).splitlines(), "", ""]
                 else:
-                    graph_lines = asciinet.graph_to_ascii(graph).splitlines()
+                    graph_lines = ascii_graphs.graph_to_ascii(graph).splitlines()
 
                 for line in graph_lines:
                     colored_line = self._format_cluster_graph_line(line)
@@ -4134,7 +4134,7 @@ class XReferView(idaapi.simplecustviewer_t):
 
         try:
             # Convert to ASCII and display
-            graph_lines = asciinet.graph_to_ascii(graph).splitlines()
+            graph_lines = ascii_graphs.graph_to_ascii(graph).splitlines()
             highlighted_position = None
 
             for i, line in enumerate(graph_lines):
@@ -5264,7 +5264,7 @@ class XReferView(idaapi.simplecustviewer_t):
                     mapping = {node: new_label for node, new_label in func_nodes}
                     graph = nx.relabel_nodes(graph, mapping, copy=True)
 
-                _graph = asciinet.graph_to_ascii(graph).splitlines()
+                _graph = ascii_graphs.graph_to_ascii(graph).splitlines()
                 self.xrefer_obj.graph_cache[cache_key] = (_graph, num_original_nodes, num_simplified_nodes)
             except:
                 self.state_machine.go_back()
@@ -5496,7 +5496,7 @@ class XReferView(idaapi.simplecustviewer_t):
             add_gateway(cid, gateway_ea, header, direction)
 
         try:
-            graph_lines = asciinet.graph_to_ascii(graph).splitlines()
+            graph_lines = ascii_graphs.graph_to_ascii(graph).splitlines()
         except Exception as e:
             log(f"[-] Error rendering neighborhood graph: {e}")
             self.AddLine(

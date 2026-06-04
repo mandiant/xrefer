@@ -9,14 +9,19 @@ version = "2.0.0.20251030"
 description = "FLARE Team's Binary Navigator"
 requires-python = ">=3.11"
 dependencies = [
-    "asciinet>=0.3.1",
+    # Pure-Python ASCII graph renderer (replaces asciinet/JVM) is now
+    # vendored at plugins/xrefer/_vendor/ascii_graphs/ — no external
+    # dependency needed; the package ships with the plugin tree.
     "beautifulsoup4>=4.13.4",
     "dspy>=3.0.3",
     "flare-capa",
+    "httpx",                   # imported directly in llm/processor.py (was transitive via dspy)
+    "litellm",                 # imported directly in llm/* and core/analyzer.py (was transitive via dspy)
     "networkx>=3.5",
     "pydantic>=2.11.7",
     "pydantic-settings>=2.10.1",
     "python-statemachine>=2.5.0",
+    "qtpy",                    # imported directly in gui/* and core/analyzer.py (Qt abstraction)
     "requests>=2.32.4",
     "tabulate>=0.9.0",
 ]
@@ -102,6 +107,11 @@ filterwarnings = [
 
 [tool.ruff]
 line-length = 200
+# Vendored pure-Python port of the Scala `ascii-graphs` library. Its
+# deliberately un-Pythonic, byte-exact structure (1:1 port matched
+# against the JVM original across 2k+ real xrefer graphs) must not be
+# auto-"fixed" by ruff/isort/pyupgrade — exclude the whole tree.
+extend-exclude = ["plugins/xrefer/_vendor"]
 
 [tool.ruff.lint]
 select = [
@@ -167,3 +177,5 @@ line_length = 200
 
 [tool.coverage.run]
 parallel = true
+# Vendored byte-exact port — not our code, no value in coverage stats.
+omit = ["plugins/xrefer/_vendor/*"]

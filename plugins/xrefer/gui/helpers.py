@@ -19,7 +19,6 @@ from functools import wraps
 from time import time
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
-import asciinet
 import ida_bytes
 import ida_idp
 import ida_kernwin
@@ -1542,34 +1541,14 @@ def make_string(ea: int, size: int, undefine_first: bool = True) -> bool:
 
 
 def patch_asciinet() -> None:
+    """No-op retained for backwards compatibility.
+
+    This previously wrapped asciinet's JVM-backed ``graph_to_ascii`` to
+    normalise its bytes/str output for IDA's text display. ASCII rendering now
+    uses the pure-Python ``ascii_graphs.graph_to_ascii``, which already returns
+    a ``str``, so no monkey-patching is required.
     """
-    Patch asciinet library for proper UTF-8 handling.
-
-    Wraps original asciinet functions to ensure proper encoding/decoding
-    of graph output for IDA's text display.
-    """
-    original_graph_to_ascii = asciinet.graph_to_ascii
-    original_AsciiGraphProxy_graph_to_ascii = asciinet._AsciiGraphProxy.graph_to_ascii
-
-    @wraps(original_graph_to_ascii)
-    def patched_graph_to_ascii(graph, timeout=10):
-        result = original_graph_to_ascii(graph, timeout)
-        if isinstance(result, bytes):
-            return result.decode(encoding="UTF-8")
-        return result
-
-    @wraps(original_AsciiGraphProxy_graph_to_ascii)
-    def patched_AsciiGraphProxy_graph_to_ascii(self, graph, timeout=10):
-        result = original_AsciiGraphProxy_graph_to_ascii(self, graph, timeout)
-        if isinstance(result, bytes):
-            return result
-        elif isinstance(result, str):
-            return result.encode("UTF-8")
-        else:
-            raise TypeError(f"Unexpected type returned: {type(result)}")
-
-    asciinet.graph_to_ascii = patched_graph_to_ascii
-    asciinet._AsciiGraphProxy.graph_to_ascii = patched_AsciiGraphProxy_graph_to_ascii
+    return None
 
 
 def help_text() -> List[str]:
