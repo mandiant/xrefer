@@ -34,8 +34,6 @@ class XReferPlugin(idaapi.plugin_t):
         wanted_name (str): Display name of the plugin in IDA.
         wanted_hotkey (str): Default hotkey to activate the plugin.
         xrefer_view (Optional[XReferView]): The plugin's main view instance.
-        version (str): Plugin version number, sourced from ``xrefer.__version__``
-            (the single source of truth — see ``plugins/xrefer/__init__.py``).
     """
 
     flags: int = idaapi.PLUGIN_KEEP
@@ -45,7 +43,6 @@ class XReferPlugin(idaapi.plugin_t):
     def __init__(self):
         """Initialize plugin with empty view."""
         self.xrefer_view = None
-        self.version = __version__
 
     def init(self) -> int:
         """
@@ -101,7 +98,7 @@ class XReferPlugin(idaapi.plugin_t):
         Args:
             arg (int): IDA argument value (unused).
         """
-        log(f"Binary Navigator v{self.version} is loaded. Browse to Edit -> XRefer.")
+        log(f"Binary Navigator v{__version__} is loaded. Browse to Edit -> XRefer.")
 
 
 class ContextHooks(idaapi.UI_Hooks):
