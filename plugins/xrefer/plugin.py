@@ -16,6 +16,7 @@ from typing import Optional
 
 import idaapi
 
+from xrefer import __version__
 from xrefer.gui.action_handlers import *
 from xrefer.gui.helpers import *
 from xrefer.gui.view import XReferView
@@ -33,7 +34,8 @@ class XReferPlugin(idaapi.plugin_t):
         wanted_name (str): Display name of the plugin in IDA.
         wanted_hotkey (str): Default hotkey to activate the plugin.
         xrefer_view (Optional[XReferView]): The plugin's main view instance.
-        version (float): Plugin version number.
+        version (str): Plugin version number, sourced from ``xrefer.__version__``
+            (the single source of truth — see ``plugins/xrefer/__init__.py``).
     """
 
     flags: int = idaapi.PLUGIN_KEEP
@@ -43,7 +45,7 @@ class XReferPlugin(idaapi.plugin_t):
     def __init__(self):
         """Initialize plugin with empty view."""
         self.xrefer_view = None
-        self.version = 1.0
+        self.version = __version__
 
     def init(self) -> int:
         """

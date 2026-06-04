@@ -17,7 +17,13 @@
 # The previous subprocess.Popen patch existed only to suppress the Java console
 # window when asciinet spawned a JVM server; with no JVM it is no longer needed.
 
-__version__ = "2.2025-10-30"
+# ``__version__`` lives in a sibling module with zero imports so
+# setuptools' AST-based ``attr:`` reader can resolve it at build time
+# without importing the whole package. To bump the release version,
+# edit ``plugins/xrefer/_version.py`` — that is the single source of
+# truth. See pyproject.toml's ``[tool.setuptools.dynamic]`` section
+# for the wiring.
+from ._version import __version__
 
 from . import core, lang, llm, loaders
 __all__ = ["core", "lang", "llm", "loaders", "__version__"]

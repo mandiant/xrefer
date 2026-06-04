@@ -5,7 +5,14 @@ authors = [
   {name = "binjo" },
   {name = "rand-tech" },
 ]
-version = "2.0.0.20251030"
+# Version is sourced dynamically from ``plugins/xrefer/_version.py``
+# (the single source of truth — a tiny no-imports module so
+# setuptools' AST static reader can resolve it without importing the
+# package). To bump the release, edit that file. The package-level
+# ``xrefer.__version__`` re-exports the same constant; runtime
+# consumers (About dialog, HTML report, IDA startup log) read from
+# whichever is convenient.
+dynamic = ["version"]
 description = "FLARE Team's Binary Navigator"
 requires-python = ">=3.11"
 dependencies = [
@@ -57,11 +64,26 @@ override-dependencies = [
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools]
+# ``plugins/xrefer.py`` is the IDA-plugin entry-point file (loaded by
+# IDA's plugin scanner) — NOT a top-level Python module to install.
+# Explicitly opt out of py-module auto-discovery so setuptools doesn't
+# try to package it (which collides with the ``plugins/xrefer/`` package
+# and breaks build-time metadata resolution).
+py-modules = []
+
 [tool.setuptools.package-dir]
 "" = "plugins"
 
 [tool.setuptools.packages.find]
 where = ["plugins"]
+
+[tool.setuptools.dynamic]
+# Reads ``plugins/xrefer/_version.py`` via setuptools' static AST
+# reader — that file has no imports so resolution never falls back to
+# a dynamic import (which would collide with ``plugins/xrefer.py``,
+# the IDA-loader entry-point file, and break the build).
+version = {attr = "xrefer._version.__version__"}
 
 [project.urls]
 source = "https://github.com/mandiant/xrefer"
