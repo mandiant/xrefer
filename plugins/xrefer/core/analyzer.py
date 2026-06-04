@@ -206,6 +206,16 @@ class XRefer:
             self.entities: List[Tuple[str, str, int, str]] = []
             self.reverse_entity_lookup_index: Dict[str, int] = {}
             self.entity_xrefs: Dict[int, Set[int]] = {}
+            # Maps a string entity-index to the data-section addresses
+            # where instances of that string live. Captured at sift-time
+            # because ``self.lang.strings`` (the source of truth) doesn't
+            # survive across save/load. Used as a fallback by the orphans
+            # view: when a string has no detected code use sites
+            # (``entity_xrefs[idx]`` empty — common for Rust strings
+            # referenced via const slice structs the disassembler can't
+            # trace), at least the storage address is shown so the user
+            # has something to navigate to.
+            self.string_storage_addrs: Dict[int, Set[int]] = {}
             self.excluded_entities: Set[int] = set()
             self.interesting_artifacts: Set[int] = set()
             self.leaf_funcs: Set[int] = set()
@@ -377,6 +387,11 @@ class XRefer:
 
                 e_index = self.set_and_get_entity_index(entity)
 
+                # Remember every storage address this string content
+                # appears at — orphan view falls back to this when no
+                # code use site was statically resolvable.
+                self.string_storage_addrs.setdefault(e_index, set()).add(str_ea)
+
                 if len(self.lang.strings[str_ea]) == 3:
                     self.strings[1].append(Reference(str_ea, e_index, EntityType.STRING, self.lang.strings[str_ea][2]))
                 else:
@@ -415,13 +430,19 @@ class XRefer:
 
         self.capa_matches = sifted_list
 
-    def find_interesting_artifacts(self) -> None:
+    def find_interesting_artifacts(self, force_no_cache: bool = False) -> None:
         """
         Analyze entities for potentially interesting/malicious indicators.
 
         Uses LLM analysis to identify potentially significant artifacts
         across different types (APIs, strings, libraries, CAPA matches).
         Considers context and relationships between artifacts.
+
+        Args:
+            force_no_cache: when True, the underlying LLM call bypasses
+                the DSPy/LiteLLM response cache so the model re-generates
+                its verdict. Re-run GUI actions pass True because the
+                point of re-running is to get a fresh response.
 
         Side Effects:
             - Updates self.interesting_artifacts with identified indices
@@ -482,7 +503,9 @@ class XRefer:
                 return
             log(f"Total artifacts for analysis: {len(artifacts)}")
             # Get interesting artifacts
-            interesting_artifacts = ArtifactAnalyzer.find_interesting_artifacts(artifacts)
+            interesting_artifacts = ArtifactAnalyzer.find_interesting_artifacts(
+                artifacts, force_no_cache=force_no_cache
+            )
 
             # Store results
             self.interesting_artifacts = interesting_artifacts
@@ -1039,6 +1062,85 @@ class XRefer:
         # If not reachable, check for indirect xrefs
         return not self.has_indirect_xrefs(func_ea)
 
+    def collect_orphan_entities(self) -> Dict[int, List[int]]:
+        """Group every orphan entity by type for rendering in the orphans view.
+
+        An entity is considered "orphan" when it cannot be reached from any
+        analysed entry point — concretely, when after discarding xrefs that
+        sit inside thunk wrappers, no remaining xref resolves to a function
+        that is reachable per :meth:`is_orphan_function`. Unlike the
+        "interesting artifacts" view, this returns *all* such entities —
+        it is not gated by the LLM-curated ``interesting_artifacts`` set
+        or the >2 xref cutoff.
+
+        Thunk handling mirrors :meth:`_process_artifact_xrefs`: xrefs
+        whose containing function is a non-simple thunk are skipped
+        outright — the thunk's caller addresses are already added to
+        ``entity_xrefs`` by :meth:`fix_thunk_xrefs` for thunks reached
+        from EP, so anything left in those entity_xrefs is a real use
+        site. Without this skip, an import whose only directly-recorded
+        xref is the thunk's ``jmp [IAT]`` instruction (a thunk that
+        wasn't in the EP path-walk) would be misclassified orphan.
+
+        Excluded entities are skipped when ``settings['enable_exclusions']``
+        is True so the orphans view stays consistent with the rest of the
+        UI.
+
+        Returns:
+            Dict mapping ``EntityType`` value (1=lib, 2=import, 3=string,
+            4=capa) to a sorted list of entity indices. ``API_TRACE`` is
+            excluded since it has no static xref shape.
+        """
+        result: Dict[int, List[int]] = {
+            int(EntityType.LIBRARY): [],
+            int(EntityType.IMPORT): [],
+            int(EntityType.STRING): [],
+            int(EntityType.CAPA): [],
+        }
+        exclusions_on = self.settings.get("enable_exclusions", False)
+
+        for idx, entity in enumerate(self.entities):
+            entity_type = entity[2]
+            if entity_type not in result:
+                continue
+            if exclusions_on and idx in self.excluded_entities:
+                continue
+
+            xrefs = self.entity_xrefs.get(idx, set())
+            if not xrefs:
+                # No xrefs at all → completely orphan.
+                result[entity_type].append(idx)
+                continue
+
+            # Has xrefs — orphan iff every xref'd function (after
+            # filtering out non-simple thunks) is orphan. If no xref
+            # resolves to a function, treat as orphan.
+            saw_function = False
+            all_orphan = True
+            for xref_addr in xrefs:
+                func = self._backend.get_function_at(xref_addr)
+                if not func:
+                    continue
+                fn_start = func.start
+                # Skip xrefs sitting inside a non-simple thunk — they
+                # represent the thunk's own jmp/load, not a real use of
+                # the entity. fix_thunk_xrefs has already supplemented
+                # entity_xrefs with the thunk's caller addresses (when
+                # the thunk is on a path from EP), and any other use
+                # site appears here directly.
+                if func.is_thunk and not self.is_simple_api_thunk(fn_start):
+                    continue
+                saw_function = True
+                if not self.is_orphan_function(fn_start):
+                    all_orphan = False
+                    break
+            if not saw_function or all_orphan:
+                result[entity_type].append(idx)
+
+        for type_id in result:
+            result[type_id].sort(key=lambda i: (self.entities[i][1] or "").lower())
+        return result
+
     def populate_xref_addrs(self) -> None:
         """
         Populate cross-reference addresses through paths.
@@ -1148,8 +1250,19 @@ class XRefer:
 
         return None
 
-    def analyze_clusters(self, entities_to_cluster) -> None:
-        """Create clusters based on interesting nodes first, using only shortest intermediate paths."""
+    def analyze_clusters(self, entities_to_cluster, force_no_cache: bool = False) -> None:
+        """Create clusters based on interesting nodes first, using only shortest intermediate paths.
+
+        Args:
+            entities_to_cluster: entity-index iterable feeding the
+                cluster-decomposition pipeline (same as before).
+            force_no_cache: when True, the LLM cluster-analysis call
+                runs through ``LLMProcessor.uncached_lm()`` — DSPy /
+                LiteLLM response cache is bypassed and the LLM is
+                guaranteed to produce a fresh response. Used by the
+                "Force Re-analyze" UI flow when the analyst wants to
+                re-roll the LLM verdict without restarting IDA.
+        """
         # Store current state
         current_clusters = self.clusters
         current_analysis = self.cluster_analysis
@@ -1194,24 +1307,20 @@ class XRefer:
             root_nodes = set()  # Entry points
             intermediate_paths_map = {}  # Map node pairs to shortest intermediate paths
 
-            # Process each path to find root nodes and track intermediates
+            # Process each path to find root nodes and track intermediates.
+            # Every path through a candidate function is fed into decomposition
+            # (after dedup) — matching main's behavior. Earlier gsoc_2025 versions
+            # added a `len(interesting_in_path) < 2` skip filter here that dropped
+            # paths with fewer than 2 candidate functions; that produced a leaner
+            # but visibly different cluster shape vs main, so it's gone now.
             paths_examined = 0
             candidate_paths_found = 0
-            low_interest_paths = 0
-            logged_low_interest = 0
             for ep in self.paths:
                 for func_ea, paths in self.paths[ep].items():
                     if func_ea in all_candidate_funcs:
                         candidate_paths_found += len(paths)
                         for path in paths:
                             paths_examined += 1
-                            interesting_in_path = [node for node in path if node in all_candidate_funcs]
-                            if len(interesting_in_path) < 2:
-                                low_interest_paths += 1
-                                if logged_low_interest < 3:
-                                    log(f"Skipping path (needs >=2 interesting nodes): interesting={[_fmt_func(ea) for ea in interesting_in_path]}, path_len={len(path)}")
-                                    logged_low_interest += 1
-                                continue
                             path_tuple = tuple(path)
                             if path_tuple not in seen_paths:
                                 seen_paths.add(path_tuple)
@@ -1237,7 +1346,7 @@ class XRefer:
                         f"No multi-candidate paths found; building degenerate single cluster "
                         f"rooted at EP 0x{self.current_analysis_ep:x} for "
                         f"{len(all_candidate_funcs)} candidate(s). "
-                        f"(paths_examined={paths_examined}, low_interest_paths={low_interest_paths})"
+                        f"(paths_examined={paths_examined})"
                     )
                     fallback = FunctionalCluster(
                         self.current_analysis_ep, parent_cluster_id=None, backend=self._backend
@@ -1248,7 +1357,7 @@ class XRefer:
                 else:
                     warn_msg = (
                         "No valid call paths found; skipping cluster analysis and report generation. "
-                        f"paths_examined={paths_examined}, candidate_paths={candidate_paths_found}, low_interest_paths={low_interest_paths}, candidates={len(all_candidate_funcs)}, graph_paths={len(graph_paths)}, root_nodes={len(root_nodes)}"
+                        f"paths_examined={paths_examined}, candidate_paths={candidate_paths_found}, candidates={len(all_candidate_funcs)}, graph_paths={len(graph_paths)}, root_nodes={len(root_nodes)}"
                     )
                     log(warn_msg)
                     self.analysis_warnings.append(warn_msg)
@@ -1263,7 +1372,13 @@ class XRefer:
 
             # Setup and run cluster analysis
             try:
-                self.cluster_analysis = ClusterAnalyzer.analyze_clusters(self.clusters, self)
+                # Batch size pulled from user settings; falls back to
+                # the ClusterAnalyzer default if the key is missing (old
+                # settings.json without the new analysis_options group).
+                batch_size = self.settings.get("analysis_options", {}).get("cluster_batch_size", 30)
+                self.cluster_analysis = ClusterAnalyzer.analyze_clusters(
+                    self.clusters, self, batch_size=batch_size, force_no_cache=force_no_cache,
+                )
                 # self.cluster_analysis = ClusterAnalyzer.populate_dummy_cluster_analysis(self.clusters)
                 if not self.cluster_analysis:  # Empty results usually means network issue
                     log("No analysis results obtained - likely network connectivity issue")
@@ -1350,10 +1465,16 @@ class XRefer:
                     self.artifact_functions.add(func_ea)
                     break
 
-    def cluster_all_non_excluded(self) -> None:
+    def cluster_all_non_excluded(self, force_no_cache: bool = False) -> None:
         """
         Cluster all non-excluded artifacts and run analysis.
         Now includes cluster merging after initial analysis.
+
+        Args:
+            force_no_cache: when True, the LLM cluster-analysis call is
+                routed through ``LLMProcessor.uncached_lm()`` so DSPy /
+                LiteLLM response cache is bypassed. Used by the
+                "Force Re-analyze" UI flow.
         """
         try:
             if not self.artifact_functions:
@@ -1390,7 +1511,7 @@ class XRefer:
 
             # Run cluster analysis
             log("Running cluster analysis...")
-            self.analyze_clusters(entities_to_cluster)
+            self.analyze_clusters(entities_to_cluster, force_no_cache=force_no_cache)
             self.save_analysis()
             if self.report_data_mode in ("html", "json"):
                 if self.clusters and self.cluster_analysis:
@@ -1655,6 +1776,7 @@ class XRefer:
             self.leaf_funcs = master_struct["leaf_funcs"]
             self.api_trace_data = master_struct.get("api_trace_data", {})
             self.interesting_artifacts = master_struct.get("interesting_artifacts", set())
+            self.string_storage_addrs = master_struct.get("string_storage_addrs", {})
             self.clusters = master_struct.get("clusters", [])
             self.cluster_analysis = master_struct.get("cluster_analysis", {})
 
@@ -1748,6 +1870,7 @@ class XRefer:
                 "leaf_funcs": self.leaf_funcs,
                 "api_trace_data": self.api_trace_data,
                 "interesting_artifacts": self.interesting_artifacts,
+                "string_storage_addrs": self.string_storage_addrs,
                 "clusters": self.clusters,
                 "cluster_analysis": self.cluster_analysis,
             }
@@ -1839,8 +1962,21 @@ class XRefer:
                     self.settings["llm_lookups"] = False
                     return
                 log(f"Setting LLM model to: {model_id}")
-                config_1 = ModelConfig(model_id=model_id, api_key=api_key, ignore_token_limit=True)
-                config_2 = ModelConfig(model_id=model_id, api_key=api_key)
+                # Temperature and reasoning-effort are deliberately not
+                # exposed as user settings — we let the provider's API
+                # defaults apply, which is the calibrated configuration
+                # for hybrid reasoning models like Gemini 3. See
+                # ``_build_lm_kwargs`` in plugins/xrefer/llm/processor.py
+                # for the OpenAI-reasoning-model special case.
+                config_1 = ModelConfig(
+                    model_id=model_id,
+                    api_key=api_key,
+                    ignore_token_limit=True,
+                )
+                config_2 = ModelConfig(
+                    model_id=model_id,
+                    api_key=api_key,
+                )
                 assert config_2 is not None
                 ArtifactAnalyzer.set_model_config(config_1)
                 ClusterAnalyzer.set_model_config(config_1)
@@ -3181,12 +3317,42 @@ class XRefer:
                 f"{r.api_name.split('.')[-1]}{r.call_str} x {r.count}"
                 for r in self.get_api_trace_records_for_cluster(cluster)
             ]
+            # MITRE ATT&CK technique mappings — populated by the LLM
+            # cluster analyzer. Accept either dict-shaped (already
+            # serialized) or Pydantic-object analyses, and gracefully
+            # tolerate legacy analyses missing the field entirely.
+            if isinstance(analysis, dict):
+                raw_mitre = analysis.get('mitre_attack') or []
+            else:
+                raw_mitre = getattr(analysis, 'mitre_attack', None) or []
+            # Normalize each entry to a plain dict so json.dumps is
+            # happy regardless of upstream shape (Pydantic model vs.
+            # already-dict). Drop entries missing required fields so
+            # the HTML renderer doesn't have to defensively check.
+            mitre_attack: List[Dict[str, Any]] = []
+            for entry in raw_mitre:
+                if hasattr(entry, "model_dump"):
+                    entry_dict = entry.model_dump()
+                elif isinstance(entry, dict):
+                    entry_dict = entry
+                else:
+                    continue
+                if not entry_dict.get("id") or not entry_dict.get("tactic"):
+                    continue
+                mitre_attack.append({
+                    "id": str(entry_dict.get("id", "")),
+                    "tactic": str(entry_dict.get("tactic", "")),
+                    "name": str(entry_dict.get("name", "")),
+                    "rationale": str(entry_dict.get("rationale", "")),
+                })
+
             node_data = {
                 "key": cluster_id,
                 "label": f"cluster.id.{cluster.id_str}\\n{analysis.get('label') if isinstance(analysis, dict) else analysis.label}",
                 "description": analysis.get('description') if isinstance(analysis, dict) else analysis.description,
                 "artifacts": artifacts_dict,
                 "apiTrace": "\n".join(api_trace_lines),
+                "mitreAttack": mitre_attack,
                 "isLibrary": cluster.is_library
             }
             if parent_key is not None:

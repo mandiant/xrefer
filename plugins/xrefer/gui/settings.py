@@ -15,12 +15,14 @@
 import copy
 import os
 import re
+import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List
 
 from qtpy.QtCore import Qt
-from qtpy.QtGui import QFont, QFontMetrics
-from qtpy.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMessageBox,
-                            QPushButton, QScrollArea, QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
+from qtpy.QtGui import QColor, QFont, QFontMetrics, QPalette
+from qtpy.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+                            QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
 
 from xrefer.core.settings import XReferSettingsManager
 
@@ -28,9 +30,19 @@ if TYPE_CHECKING:
     from xrefer.core.settings import ExclusionData
 
 # Constants
-TAB_WIDTH = 550
-DIALOG_WIDTH = 1100
-DIALOG_HEIGHT = 650
+# Default dialog size — 1080x720 fits the General tab's Options +
+# Display Options + Paths cards without scrolling on default IDA
+# font sizes. Min size lets cramped displays still open the dialog;
+# the QScrollArea around each page handles overflow.
+DIALOG_WIDTH = 1080
+# 760 (bumped from 720) clears the few-pixel content overflow that
+# made the scrollbar appear despite there being nothing meaningful
+# to scroll to. Keeps the resizable behavior intact — users on
+# smaller screens still hit setMinimumSize below.
+DIALOG_HEIGHT = 760
+DIALOG_MIN_WIDTH = 900
+DIALOG_MIN_HEIGHT = 540
+SIDEBAR_WIDTH = 180
 BUTTON_SIZE = 24
 MAX_WILDCARD_MATCHES = 10
 
@@ -103,38 +115,381 @@ def _curated_llm_models() -> List[str]:
     return sorted(out)
 
 
-class CustomTabWidget(QTabWidget):
+# Per-process scratch directory for the small SVG icon files referenced
+# by ``_build_dialog_qss`` in QSS ``image:`` rules. We don't ship the
+# icons as static assets because their stroke color is computed from
+# the active IDA palette — embedding the color inline (one SVG file
+# per dialog open) is simpler than maintaining N pre-rendered palette
+# variants. The OS cleans the dir up on process exit; we keep a single
+# stable path per process so repeated dialog opens reuse the same
+# files instead of accumulating directories.
+_ICON_CACHE_DIR = Path(tempfile.gettempdir()) / f"xrefer_settings_icons_{os.getpid()}"
+
+
+def _write_icon_cache(contents: Dict[str, str]) -> Dict[str, str]:
+    """Write a name→SVG-content map to the icon cache dir, returning
+    a name→path map for use in QSS ``image:`` properties.
+
+    Qt's QSS ``url(...)`` resolver does NOT handle ``file://`` URIs
+    correctly — it strips the scheme prefix incorrectly and ends up
+    interpreting the residual as a CWD-relative path. The fix is to
+    pass a plain absolute path with forward-slash separators (the
+    latter for Windows: backslashes confuse the QSS parser). Qt
+    accepts both POSIX and Windows-drive-letter absolute paths in
+    this form.
     """
-    Customized QTabWidget with equal width tabs.
+    _ICON_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    urls: Dict[str, str] = {}
+    for name, svg in contents.items():
+        path = _ICON_CACHE_DIR / name
+        path.write_text(svg)
+        # Forward slashes are mandatory in QSS url() on Windows; on
+        # POSIX they're already correct. str(path) gives the platform
+        # separator, so normalize explicitly.
+        urls[name] = str(path).replace("\\", "/")
+    return urls
 
-    Provides a tab widget with fixed-width tabs and custom styling for the
-    XRefer settings dialog.
 
-    Class Attributes:
-        TAB_WIDTH (int): Fixed width for each tab (550px)
+def _build_dialog_qss() -> str:
+    """Compose the settings-dialog stylesheet from the active Qt palette.
+
+    Accent color is taken from ``QPalette.Highlight`` so the dialog
+    blends with whatever IDA theme the user runs (dark or light, with
+    whatever selection color they've configured). Card / input / border
+    backgrounds are derived by shading the palette ``Window`` color —
+    on dark themes we lighten, on light themes we darken — so the
+    derived colors stay close to the host theme without us hard-coding
+    a palette of our own.
+
+    The result is applied via ``self.setStyleSheet(...)`` on the
+    settings dialog: QSS scopes to descendants of the widget it's set
+    on, so this affects only the settings dialog (not other IDA
+    surfaces or other xrefer dialogs).
+
+    Cross-platform note: once a widget has a stylesheet, Qt paints it
+    non-natively, which is what we want here — the macOS / Windows /
+    Linux native paint paths each had visual issues (invisible tab
+    selection on macOS dark mode being the worst), so painting via QSS
+    is the consistency mechanism.
     """
+    palette = QApplication.palette()
+    window = palette.color(QPalette.Window)
+    text = palette.color(QPalette.WindowText)
+    is_dark = window.lightnessF() < 0.5
 
-    def __init__(self):
-        super().__init__()
-        self.setUsesScrollButtons(False)
-        self.tabBar().setExpanding(True)
+    accent = palette.color(QPalette.Highlight)
+    accent_text = palette.color(QPalette.HighlightedText)
 
-        self.setStyleSheet("""
-            QTabWidget::pane {
-                border: none;
-                top: 1px;
-            }
-            QTabWidget::tab-bar {
-                alignment: left;
-                left: 0px;
-            }
-            QTabBar::tab {
-                padding: 4px 0px;  /* Removed horizontal padding */
-                min-width: 550px;  /* Exactly half of 1100px */
-                max-width: 550px;  /* Force exact width */
-                margin: 1px;       /* Remove margins */
-            }
-        """)
+    def _blend(c1: QColor, c2: QColor, w: float) -> QColor:
+        """Blend two colors: w=1.0 is ``c1`` entirely, w=0.0 is ``c2``."""
+        return QColor(
+            int(c1.red() * w + c2.red() * (1 - w)),
+            int(c1.green() * w + c2.green() * (1 - w)),
+            int(c1.blue() * w + c2.blue() * (1 - w)),
+        )
+
+    # ── Text-color tiers, computed not palette-dependent ────────────
+    # We deliberately do NOT use ``palette(mid)`` for muted text:
+    # different IDA themes set ``mid`` very differently, and on some
+    # palettes it collapses near the window background, rendering
+    # read-only text invisible. Computing from a fixed blend of
+    # WindowText + Window gives predictable legibility regardless of
+    # what theme the user runs.
+    soft_text = _blend(text, window, 0.72).name()      # read-only / group title
+    muted_text = _blend(text, window, 0.55).name()     # sidebar unselected, hover hint
+    disabled_text = _blend(text, window, 0.42).name()  # actually-disabled controls
+
+    # Derived shades. Dark themes get lighter cards/inputs; light
+    # themes get darker. The factor numbers below are QColor.lighter /
+    # darker percentages — 115 means 15% lighter than the source.
+    if is_dark:
+        card_bg = window.lighter(115).name()
+        input_bg = window.darker(110).name()
+        ro_bg = window.darker(125).name()
+        border = window.lighter(140).name()
+        button_bg = window.lighter(120).name()
+        button_hov = window.lighter(140).name()
+        button_prs = window.lighter(105).name()
+        check_brdr = window.lighter(170).name()
+        hover_bg = window.lighter(130).name()
+        sidebar_bg = window.darker(108).name()
+    else:
+        card_bg = window.darker(102).name()
+        input_bg = "#ffffff"
+        ro_bg = window.darker(105).name()
+        border = window.darker(120).name()
+        button_bg = window.lighter(108).name()
+        button_hov = window.lighter(115).name()
+        button_prs = window.darker(108).name()
+        check_brdr = window.darker(140).name()
+        hover_bg = window.darker(105).name()
+        sidebar_bg = window.darker(103).name()
+
+    a = accent.name()
+    a_hov = accent.lighter(115).name()
+    a_prs = accent.darker(115).name()
+    a_text = accent_text.name()
+
+    # ── Palette-aware SVG icons written to per-process temp files ───
+    # Why files rather than data URLs: Qt's QSS image resolver does
+    # NOT support `data:image/svg+xml;...` URIs (neither the `;utf8,`
+    # nor `;base64,` form). ``QImage.loadFromData`` accepts them, but
+    # the path through ``QSS image:`` does not. The result was that
+    # checkbox checkmarks and combobox / spinbox chevrons rendered
+    # as nothing at all — verified with a side-by-side test of utf8
+    # vs base64 forms (both failed identically).
+    #
+    # The fix is to write the SVG content to a real file and reference
+    # it via ``file://`` URL. We rebuild on every call so palette
+    # changes (e.g. a user switches IDA theme between dialog opens)
+    # are reflected. Files live in a per-process temp dir; the OS
+    # cleans them up on process exit.
+    #
+    # The checkmark uses ``HighlightedText`` for contrast against the
+    # accent-filled indicator; chevrons use ``soft_text`` so they
+    # stand against input backgrounds without being shouty.
+    check_svg = (
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'>"
+        f"<path d='M2.5 6.5l2.3 2.3 4.7-5' fill='none' stroke='{a_text}' "
+        "stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/></svg>"
+    )
+    chevron_down_svg = (
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'>"
+        f"<path d='M2 4 L5 7 L8 4' fill='none' stroke='{soft_text}' "
+        "stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/></svg>"
+    )
+    chevron_up_svg = (
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'>"
+        f"<path d='M2 6 L5 3 L8 6' fill='none' stroke='{soft_text}' "
+        "stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/></svg>"
+    )
+
+    icon_urls = _write_icon_cache({
+        "check.svg": check_svg,
+        "chevron_down.svg": chevron_down_svg,
+        "chevron_up.svg": chevron_up_svg,
+    })
+    check_url = icon_urls["check.svg"]
+    arrow_down_url = icon_urls["chevron_down.svg"]
+    arrow_up_url = icon_urls["chevron_up.svg"]
+
+    return f"""
+QDialog {{
+    background: palette(window);
+    color: palette(window-text);
+}}
+
+/* === Sidebar (settings categories) ============================ */
+QListWidget[settingsSidebar="true"] {{
+    background: {sidebar_bg};
+    border: none;
+    border-right: 1px solid {border};
+    padding: 10px 6px;
+    outline: 0;
+    font-size: 12px;
+}}
+QListWidget[settingsSidebar="true"]::item {{
+    padding: 9px 14px;
+    border-radius: 4px;
+    margin: 2px 4px;
+    color: {muted_text};
+}}
+QListWidget[settingsSidebar="true"]::item:hover {{
+    color: palette(window-text);
+    background: {hover_bg};
+}}
+QListWidget[settingsSidebar="true"]::item:selected {{
+    color: {a_text};
+    background: {a};
+    font-weight: 600;
+}}
+
+/* === Group box → card ========================================= */
+QGroupBox {{
+    border: 1px solid {border};
+    border-radius: 6px;
+    margin-top: 18px;
+    padding: 16px 12px 10px 12px;
+    background: {card_bg};
+    font-weight: 600;
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    padding: 0 8px;
+    color: {soft_text};
+    font-weight: 700;
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 1px;
+}}
+
+/* === Buttons =================================================== */
+QPushButton {{
+    background: {button_bg};
+    color: palette(window-text);
+    border: 1px solid {border};
+    border-radius: 4px;
+    padding: 6px 16px;
+    min-width: 88px;
+}}
+QPushButton:hover    {{ background: {button_hov}; }}
+QPushButton:pressed  {{ background: {button_prs}; }}
+QPushButton:disabled {{ color: {disabled_text}; background: {button_bg}; }}
+
+QPushButton[primary="true"] {{
+    background: {a};
+    color: {a_text};
+    border: 1px solid {a};
+}}
+QPushButton[primary="true"]:hover    {{ background: {a_hov}; border-color: {a_hov}; }}
+QPushButton[primary="true"]:pressed  {{ background: {a_prs}; border-color: {a_prs}; }}
+
+QPushButton[iconButton="true"] {{
+    min-width: 0;
+    padding: 0;
+    font-size: 14px;
+    font-weight: bold;
+}}
+
+/* === Inputs ==================================================== */
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
+    background: {input_bg};
+    color: palette(text);
+    border: 1px solid {border};
+    border-radius: 4px;
+    padding: 4px 8px;
+    selection-background-color: {a};
+    selection-color: {a_text};
+}}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{
+    border-color: {a};
+}}
+/* Read-only text uses ``soft_text`` (legible blend of WindowText +
+ * Window), NOT palette(mid). The latter collapses near the
+ * background on some IDA themes and renders paths invisible. The
+ * darker ``ro_bg`` background plus the cursor-pinned-to-end of the
+ * path content is what signals "read-only" — not unreadable text. */
+QLineEdit:read-only {{ background: {ro_bg}; color: {soft_text}; }}
+QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {{
+    color: {disabled_text};
+}}
+
+/* === Combobox dropdown + arrow ================================= */
+QComboBox::drop-down {{
+    border: none;
+    width: 22px;
+    subcontrol-position: right;
+}}
+QComboBox::down-arrow {{
+    image: url("{arrow_down_url}");
+    width: 10px;
+    height: 10px;
+}}
+QComboBox QAbstractItemView {{
+    background: {input_bg};
+    color: palette(text);
+    selection-background-color: {a};
+    selection-color: {a_text};
+    border: 1px solid {border};
+    padding: 4px;
+    outline: 0;
+}}
+
+/* === Spinbox up/down buttons + chevron arrows ================== */
+QSpinBox, QDoubleSpinBox {{
+    padding-right: 22px;  /* room for the up/down stack on the right */
+}}
+QSpinBox::up-button, QDoubleSpinBox::up-button {{
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 18px;
+    border: none;
+    background: transparent;
+}}
+QSpinBox::down-button, QDoubleSpinBox::down-button {{
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 18px;
+    border: none;
+    background: transparent;
+}}
+QSpinBox::up-button:hover, QSpinBox::down-button:hover,
+QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {{
+    background: {hover_bg};
+}}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+    image: url("{arrow_up_url}");
+    width: 10px;
+    height: 10px;
+}}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+    image: url("{arrow_down_url}");
+    width: 10px;
+    height: 10px;
+}}
+
+/* === Checkboxes ================================================ */
+QCheckBox {{ color: palette(window-text); spacing: 7px; }}
+QCheckBox::indicator {{
+    width: 14px;
+    height: 14px;
+    border: 1px solid {check_brdr};
+    border-radius: 3px;
+    background: {input_bg};
+}}
+QCheckBox::indicator:hover   {{ border-color: {a}; }}
+QCheckBox::indicator:checked {{
+    background: {a};
+    border-color: {a};
+    image: url("{check_url}");
+}}
+QCheckBox::indicator:disabled {{ background: {ro_bg}; border-color: {border}; }}
+
+/* === List widgets (exclusions) ================================= */
+QListWidget {{
+    background: {input_bg};
+    color: palette(text);
+    border: 1px solid {border};
+    border-radius: 4px;
+    padding: 2px;
+    outline: 0;
+}}
+QListWidget::item {{ padding: 4px 6px; border-radius: 3px; }}
+QListWidget::item:hover    {{ background: {hover_bg}; }}
+QListWidget::item:selected {{ background: {a}; color: {a_text}; }}
+
+/* === Section-heading labels (set property: heading=true) ====== */
+QLabel[heading="true"] {{
+    color: palette(window-text);
+    font-weight: 700;
+    font-size: 12px;
+    letter-spacing: 0.3px;
+}}
+
+/* === Bottom-bar separator (set property: separator=true) ====== */
+QFrame[separator="true"] {{
+    background: {border};
+    max-height: 1px;
+    min-height: 1px;
+    border: none;
+}}
+
+/* === Scroll area / scrollbar polish =========================== */
+QScrollArea {{ border: none; background: transparent; }}
+QScrollBar:vertical {{
+    background: transparent;
+    width: 10px;
+    margin: 2px;
+}}
+QScrollBar::handle:vertical {{
+    background: {border};
+    border-radius: 3px;
+    min-height: 24px;
+}}
+QScrollBar::handle:vertical:hover {{ background: {check_brdr}; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+"""
 
 
 class ReadOnlyLineEdit(QLineEdit):
@@ -185,17 +540,28 @@ class ExclusionsList(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
 
-        # Header with title and buttons
+        # Header with title and buttons. Title uses the heading=true
+        # property so the QSS gives it a slightly heavier weight than
+        # body text — without that, the four list titles blend into
+        # the rest of the tab content.
         header = QHBoxLayout()
-        header.addWidget(QLabel(title))
+        title_label = QLabel(title)
+        title_label.setProperty("heading", True)
+        header.addWidget(title_label)
         header.addStretch()
 
+        # Use the iconButton property so the QSS strips the wide
+        # default min-width and bumps the glyph weight. The minus
+        # uses U+2212 (MINUS SIGN), not ASCII hyphen — the proper
+        # glyph centers vertically in the button.
         add_btn = QPushButton("+")
-        add_btn.setFixedSize(24, 24)
+        add_btn.setFixedSize(BUTTON_SIZE, BUTTON_SIZE)
+        add_btn.setProperty("iconButton", True)
         add_btn.setToolTip(f"Add new {title}")
 
-        self.remove_btn = QPushButton("-")  # Make remove_btn an instance variable
-        self.remove_btn.setFixedSize(24, 24)
+        self.remove_btn = QPushButton("−")
+        self.remove_btn.setFixedSize(BUTTON_SIZE, BUTTON_SIZE)
+        self.remove_btn.setProperty("iconButton", True)
         self.remove_btn.setToolTip(f"Remove selected {title}")
         self.remove_btn.setEnabled(False)  # Initially disabled
 
@@ -439,7 +805,15 @@ class XReferSettingsDialog(QDialog):
         self.exclusions = self.settings_manager.load_exclusions()
         self.original_exclusions = copy.deepcopy(self.exclusions)
 
-        self.setFixedSize(DIALOG_WIDTH, DIALOG_HEIGHT)
+        # Apply the palette-aware stylesheet first so all child widgets
+        # constructed in initUI() pick up the styles on first paint.
+        self.setStyleSheet(_build_dialog_qss())
+
+        # Resizable instead of fixed-size: the previous fixed 1100x650
+        # baked in one display density. minimumSize gives a sensible
+        # floor on small displays; resize() sets a comfortable default.
+        self.setMinimumSize(DIALOG_MIN_WIDTH, DIALOG_MIN_HEIGHT)
+        self.resize(DIALOG_WIDTH, DIALOG_HEIGHT)
         self._center_on_screen()
         self.initUI()
 
@@ -460,31 +834,105 @@ class XReferSettingsDialog(QDialog):
 
     def initUI(self):
         self.setWindowTitle("Configure XRefer")
-        self.setGeometry(300, 300, 1100, 600)
 
-        layout = QVBoxLayout(self)
+        # Root layout: vertical, no padding so the sidebar / content
+        # split spans edge-to-edge and the bottom button bar sits
+        # flush at the bottom.
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # Create tab widget
-        tabs = CustomTabWidget()
-        general_tab = QWidget()
-        exclusion_tab = QWidget()
-        tabs.addTab(general_tab, "General")
-        tabs.addTab(exclusion_tab, "Exclusions")
+        # ── Main content area: sidebar on the left, page stack on
+        # the right. Replaces the old top-tab layout, which on
+        # macOS rendered with an effectively-invisible selection
+        # indicator. Sidebar tabs make the active section obvious
+        # via the accent-filled row, and scale to any number of
+        # future categories. ──────────────────────────────────────
+        content = QHBoxLayout()
+        content.setContentsMargins(0, 0, 0, 0)
+        content.setSpacing(0)
 
-        self.setup_general_tab(general_tab)
-        self.setup_exclusion_tab(exclusion_tab)
+        self.sidebar = QListWidget()
+        # The settingsSidebar property selects this list in the QSS;
+        # without it, the list would pick up the generic QListWidget
+        # styling we use for the exclusions lists.
+        self.sidebar.setProperty("settingsSidebar", True)
+        self.sidebar.setFixedWidth(SIDEBAR_WIDTH)
+        self.sidebar.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.sidebar.setFocusPolicy(Qt.NoFocus)
+        self.sidebar.addItem(QListWidgetItem("General"))
+        self.sidebar.addItem(QListWidgetItem("Exclusions"))
 
-        layout.addWidget(tabs)
+        # Each page gets its own QScrollArea so cramped displays still
+        # render every control — the previous fixed-size dialog would
+        # have clipped controls on shorter screens. Margins on the
+        # page widget itself (set inside setup_general_tab /
+        # setup_exclusion_tab) give the breathing room.
+        general_page = QWidget()
+        exclusion_page = QWidget()
+        self.setup_general_tab(general_page)
+        self.setup_exclusion_tab(exclusion_page)
 
-        # Buttons
-        button_layout = QHBoxLayout()
-        save_button = QPushButton("Save Settings")
-        save_button.clicked.connect(self.save_settings)
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self._wrap_in_scroll(general_page))
+        self.pages.addWidget(self._wrap_in_scroll(exclusion_page))
+
+        self.sidebar.currentRowChanged.connect(self.pages.setCurrentIndex)
+        self.sidebar.setCurrentRow(0)
+
+        content.addWidget(self.sidebar, 0)
+        content.addWidget(self.pages, 1)
+
+        content_container = QWidget()
+        content_container.setLayout(content)
+        root.addWidget(content_container, 1)
+
+        # ── Bottom: 1px separator + right-aligned button row.
+        # Primary action (Save) sits rightmost with accent fill;
+        # Cancel is neutral. This matches platform-HIG conventions
+        # for confirm/cancel dialogs and gives the dialog a clear
+        # "structure" — header, content, footer — that was missing
+        # when the buttons were full-width edge bars. ─────────────
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setProperty("separator", True)
+        root.addWidget(sep)
+
+        button_bar = QHBoxLayout()
+        # Larger bottom margin (20px vs 12 top) gives the buttons a
+        # bit of breathing room against the dialog's bottom edge.
+        # Symmetric top/bottom looked cramped on macOS where the
+        # window-frame chrome is minimal.
+        button_bar.setContentsMargins(16, 12, 16, 20)
+        button_bar.setSpacing(8)
+        button_bar.addStretch()
+
         cancel_button = QPushButton("Cancel")
         cancel_button.clicked.connect(self.reject)
-        button_layout.addWidget(save_button)
-        button_layout.addWidget(cancel_button)
-        layout.addLayout(button_layout)
+
+        save_button = QPushButton("Save Settings")
+        save_button.setProperty("primary", True)
+        save_button.setDefault(True)  # Enter key triggers Save
+        save_button.clicked.connect(self.save_settings)
+
+        button_bar.addWidget(cancel_button)
+        button_bar.addWidget(save_button)
+        root.addLayout(button_bar)
+
+    @staticmethod
+    def _wrap_in_scroll(widget):
+        """Wrap a page widget in a frameless, resizable QScrollArea.
+
+        ``setWidgetResizable(True)`` lets the page widget grow to fill
+        the available horizontal space, which is what we want for the
+        Paths group (long path edits) and the exclusions grid. The
+        scrollbar only appears when the page can't fit vertically.
+        """
+        sa = QScrollArea()
+        sa.setWidget(widget)
+        sa.setWidgetResizable(True)
+        sa.setFrameShape(QFrame.NoFrame)
+        return sa
 
     def setup_general_tab(self, tab) -> None:
         """
@@ -496,6 +944,11 @@ class XReferSettingsDialog(QDialog):
             tab: Tab widget to populate with settings controls
         """
         layout = QVBoxLayout(tab)
+        # Page-level padding — without this the group-box cards sit
+        # flush against the sidebar / scroll-area edges, which makes
+        # them feel cramped on top-level dialog backgrounds.
+        layout.setContentsMargins(20, 20, 20, 16)
+        layout.setSpacing(12)
 
         # Options group
         options_group = QGroupBox("Options")
@@ -528,10 +981,28 @@ class XReferSettingsDialog(QDialog):
         self.api_key_edit.setEchoMode(QLineEdit.Password)
         self.api_key_edit.setToolTip("API key for the selected LLM provider")
 
+        analysis_options = self.settings.get("analysis_options", {})
+
+        self.cluster_batch_size_spin = QSpinBox()
+        self.cluster_batch_size_spin.setRange(5, 60)
+        self.cluster_batch_size_spin.setValue(
+            analysis_options.get("cluster_batch_size", 30)
+        )
+        self.cluster_batch_size_spin.setEnabled(self.settings["llm_lookups"])
+        self.cluster_batch_size_spin.setToolTip(
+            "Maximum clusters analyzed per stage-1 LLM batch. Lower "
+            "values use more LLM calls but produce richer per-cluster "
+            "output; higher values reduce call count but degrade per-"
+            "cluster richness on most providers (the LLM's per-cluster "
+            "output budget shrinks as the batch grows). Default 30."
+        )
+
         llm_grid.addWidget(QLabel("LLM Model ID:"), 0, 0)
         llm_grid.addWidget(self.llm_model_combo, 0, 1)
         llm_grid.addWidget(QLabel("API Key:"), 1, 0)
         llm_grid.addWidget(self.api_key_edit, 1, 1)
+        llm_grid.addWidget(QLabel("Cluster Batch Size:"), 2, 0)
+        llm_grid.addWidget(self.cluster_batch_size_spin, 2, 1)
 
         options_layout.addWidget(self.llm_checkbox)
         options_layout.addLayout(llm_grid)
@@ -606,12 +1077,27 @@ class XReferSettingsDialog(QDialog):
         for path_type, label in path_configs:
             paths_layout.addWidget(QLabel(label), row, 0)
 
-            # Path edit
-            path_edit = ReadOnlyLineEdit(self.settings["paths"][path_type])
+            # Path edit. The hover tooltip carries the full path so
+            # the user can read it even when the displayed text is
+            # clipped — important since these can run 80+ chars.
+            # ``setCursorPosition(len(...))`` pins the visible region
+            # to the end of the path, so the filename (the meaningful
+            # part) stays visible when the field can't show the whole
+            # thing. We re-pin on textChanged so browse / default
+            # toggles keep the same affordance.
+            path_value = self.settings["paths"][path_type]
+            path_edit = ReadOnlyLineEdit(path_value)
             font = path_edit.font()
             font.setPointSize(font.pointSize() - 1)
             path_edit.setFont(font)
-            path_edit.setToolTip(f"Path for {label}")
+            path_edit.setToolTip(path_value or f"{label} (not configured)")
+            path_edit.setCursorPosition(len(path_edit.text()))
+            path_edit.textChanged.connect(
+                lambda text, e=path_edit, lbl=label: (
+                    e.setToolTip(text or f"{lbl} (not configured)"),
+                    e.setCursorPosition(len(text)),
+                )
+            )
             if self.settings["use_default_paths"][path_type]:
                 path_edit.setReadOnly(True)
             paths_layout.addWidget(path_edit, row, 1)
@@ -647,6 +1133,10 @@ class XReferSettingsDialog(QDialog):
             tab: Tab widget to populate with exclusions controls
         """
         layout = QVBoxLayout(tab)
+        # Match the general-tab page padding so both pages have the
+        # same breathing room when the user switches between them.
+        layout.setContentsMargins(20, 20, 20, 16)
+        layout.setSpacing(12)
 
         # Enable Exclusions checkbox
         self.enable_exclusion_checkbox = QCheckBox("Enable Exclusions")
@@ -658,11 +1148,23 @@ class XReferSettingsDialog(QDialog):
         path_layout = QGridLayout()
         path_layout.addWidget(QLabel("Exclusions Path:"), 0, 0)
 
-        self.exclusion_path_edit = ReadOnlyLineEdit(self.settings["paths"]["exclusions"])
+        exclusions_path_value = self.settings["paths"]["exclusions"]
+        self.exclusion_path_edit = ReadOnlyLineEdit(exclusions_path_value)
         font = self.exclusion_path_edit.font()
         font.setPointSize(font.pointSize() - 1)
         self.exclusion_path_edit.setFont(font)
-        self.exclusion_path_edit.setToolTip("Path to exclusions configuration file")
+        # Full path in the tooltip; cursor pinned to the end so the
+        # filename stays visible when the displayed text is clipped.
+        self.exclusion_path_edit.setToolTip(
+            exclusions_path_value or "Path to exclusions configuration file"
+        )
+        self.exclusion_path_edit.setCursorPosition(len(self.exclusion_path_edit.text()))
+        self.exclusion_path_edit.textChanged.connect(
+            lambda text, e=self.exclusion_path_edit: (
+                e.setToolTip(text or "Path to exclusions configuration file"),
+                e.setCursorPosition(len(text)),
+            )
+        )
         if self.settings["use_default_paths"]["exclusions"]:
             self.exclusion_path_edit.setReadOnly(True)
         path_layout.addWidget(self.exclusion_path_edit, 0, 1)
@@ -702,6 +1204,7 @@ class XReferSettingsDialog(QDialog):
         enabled = state == Qt.Checked
         self.llm_model_combo.setEnabled(enabled)
         self.api_key_edit.setEnabled(enabled)
+        self.cluster_batch_size_spin.setEnabled(enabled)
 
     def toggle_path_default(self, path_type, state):
         """Toggle path edit read-only state based on Default checkbox"""
@@ -753,6 +1256,9 @@ class XReferSettingsDialog(QDialog):
             "llm_model_id": self.llm_model_combo.currentText(),
             "api_key": self.api_key_edit.text(),
             "enable_exclusions": self.enable_exclusion_checkbox.isChecked(),
+            "analysis_options": {
+                "cluster_batch_size": self.cluster_batch_size_spin.value(),
+            },
             # Add display options
             "display_options": {
                 "auto_size_graphs": self.auto_size_graphs.isChecked(),

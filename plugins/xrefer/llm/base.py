@@ -15,15 +15,27 @@
 from dataclasses import dataclass
 from enum import Enum
 
+
 class PromptType(Enum):
     CATEGORIZER = "categorizer"
     ARTIFACT_ANALYZER = "artifact_analyzer"
     CLUSTER_ANALYZER = "cluster_analyzer"
+    BINARY_SYNTHESIZER = "binary_synthesizer"
+
 
 @dataclass
 class ModelConfig:
     """
     Configuration for LLM model.
+
+    Temperature and reasoning-effort are deliberately NOT exposed here.
+    We let the provider's API defaults apply for both — that's the
+    calibrated configuration for hybrid reasoning models (e.g. Gemini 3
+    uses temperature=1.0 and a dynamic thinking budget by default, and
+    Google warns that setting < 1.0 can cause infinite loops and
+    degraded reasoning). The only special case is OpenAI reasoning
+    models, which require temperature=1.0 — that's enforced in
+    ``_build_lm_kwargs`` based on the model id.
 
     Attributes:
         model_id (str): Fully qualified model identifier (e.g. "openai/gpt-4o-mini")

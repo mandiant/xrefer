@@ -786,6 +786,33 @@ class BackEnd(ABC):
         """
         return self._get_disassembly_impl(address)
 
+    def find_rust_main_candidate(self, main_addr: Address) -> Optional[Address]:
+        """Heuristically locate the user's `rust_main` from a CRT main wrapper.
+
+        Rust binaries typically wrap user code in a CRT-emitted `main`/`_main`
+        function that takes a function-pointer reference to the user function
+        and then calls a Rust-runtime wrapper which invokes it. Recognising the
+        right call inside the wrapper is a per-backend operation — it relies on
+        instruction-level navigation primitives (decode, next-head, operand
+        evaluation) whose semantics differ enough between backends that a
+        single abstraction-level walk doesn't catch every case. Each backend
+        is therefore expected to implement its own scan.
+
+        Backends that don't implement the heuristic inherit this default and
+        return None — the caller will then fall back to the binary's plain EP.
+
+        Side effect: implementations are permitted (and encouraged) to rename
+        the detected function to `rust_main` in the binary database, so a
+        subsequent `get_address_for_name("rust_main")` short-circuits the scan.
+
+        Args:
+            main_addr: Address of the CRT main/_main function to scan.
+
+        Returns:
+            Address of the detected rust_main, or None if not found.
+        """
+        return None
+
     #
     # Backend-Specific Implementation Methods
     #

@@ -4,24 +4,94 @@
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="color-scheme" content="dark"/>
+  <!--
+    Content Security Policy: defense-in-depth against XSS via attacker-controlled
+    artifact strings, API call args, or LLM output that bypasses an escapeHtml call.
+    'unsafe-inline' for script/style is unavoidable: this template is shipped as a
+    single standalone HTML file and inlines its own <script>/<style> blocks.
+    External script/style is restricted to cdnjs (jQuery + dabeng/OrgChart) and
+    Google Fonts. object-src/base-uri/frame-src/form-action are 'none' to close
+    plugin / <base> hijack / iframe / form-target attack vectors.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'unsafe-inline' https://cdnjs.cloudflare.com; img-src data:; connect-src https:; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none';">
   <title>Binary Anatomy</title>
 
-  <!-- Load jQuery and dabeng/OrgChart (local copies for offline portability) -->
   <!-- Load jQuery and dabeng/OrgChart -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/orgchart/2.1.9/css/jquery.orgchart.min.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js" ></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/orgchart/2.1.9/js/jquery.orgchart.min.js" ></script>
 
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <!-- Load marked.js (markdown parser) and DOMPurify (HTML sanitizer) for the
+       detailed binary report. The report comes from LLM output influenced by
+       attacker-controlled artifact strings; DOMPurify strips any prompt-injected
+       <script>/<iframe>/event-handler attributes before we set innerHTML. -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/14.1.4/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.2.4/purify.min.js"></script>
 
   <style>
     :root {
-      --bg:#2C2C2C;
-      --bg-raised: #1F1F1F;
-      --panel:#252525;
-      --accent-1: #00CCCC;
-      --accent-2: #FFA500;
+      /* Surface hierarchy (page → raised → panel → elevated) */
+      --surface-0: #15161a;
+      --surface-1: #1c1d22;
+      --surface-2: #23252b;
+      --surface-3: #2c2e36;
+
+      /* Typography colors */
+      --text:        #ebecef;
+      --text-muted:  #9ea1a8;
+      --text-faint:  #66686f;
+
+      /* Borders */
+      --border-subtle: rgba(255, 255, 255, 0.06);
+      --border:        rgba(255, 255, 255, 0.10);
+      --border-strong: rgba(255, 255, 255, 0.18);
+
+      /* Brand accents.
+         Hover and selected both use the cyan family — same hue, different
+         intensity. The artifacts-header pattern (10% bg + 18% border + full
+         text) sets the baseline; hover sits below that intensity, selected
+         sits above. Differentiation is by VOLUME, not by HUE. */
+      --accent:        #22d3ee;          /* cyan-400 — primary accent */
+      --accent-bright: #67e8f9;          /* cyan-300 — hover text */
+      --accent-vivid:  #a5f3fc;          /* cyan-200 — selected text */
+      --accent-warm:   #f59e0b;          /* amber — warm category accent (cluster name, count, API function name, CAPA) */
+      --accent-soft:        rgba(34, 211, 238, 0.10);   /* artifacts-header bg */
+      --accent-soft-strong: rgba(34, 211, 238, 0.20);   /* selected title bg */
+
+      /* Severity / semantic palette for category badge and threat indicators */
+      --danger:       #ef4444;
+      --danger-soft:  rgba(239, 68, 68, 0.16);
+      --warning:      #f59e0b;
+      --warning-soft: rgba(245, 158, 11, 0.16);
+      --info:         #60a5fa;
+      --info-soft:    rgba(96, 165, 250, 0.16);
+      --success:      #22c55e;
+      --success-soft: rgba(34, 197, 94, 0.16);
+      --neutral:      #94a3b8;
+      --neutral-soft: rgba(148, 163, 184, 0.18);
+
+      /* Semantic artifact colors — used for category-coded list items in the right tray */
+      --artifact-api:    #f0a8b4;   /* pink — Windows/POSIX APIs */
+      --artifact-string: #98d093;   /* green — binary strings */
+      --artifact-capa:   var(--accent-warm); /* amber — CAPA matches */
+      --artifact-lib:    var(--info);        /* blue — library references */
+
+      /* Scrollbar */
+      --scrollbar-thumb:       rgba(255, 255, 255, 0.10);
+      --scrollbar-thumb-hover: rgba(255, 255, 255, 0.20);
+
+      /* Radii */
+      --r-sm: 6px;
+      --r-md: 10px;
+      --r-lg: 14px;
+
+      /* Legacy aliases — kept so existing selectors don't all need rewriting */
+      --bg:        var(--surface-0);
+      --bg-raised: var(--surface-1);
+      --panel:     var(--surface-2);
+      --accent-1:  var(--accent);
+      --accent-2:  var(--accent-warm);
+
       /* Layout variables */
       --left-tray-w: 430px;
       --right-tray-w: 400px;
@@ -38,7 +108,14 @@
     body{
       background: var(--bg);
       color: var(--text);
-      font-family: "Google Sans Flex", system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, -apple-system, "system-ui", sans-serif
+      font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-feature-settings: "ss01", "cv11", "tnum";
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+    code, kbd, pre, samp, .mono {
+      font-family: "JetBrains Mono", "SF Mono", "Menlo", "Consolas", "DejaVu Sans Mono", monospace;
+      font-feature-settings: "tnum";
     }
 
     /* Content area container (fills the whole page now) */
@@ -60,13 +137,13 @@
       min-width: 430px; /* Minimum width */
       max-width: 800px; /* Maximum width */
       height: 100%;
-      background-color: var(--bg-raised);
-      border-right: 2px solid var(--accent-1);
+      background-color: var(--surface-1);
+      border-right: 1px solid var(--border);
       box-sizing: border-box;
-      padding: 20px; /* Increased padding */
+      padding: 20px;
       font-size: 0.9rem;
       line-height: 1.4;
-      color: #E0E0E0; /* Slightly softer white for text */
+      color: var(--text);
       z-index: 10;
       display: flex;
       flex-direction: column;
@@ -86,55 +163,111 @@
     .left-tray-scrollable-content::-webkit-scrollbar { width: 8px; }
     .left-tray-scrollable-content::-webkit-scrollbar-track { background: transparent; }
     .left-tray-scrollable-content::-webkit-scrollbar-thumb {
-        background-color: rgba(136, 136, 136, 0.4); border-radius: 4px;
+        background-color: var(--scrollbar-thumb); border-radius: 4px;
         border: 2px solid transparent; background-clip: content-box;
     }
-    .left-tray-scrollable-content::-webkit-scrollbar-thumb:hover { background-color: rgba(136, 136, 136, 0.7); }
+    .left-tray-scrollable-content::-webkit-scrollbar-thumb:hover { background-color: var(--scrollbar-thumb-hover); }
 
     /* Header/Branding */
     .left-tray-header {
         display: flex;
         align-items: center;
-        gap: 15px;
-        margin-bottom: 10px;
+        gap: 14px;
+        margin-bottom: 4px;
+        padding-bottom: 16px;
+        border-bottom: 1px solid var(--border-subtle);
     }
     .left-tray-header img {
-        width: 170px;
+        width: 160px;
         height: auto;
+        opacity: 0.95;
     }
     .left-tray-header h3 {
         margin: 0;
-        font-family: 'Exo', sans-serif;
-        font-size: 1.5rem;
-        font-weight: 600;
-        color: var(--accent-1);
-        letter-spacing: 0.5px;
-        line-height: 1.2;
+        font-size: 1.4rem;
+        font-weight: 700;
+        color: var(--accent);
+        letter-spacing: -0.01em;
+        line-height: 1.15;
     }
     .left-tray-header h3 span {
-        color: var(--accent-2);
+        color: var(--text-muted);
+        font-weight: 500;
+        font-size: 0.95rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        display: inline-block;
+        margin-top: 2px;
     }
+
+    /* --- BINARY CATEGORY BADGE --- */
+    .category-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin: 0 0 14px 0;
+    }
+    .category-row-label {
+        font-size: 0.7rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--text-faint);
+    }
+    .category-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        background: var(--neutral-soft);
+        color: var(--neutral);
+        border: 1px solid transparent;
+        white-space: nowrap;
+        transition: transform .15s ease;
+    }
+    .category-badge::before {
+        content: '';
+        display: inline-block;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: currentColor;
+        flex-shrink: 0;
+        box-shadow: 0 0 6px currentColor;
+    }
+    .category-badge--danger  { background: var(--danger-soft);  color: var(--danger);  border-color: rgba(239, 68, 68, 0.3); }
+    .category-badge--warning { background: var(--warning-soft); color: var(--warning); border-color: rgba(245, 158, 11, 0.3); }
+    .category-badge--info    { background: var(--info-soft);    color: var(--info);    border-color: rgba(96, 165, 250, 0.3); }
+    .category-badge--success { background: var(--success-soft); color: var(--success); border-color: rgba(34, 197, 94, 0.3); }
+    .category-badge--neutral { background: var(--neutral-soft); color: var(--neutral); border-color: rgba(148, 163, 184, 0.25); }
 
     /* Info Card Base Style */
     .info-card {
-        background-color: var(--panel);
-        border: 1px solid #444;
-        border-radius: 6px;
+        background-color: var(--surface-2);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--r-md);
         padding: 0;
         display: block;
-        transition: border-color 0.3s ease;
+        transition: border-color 0.18s ease, background-color 0.18s ease;
     }
     .info-card:has(.accordion-toggle:checked) {
-        border-color: var(--accent-1);
+        border-color: var(--border);
+        background-color: var(--surface-2);
     }
 
     .info-card h4 {
         margin-top: 0;
         margin-bottom: 12px;
-        font-size: 1rem;
+        font-size: 0.95rem;
         font-weight: 600;
-        color: var(--accent-1);
-        border-bottom: 1px solid #444;
+        color: var(--text);
+        letter-spacing: -0.005em;
+        border-bottom: 1px solid var(--border-subtle);
         padding-bottom: 8px;
     }
 
@@ -155,7 +288,7 @@
         border-radius: 5px;
     }
     .accordion-header:hover {
-        background-color: rgba(255, 255, 255, 0.05);
+        background-color: var(--border-subtle);
     }
 
     .accordion-header h4 {
@@ -168,11 +301,11 @@
         flex-shrink: 0;
         font-size: 1.8rem;
         font-weight: 200;
-        color: var(--accent-1);
-        opacity: 0.7;
+        color: var(--text-muted);
+        opacity: 0.6;
         margin-left: 10px;
         transform: rotate(0deg);
-        transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1), opacity 0.3s ease;
+        transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1), opacity 0.3s ease, color 0.3s ease;
         line-height: 1;
     }
     .accordion-header:hover::after {
@@ -180,6 +313,8 @@
     }
     .accordion-toggle:checked + .accordion-header::after {
         transform: rotate(90deg);
+        color: var(--accent);
+        opacity: 0.9;
     }
     .accordion-content {
         display: grid;
@@ -200,43 +335,43 @@
         margin-top: auto;
     }
 
-    /* --- CORRECTED FILE DETAILS CARD STYLES --- */
+    /* --- FILE DETAILS CARD STYLES --- */
     .details-list {
         display: flex;
         flex-direction: column;
-        gap: 8px;
+        gap: 6px;
     }
     .detail-item {
         display: flex;
         align-items: center;
-        background-color: var(--bg);
-        padding: 4px 8px;
-        border-radius: 4px;
-        transition: background-color 0.2s ease-in-out;
+        background-color: var(--surface-0);
+        padding: 6px 10px;
+        border-radius: var(--r-sm);
+        border: 1px solid var(--border-subtle);
+        transition: background-color 0.15s ease, border-color 0.15s ease;
     }
     .detail-item:hover {
-        background-color: #383838;
+        background-color: var(--surface-3);
+        border-color: var(--border);
     }
     .detail-label {
         font-weight: 600;
-        color: #AAA;
-        font-size: 0.8rem;
+        color: var(--text-faint);
+        font-size: 0.7rem;
         text-transform: uppercase;
-        letter-spacing: 0.5px;
-        margin-right: 0px; /* Space between label and value */
-        width: 85px; /* Fixed width for alignment */
-        flex-shrink: 0; /* Prevent label from shrinking */
+        letter-spacing: 0.08em;
+        width: 85px;
+        flex-shrink: 0;
     }
     .detail-value {
-        font-family: 'Menlo', 'Consolas', monospace;
+        font-family: "JetBrains Mono", "SF Mono", "Menlo", "Consolas", monospace;
         font-size: 0.8rem;
-        color: #E0E0E0;
+        color: var(--text);
         word-break: break-all;
         background-color: transparent;
-        border: 1px solid #444;
-        border-radius: 5px;
-        padding: 2px 4px;
-        border-radius: 3px;
+        border: none;
+        padding: 0;
+        font-feature-settings: "tnum";
     }
 
 
@@ -246,8 +381,7 @@
       justify-content: space-between;
       align-items: center;
       margin-bottom: 12px;
-      /* This adds the requested separator line */
-      border-bottom: 1px solid #444;
+      border-bottom: 1px solid var(--border-subtle);
       padding-bottom: 8px;
     }
     .accordion-header .summary-header {
@@ -269,25 +403,27 @@
     }
     .toggle-control {
       display: flex;
-      background-color: #333;
-      border-radius: 6px;
+      background-color: var(--surface-0);
+      border-radius: var(--r-sm);
       padding: 3px;
-      border: 1px solid #555;
+      border: 1px solid var(--border-subtle);
     }
     .toggle-btn {
       background-color: transparent;
       border: none;
-      color: #ccc;
+      color: var(--text-muted);
       padding: 4px 12px;
       cursor: pointer;
       border-radius: 4px;
-      font-size: 0.8rem;
+      font-size: 0.78rem;
       font-weight: 600;
-      transition: background-color 0.1s, color 0.1s;
+      letter-spacing: 0.01em;
+      transition: background-color 0.15s ease, color 0.15s ease;
     }
+    .toggle-btn:hover { color: var(--text); }
     .toggle-btn.active {
-      background-color: var(--accent-1);
-      color: #000;
+      background-color: var(--accent);
+      color: var(--surface-0);
     }
 
     #summaryContentContainer {
@@ -301,21 +437,141 @@
       word-break: break-word; /* Break long words */
     }
 
+    /* --- Rendered markdown styles for the detailed binary report ---
+       The report container holds the result of marked.parse() + DOMPurify;
+       it can contain headings, lists, paragraphs, code blocks, blockquotes.
+       Keep margins tight, fonts in the existing dark theme, accents on tokens. */
+    #anatomicalReportContent {
+      white-space: normal;
+      word-break: break-word;
+      line-height: 1.55;
+      font-size: 0.85rem;
+      color: var(--text);
+    }
+    #anatomicalReportContent > *:first-child { margin-top: 0; }
+    #anatomicalReportContent > *:last-child  { margin-bottom: 0; }
+    #anatomicalReportContent p {
+      white-space: normal;       /* override the parent #summaryContentContainer p { pre-wrap } rule */
+      margin: 0 0 0.7em 0;
+    }
+    #anatomicalReportContent h1,
+    #anatomicalReportContent h2,
+    #anatomicalReportContent h3,
+    #anatomicalReportContent h4,
+    #anatomicalReportContent h5,
+    #anatomicalReportContent h6 {
+      color: var(--accent-warm);
+      font-weight: 700;
+      letter-spacing: -0.005em;
+      margin: 1.1em 0 0.4em 0;
+      line-height: 1.25;
+    }
+    #anatomicalReportContent h1 { font-size: 1.05rem; }
+    #anatomicalReportContent h2 { font-size: 0.98rem; }
+    #anatomicalReportContent h3 { font-size: 0.92rem; }
+    #anatomicalReportContent h4,
+    #anatomicalReportContent h5,
+    #anatomicalReportContent h6 {
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      font-weight: 600;
+    }
+    #anatomicalReportContent ul,
+    #anatomicalReportContent ol {
+      margin: 0.4em 0 0.8em 0;
+      padding-left: 1.4em;
+    }
+    #anatomicalReportContent li {
+      margin: 0.2em 0;
+    }
+    #anatomicalReportContent li > p { margin: 0; }
+    #anatomicalReportContent ul li::marker { color: var(--accent); }
+    #anatomicalReportContent ol li::marker { color: var(--accent-warm); font-weight: 600; }
+    #anatomicalReportContent strong { color: var(--text); font-weight: 700; }
+    #anatomicalReportContent em     { color: var(--text); font-style: italic; }
+    #anatomicalReportContent code {
+      font-family: "JetBrains Mono", "SF Mono", "Menlo", "Consolas", monospace;
+      font-size: 0.78rem;
+      background-color: var(--surface-0);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--r-sm);
+      padding: 1px 5px;
+      color: var(--accent);
+    }
+    #anatomicalReportContent pre {
+      background-color: var(--surface-0);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--r-sm);
+      padding: 10px 12px;
+      margin: 0.6em 0;
+      overflow-x: auto;
+    }
+    #anatomicalReportContent pre code {
+      background: transparent;
+      border: none;
+      padding: 0;
+      color: var(--text);
+      font-size: 0.78rem;
+    }
+    #anatomicalReportContent blockquote {
+      margin: 0.6em 0;
+      padding: 6px 12px;
+      border-left: 3px solid var(--accent);
+      background-color: var(--accent-soft);
+      color: var(--text-muted);
+      font-style: italic;
+    }
+    #anatomicalReportContent a {
+      color: var(--accent);
+      text-decoration: underline;
+      text-decoration-color: rgba(34, 211, 238, 0.4);
+      text-underline-offset: 2px;
+    }
+    #anatomicalReportContent a:hover { text-decoration-color: var(--accent); }
+    #anatomicalReportContent hr {
+      border: none;
+      border-top: 1px solid var(--border-subtle);
+      margin: 1em 0;
+    }
+    #anatomicalReportContent table {
+      border-collapse: collapse;
+      margin: 0.6em 0;
+      font-size: 0.78rem;
+      width: 100%;
+    }
+    #anatomicalReportContent th,
+    #anatomicalReportContent td {
+      padding: 5px 8px;
+      border-bottom: 1px solid var(--border-subtle);
+      text-align: left;
+    }
+    #anatomicalReportContent th {
+      color: var(--text-faint);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      font-size: 0.7rem;
+      font-weight: 600;
+    }
+
     #summaryContentContainer::-webkit-scrollbar { height: 8px; }
     #summaryContentContainer::-webkit-scrollbar-track { background: transparent; }
     #summaryContentContainer::-webkit-scrollbar-thumb {
-        background-color: rgba(136, 136, 136, 0.4); border-radius: 4px;
+        background-color: var(--scrollbar-thumb); border-radius: 4px;
         border: 2px solid transparent; background-clip: content-box;
     }
-    #summaryContentContainer::-webkit-scrollbar-thumb:hover { background-color: rgba(136, 136, 136, 0.7); }
+    #summaryContentContainer::-webkit-scrollbar-thumb:hover { background-color: var(--scrollbar-thumb-hover); }
 
     .call-to-action {
-        color: var(--accent-1);
+        color: var(--accent);
         font-style: italic;
         font-weight: 600;
-        background-color: rgba(0, 204, 204, 0.1);
-        padding: 8px;
-        border-radius: 6px;
+        font-size: 0.82rem;
+        background-color: var(--accent-soft);
+        border: 1px solid rgba(34, 211, 238, 0.18);
+        padding: 8px 10px;
+        border-radius: var(--r-sm);
         text-align: center;
         margin-top: 15px;
         margin-bottom: 0;
@@ -323,9 +579,10 @@
 
     .disclaimer {
         font-size: 0.75rem;
-        color: #888;
+        color: var(--text-faint);
         font-style: italic;
-        margin-bottom: 12px; /* Space between disclaimer and link */
+        line-height: 1.55;
+        margin-bottom: 12px;
         margin-top: 0;
     }
 
@@ -338,13 +595,13 @@
       align-items: center;
       gap: 8px;
       text-decoration: none;
-      color: #AAA;
+      color: var(--text-muted);
       font-size: 0.8rem;
       font-weight: 600;
-      transition: color 0.3s ease;
+      transition: color 0.18s ease;
     }
     .github-link:hover {
-      color: var(--accent-1);
+      color: var(--accent);
     }
     .github-link svg {
       width: 18px;
@@ -359,14 +616,14 @@
       left: 430px;
       right: 400px;
       bottom: 0;
-      background-color: var(--bg);
+      background-color: var(--surface-0);
       display: flex;
       justify-content: center;
       align-items: center;
-      transition: left 0.4s cubic-bezier(0.25, 0.8, 0.25, 1), right 0.3s ease; /* Smooth transition for left position */
+      transition: left 0.4s cubic-bezier(0.25, 0.8, 0.25, 1), right 0.3s ease;
     }
 
-    /* --- REFINED RIGHT TRAY STYLES --- */
+    /* --- RIGHT TRAY STYLES --- */
     #rightTray {
       position: absolute;
       top: 0;
@@ -376,8 +633,8 @@
       min-width: 300px;
 
       height: 100%;
-      background-color: var(--bg-raised);
-      border-left: 2px solid var(--accent-1);
+      background-color: var(--surface-1);
+      border-left: 1px solid var(--border);
       transform: translateX(0);
       transition: transform 0.3s ease, width 0.3s ease;
       z-index: 10;
@@ -385,9 +642,8 @@
       box-sizing: border-box;
       overflow-y: auto;
       overflow-x: hidden;
-      font-family: 'Exo', sans-serif;
       font-size: 0.9rem;
-      color: #FFFFFF;
+      color: var(--text);
     }
 
     #rightTray.hidden { transform: translateX(100%); }
@@ -395,31 +651,55 @@
     #rightTray::-webkit-scrollbar { width: 8px; }
     #rightTray::-webkit-scrollbar-track { background: transparent; }
     #rightTray::-webkit-scrollbar-thumb {
-        background-color: rgba(136, 136, 136, 0.4); border-radius: 4px;
+        background-color: var(--scrollbar-thumb); border-radius: 4px;
         border: 2px solid transparent; background-clip: content-box;
     }
-    #rightTray::-webkit-scrollbar-thumb:hover { background-color: rgba(136, 136, 136, 0.7); }
+    #rightTray::-webkit-scrollbar-thumb:hover { background-color: var(--scrollbar-thumb-hover); }
 
     #clusterName {
-      margin: 0 0 16px 0; font-size: 1.25rem; font-weight: 600; color: var(--accent-2);
-      padding-bottom: 8px; border-bottom: 1px solid #444;
+      margin: 0 0 16px 0;
+      font-size: 1.2rem;
+      font-weight: 700;
+      color: var(--accent-warm);
+      letter-spacing: -0.01em;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--border-subtle);
     }
 
     .tabs {
-      display: flex; gap: 5px; margin-bottom: 10px;
+      display: flex;
+      gap: 4px;
+      margin-bottom: 12px;
+      padding: 3px;
+      background-color: var(--surface-0);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--r-sm);
     }
     .tab-btn {
-      flex: 1; background-color: #333; color: #ccc; border: 1px solid #555;
-      padding: 8px; text-align: center; cursor: pointer; border-radius: 4px;
+      flex: 1;
+      background-color: transparent;
+      color: var(--text-muted);
+      border: none;
+      padding: 6px 10px;
+      text-align: center;
+      cursor: pointer;
+      border-radius: 4px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      transition: background-color 0.15s ease, color 0.15s ease;
     }
-    .tab-btn:hover { background-color: #444; color: #fff; }
+    .tab-btn:hover { color: var(--text); }
     .tab-btn.active {
-      background-color: var(--accent-1); color: #000000; font-weight: bold; border-color: var(--accent-1);
+      background-color: var(--accent);
+      color: var(--surface-0);
     }
 
     #rightTrayContent {
-      background-color: var(--panel); border: 1px solid #444;
-      border-radius: 6px; padding: 12px;
+      background-color: var(--panel);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--r-sm);
+      padding: 12px;
       overflow-x: auto;
     }
 
@@ -428,58 +708,74 @@
 
     #rightTrayPlaceholder {
       display: flex; flex-direction: column; justify-content: center;
-      align-items: center; height: 80%; text-align: center; color: #777;
+      align-items: center; height: 80%; text-align: center; color: var(--text-faint);
     }
-    #rightTrayPlaceholder span { font-size: 1.5rem; font-weight: bold; color: #555; margin-bottom: 16px; }
+    #rightTrayPlaceholder span { font-size: 1.4rem; font-weight: 700; color: var(--text-faint); margin-bottom: 16px; letter-spacing: -0.01em; }
     #rightTrayDetails.hidden, #rightTrayPlaceholder.hidden { display: none; }
 
     .hideTrayBtn {
-      display: block; width: 100%; margin-top: 20px; padding: 8px;
-      background-color: #333333; border: 1px solid #555; color: #ffffff;
-      cursor: pointer; border-radius: 4px; text-align: center;
+      display: block;
+      width: 100%;
+      margin-top: 16px;
+      padding: 8px;
+      background-color: var(--surface-0);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-muted);
+      cursor: pointer;
+      border-radius: var(--r-sm);
+      text-align: center;
+      font-size: 0.78rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
       box-sizing: border-box;
+      transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
     }
-    .hideTrayBtn:hover { background-color: #444; border-color: #777; }
+    .hideTrayBtn:hover { background-color: var(--surface-3); color: var(--text); border-color: var(--border); }
 
     .artifacts-header {
       display: block;
       width: 100%;
-      padding: 8px;
+      padding: 8px 12px;
       margin-bottom: 20px;
-      background-color: rgba(0, 204, 204, 0.1); /* Changed from #333333 */
-      border: none; /* Changed from 1px solid #555 */
-      color: var(--accent-1);
+      background-color: var(--accent-soft);
+      border: 1px solid rgba(34, 211, 238, 0.18);
+      color: var(--accent);
       cursor: default;
-      border-radius: 6px; /* Changed from 4px */
+      border-radius: var(--r-sm);
       text-align: center;
       font-weight: 600;
-      font-size: 1rem;
+      font-size: 0.85rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
       box-sizing: border-box;
     }
 
     /* --- ARTIFACTS & API TRACE STYLES --- */
     .description-card {
-        background-color: var(--bg);
-        border: 1px solid #444;
-        border-radius: 4px;
-        padding: 10px;
+        background-color: var(--surface-0);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--r-sm);
+        padding: 10px 12px;
         margin-bottom: 20px;
-        color: #E0E0E0;
-        font-size: 0.9rem;
+        color: var(--text);
+        font-size: 0.85rem;
+        line-height: 1.55;
     }
     .description-card h5 {
         margin: 0 0 8px 0;
-        font-size: 1rem;
+        font-size: 0.7rem;
         font-weight: 600;
-        color: var(--accent-1);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--text-faint);
     }
     .artifact-category { margin-bottom: 15px; }
     .artifact-category:last-child { margin-bottom: 0; }
     .artifact-category h5, .api-trace-header h5 {
-        margin: 0 0 8px 0; font-size: 0.8rem; font-weight: 600;
-        color: var(--accent-1);
-        text-transform: uppercase; letter-spacing: 0.5px;
-        border-bottom: 1px solid #444; padding-bottom: 4px;
+        margin: 0 0 8px 0; font-size: 0.7rem; font-weight: 600;
+        color: var(--text-faint);
+        text-transform: uppercase; letter-spacing: 0.08em;
+        border-bottom: 1px solid var(--border-subtle); padding-bottom: 4px;
         display: flex;
         justify-content: space-between;
         align-items: center;
@@ -519,19 +815,20 @@
         position: absolute;
         display: none;
         padding: 8px 12px;
-        background-color: rgba(31, 31, 31, 0.95); /* #1F1F1F from your theme */
-        border: 1px solid var(--accent-1);
-        border-radius: 6px;
-        color: #E0E0E0;
-        font-family: 'Menlo', 'Consolas', monospace;
-        font-size: 0.8rem;
-        max-width: 600px; /* Prevent it from getting too wide */
-        word-wrap: break-word; /* Wrap long strings within the tooltip */
+        background-color: rgba(28, 29, 34, 0.95); /* matches --surface-1 with alpha */
+        border: 1px solid var(--border);
+        border-radius: var(--r-sm);
+        color: var(--text);
+        font-family: "JetBrains Mono", "SF Mono", "Menlo", "Consolas", monospace;
+        font-size: 0.78rem;
+        max-width: 600px;
+        word-wrap: break-word;
         z-index: 9999;
-        pointer-events: none; /* Prevents the tooltip from interfering with mouse events */
+        pointer-events: none;
 
         -webkit-backdrop-filter: blur(10px);
         backdrop-filter: blur(10px);
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
 
         opacity: 0;
         transform: scale(0.95);
@@ -555,10 +852,20 @@
     }
 
     .artifact-list li {
-        position: relative; background-color: #333;
-        padding: 4px 30px 4px 8px; border-radius: 3px;
-        margin-bottom: 4px; white-space: nowrap;
-        overflow: hidden; text-overflow: ellipsis;
+        position: relative;
+        background-color: var(--surface-3);
+        border: 1px solid var(--border-subtle);
+        padding: 4px 30px 4px 8px;
+        border-radius: var(--r-sm);
+        margin-bottom: 4px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        transition: background-color 0.15s ease, border-color 0.15s ease;
+    }
+    .artifact-list li:hover {
+        background-color: var(--surface-2);
+        border-color: var(--border);
     }
 
     .artifact-list li > span:first-child {
@@ -575,137 +882,375 @@
         mask-image: none;
     }
 
-    .artifact-api { color: #FFB6C1; }
-    .artifact-string { color: #98C379; }
-    .artifact-capa { color: #FFA500; }
-    .artifact-lib { color: #89CFF0; }
+    .artifact-api    { color: var(--artifact-api); }
+    .artifact-string { color: var(--artifact-string); }
+    .artifact-capa   { color: var(--artifact-capa); }
+    .artifact-lib    { color: var(--artifact-lib); }
 
     #apiTraceFilter {
-      background-color: rgba(0, 0, 0, 0.2);
-      border: 1px solid rgba(0, 204, 204, 0.4);
-      border-radius: 8px;
+      background-color: var(--surface-0);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--r-sm);
       margin-bottom: 15px !important;
-      transition: all 0.3s ease;
+      transition: border-color 0.18s ease;
       overflow: hidden;
     }
 
     #apiTraceFilter[open] {
-      border-color: rgba(0, 204, 204, 0.7);
+      border-color: var(--border);
     }
 
     #apiTraceFilter summary {
       padding: 8px 12px !important;
       cursor: pointer;
-      color: var(--accent-1);
+      color: var(--text-muted);
       font-weight: 600;
+      font-size: 0.78rem;
+      letter-spacing: 0.02em;
       outline: none;
-      /* Default background is now transparent */
+      transition: background-color 0.15s ease, color 0.15s ease;
     }
 
     #apiTraceFilter summary:hover {
-      background-color: rgba(0, 204, 204, 0.1);
+      background-color: var(--surface-3);
+      color: var(--text);
     }
 
     #apiTraceFilter[open] summary {
-      background-color: rgba(0, 204, 204, 0.15);
-      border-bottom: 1px solid rgba(0, 204, 204, 0.4);
+      background-color: var(--surface-2);
+      color: var(--accent);
+      border-bottom: 1px solid var(--border-subtle);
     }
 
     #apiTraceCheckContainer {
       margin: 0 !important;
       padding: 12px !important;
-      /* No background-color, so it uses the parent's translucent background */
     }
 
-    .apiCallCheckbox { display: block; margin: 4px 0; color: #FFFFFF; }
+    .apiCallCheckbox { display: block; margin: 4px 0; color: var(--text); font-size: 0.8rem; }
 
     #apiTraceLines ol { list-style: none; padding: 0; margin: 0; }
     #apiTraceLines li {
-        font-family: 'Menlo', 'Consolas', monospace;
-        font-size: 0.8rem;
-        padding: 4px 6px; border-bottom: 1px solid #333;
+        font-family: "JetBrains Mono", "SF Mono", "Menlo", "Consolas", monospace;
+        font-size: 0.78rem;
+        padding: 5px 8px;
+        border-bottom: 1px solid var(--border-subtle);
         white-space: nowrap;
+        font-feature-settings: "tnum";
     }
-    #apiTraceLines li:nth-child(even) { background-color: rgba(0,0,0,0.2); }
-    .api-function { color: #FFA500; font-weight: 600; }
-    .api-args { color: #E0E0E0; }
+    #apiTraceLines li:nth-child(even) { background-color: var(--surface-0); }
+    .api-function { color: var(--accent-warm); font-weight: 600; }
+    .api-args     { color: var(--text-muted); }
+
+    /* --- MITRE ATT&CK STYLES --- */
+    #mitreAttack .mitre-empty {
+      padding: 12px;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      font-style: italic;
+      text-align: center;
+      background: var(--surface-0);
+      border: 1px dashed var(--border-subtle);
+      border-radius: var(--r-sm);
+    }
+    .mitre-tactic-group { margin-bottom: 18px; }
+    .mitre-tactic-group:last-child { margin-bottom: 0; }
+    .mitre-tactic-header {
+      margin: 0 0 8px 0;
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-faint);
+      border-bottom: 1px solid var(--border-subtle);
+      padding-bottom: 4px;
+    }
+    .mitre-technique {
+      background-color: var(--surface-0);
+      border: 1px solid var(--border-subtle);
+      border-left: 3px solid var(--accent);
+      border-radius: var(--r-sm);
+      padding: 8px 12px;
+      margin-bottom: 8px;
+      font-size: 0.85rem;
+      line-height: 1.5;
+    }
+    .mitre-technique:last-child { margin-bottom: 0; }
+    .mitre-technique-head {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+    .mitre-technique-id {
+      font-family: 'Source Code Pro', 'Menlo', monospace;
+      font-weight: 700;
+      color: var(--accent-warm);
+      text-decoration: none;
+      font-size: 0.8rem;
+    }
+    .mitre-technique-id:hover { text-decoration: underline; }
+    .mitre-technique-name {
+      color: var(--text);
+      font-weight: 500;
+      flex: 1;
+      min-width: 0;
+    }
+    .mitre-rationale {
+      color: var(--text-muted);
+      font-size: 0.78rem;
+      line-height: 1.5;
+    }
 
     #rightTrayContent::-webkit-scrollbar { height: 8px; }
     #rightTrayContent::-webkit-scrollbar-track { background: transparent; }
     #rightTrayContent::-webkit-scrollbar-thumb {
-        background-color: rgba(136, 136, 136, 0.4); border-radius: 4px;
+        background-color: var(--scrollbar-thumb); border-radius: 4px;
         border: 2px solid transparent; background-clip: content-box;
     }
-    #rightTrayContent::-webkit-scrollbar-thumb:hover { background-color: rgba(136, 136, 136, 0.7); }
+    #rightTrayContent::-webkit-scrollbar-thumb:hover { background-color: var(--scrollbar-thumb-hover); }
 
 
     #diagramStatus {
       position: absolute; top: 50%; left: 50%;
-      transform: translate(-50%, -50%); color: var(--accent-1);
-      font-size: 16px; text-align: center; display: none; z-index: 5;
+      transform: translate(-50%, -50%); color: var(--text-muted);
+      font-size: 0.9rem; text-align: center; display: none; z-index: 5;
     }
     #dataLoader {
       margin: 10px;
-      padding: 10px;
-      border: 1px dashed #ccc;
-      border-radius: 6px;
-      background: #fafafa;
+      padding: 10px 12px;
+      border: 1px dashed var(--border);
+      border-radius: var(--r-sm);
+      background: var(--surface-1);
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
       align-items: center;
-      color: #333;
+      color: var(--text-muted);
+      font-size: 0.82rem;
     }
-    #dataLoader label { font-weight: 600; }
-    #jsonDropZone {
-      border: 1px dashed #999;
-      padding: 6px 10px;
-      border-radius: 4px;
-      background: #fff;
+    #dataLoader label { font-weight: 600; color: var(--text-muted); }
+    #dataLoader input[type="file"]::file-selector-button {
+      background: var(--surface-3);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: var(--r-sm);
+      padding: 4px 10px;
+      font-size: 0.78rem;
+      font-weight: 600;
       cursor: pointer;
+      margin-right: 8px;
+      transition: background-color 0.15s ease, border-color 0.15s ease;
+    }
+    #dataLoader input[type="file"]::file-selector-button:hover {
+      background: var(--surface-2);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    #dataLoader input[type="text"] {
+      background: var(--surface-0);
+      color: var(--text);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--r-sm);
+      padding: 5px 8px;
+      font-size: 0.82rem;
+      outline: none;
+      transition: border-color 0.15s ease;
+    }
+    #dataLoader input[type="text"]:focus {
+      border-color: var(--accent);
+    }
+    #dataLoader input[type="text"]::placeholder { color: var(--text-faint); }
+    #jsonDropZone {
+      border: 1px dashed var(--border);
+      padding: 6px 10px;
+      border-radius: var(--r-sm);
+      background: var(--surface-0);
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 0.82rem;
+      transition: border-color 0.15s ease, color 0.15s ease;
+    }
+    #jsonDropZone:hover {
+      border-color: var(--accent);
+      color: var(--accent);
     }
 
     /* --- OrgChart Customizations --- */
     .orgchart { background: transparent; }
     .orgchart .node {
-      background-color: #4A4A3A; border: 2px solid var(--accent-1); border-radius: 8px;
-      width: 220px; transition: all 0.3s; margin: 0 5px; padding: 4px; box-sizing: border-box;
+      background-color: var(--surface-2);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--r-md);
+      width: 220px;
+      transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+      margin: 0 5px;
+      padding: 4px;
+      box-sizing: border-box;
+      box-shadow: 0 1px 0 rgba(0,0,0,0.3), 0 4px 12px rgba(0,0,0,0.18);
     }
     .orgchart .node.library-node {
-      background-color: oklch(0.47 0.22 28.96 / 0.10);
-      border-color: rgba(137, 207, 240, 0.6);
-      .content {
-        background-color: oklch(0.47 0.22 28.96 / 0.10);
-      }
+      background-color: var(--surface-1);
+      border-color: rgba(137, 207, 240, 0.35);
+      opacity: 0.92;
+    }
+    .orgchart .node.library-node .title {
+      color: var(--info);
+    }
+    .orgchart .node.library-node .content {
+      color: var(--info);
+      opacity: 0.85;
     }
     .orgchart .node .title {
-      background-color: var(--bg-raised); color: var(--accent-2); font-weight: 600; font-size: 10pt;
-      padding: 4px; height: 24px; display: flex; align-items: center; justify-content: center;
-      transition: all 0.3s; border-radius: 4px;
+      background-color: var(--surface-1);
+      /* Default title is muted gray. Amber is reserved exclusively for the
+         selected state and cyan exclusively for hover, so hue alone tells
+         the user "this one is chosen" vs "this is just a node". */
+      color: var(--text-muted);
+      font-weight: 600;
+      font-size: 9.5pt;
+      letter-spacing: 0.02em;
+      padding: 4px 8px;
+      height: 26px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background-color 0.18s ease, color 0.18s ease;
+      border-radius: var(--r-sm);
     }
     .orgchart .node .content {
-      box-sizing: border-box; background-color: var(--bg); color: var(--accent-1); border: 0;
-      margin-top: 4px; padding: 8px; font-size: 11pt; font-weight: normal; height: auto;
-      white-space: normal; word-break: break-word; transition: all 0.3s; border-radius: 4px;
+      box-sizing: border-box;
+      background-color: var(--surface-0);
+      color: var(--text);
+      border: 0;
+      margin-top: 4px;
+      padding: 10px 8px;
+      font-size: 10.5pt;
+      font-weight: 500;
+      letter-spacing: -0.005em;
+      height: auto;
+      white-space: normal;
+      word-break: break-word;
+      transition: background-color 0.18s ease;
+      border-radius: var(--r-sm);
     }
-    .orgchart .node#0 { width: auto; min-width: 220px; background-color: transparent; }
-    .orgchart .node#0 .title { height: auto; padding: 12px; font-size: 12pt; background-color: var(--bg); color: var(--accent-1); }
+    .orgchart .node#0 { width: auto; min-width: 220px; background-color: transparent; border: none; box-shadow: none; }
+    .orgchart .node#0 .title { height: auto; padding: 10px 16px; font-size: 11pt; background-color: var(--surface-1); color: var(--accent); border: 1px solid var(--border); }
     .orgchart .node#0 .content { display: none; }
-    .orgchart .node:hover { border-color: var(--accent-2); }
-    .orgchart .node:hover .title, .orgchart .node.selected .title { background-color: var(--accent-2); color: var(--bg-raised); cursor: pointer; }
-    .orgchart .node.selected { border-color: var(--accent-2); }
-    .orgchart .lines .downLine { background-color: var(--accent-1); }
-    .orgchart .lines .leftLine, .orgchart .lines .rightLine, .orgchart .lines .topLine { border-color: var(--accent-1); }
-    .orgchart .lines .downLine:first-of-type { background-color: var(--accent-1) !important; }
+    /* Hover: subtle cyan — soft glow, no fill change, brighter cyan-300 text.
+       Lifts 1px to feel responsive. Tuned BELOW the selected intensity so
+       selection has clear headroom to dominate.
+       background-color override is needed because the orgchart library
+       ships `.orgchart .node:hover { background-color: rgba(238,217,54,.5) }`
+       at the same specificity — without overriding the bg explicitly, our
+       cyan title overlay layers on top of orgchart's yellow node bg and
+       produces an olive/khaki render. */
+    .orgchart .node:hover {
+      background-color: var(--surface-2) !important;
+      border-color: var(--accent);
+      box-shadow:
+        0 0 0 1px rgba(34, 211, 238, 0.30),
+        0 1px 0 rgba(0,0,0,0.3),
+        0 6px 18px rgba(34, 211, 238, 0.28);
+      transform: translateY(-1px);
+    }
+    .orgchart .node:hover .title {
+      color: var(--accent-bright);
+      cursor: pointer;
+    }
+
+    /* Override orgchart's default `.focused` rule, which paints clicked nodes
+       with `rgba(238, 217, 54, .5)` (saturated yellow). That fights the cyan
+       selection theme — when our cyan title bg is layered on top of orgchart's
+       yellow node bg, the result reads as olive/khaki. !important is used here
+       because the orgchart stylesheet ships at the same specificity and we
+       cannot guarantee its load order. */
+    .orgchart .node.focused {
+      background-color: var(--surface-2) !important;
+    }
+
+    /* Selected: same cyan family, much louder — stronger ring, prominent glow,
+       tinted title fill, and the brightest cyan-200 text for contrast on the
+       tint. Subtle cyan body tint reinforces the title-bg color so they read
+       as one unit, not two stacked tints. Stays planted (no translate) —
+       "committed", not "responsive". */
+    .orgchart .node.selected {
+      background-color: var(--surface-2) !important;
+      border-color: var(--accent);
+      box-shadow:
+        0 0 0 1.5px rgba(34, 211, 238, 0.65),
+        0 1px 0 rgba(0,0,0,0.3),
+        0 12px 32px rgba(34, 211, 238, 0.55);
+    }
+    .orgchart .node.selected .title {
+      background-color: var(--accent-soft-strong);
+      color: var(--accent-vivid);
+      border-bottom: 1px solid rgba(34, 211, 238, 0.40);
+    }
+
+    /* Library hover stays blue (must override the generic cyan rule above). */
+    .orgchart .node.library-node:hover {
+      border-color: var(--info);
+      box-shadow:
+        0 0 0 1px rgba(96, 165, 250, 0.45),
+        0 1px 0 rgba(0,0,0,0.3),
+        0 8px 22px rgba(96, 165, 250, 0.40);
+    }
+    .orgchart .node.library-node:hover .title {
+      color: #93c5fd;          /* blue-300 */
+    }
+    .orgchart .lines .downLine { background-color: var(--border-strong); }
+    .orgchart .lines .leftLine, .orgchart .lines .rightLine, .orgchart .lines .topLine { border-color: var(--border-strong); }
+    .orgchart .lines .downLine:first-of-type { background-color: var(--border-strong) !important; }
     .orgchart .node .edge.topEdge, .orgchart .node .edge.leftEdge, .orgchart .node .edge.rightEdge { display: none; }
     .orgchart .node .edge.bottomEdge {
-      display: block; width: 20px; height: 20px; font-size: 16px; font-weight: bold; color: var(--accent-1);
-      border: 1px solid var(--accent-1); background-color: var(--bg); border-radius: 50%; box-shadow: 0 0 8px rgba(0, 204, 204, 0.7);
-      cursor: pointer; position: absolute; bottom: -11px; left: 50%; transform: translateX(-50%);
-      cursor:pointer; transition: transform .15s, background-color .15s, color .15s; z-index:5;
+      display: block; width: 22px; height: 22px;
+      font-size: 16px; font-weight: 700;
+      color: var(--accent);
+      border: 1px solid var(--border-strong);
+      background-color: var(--surface-1);
+      border-radius: 50%;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+      cursor: pointer;
+      position: absolute; bottom: -12px; left: 50%;
+      transform: translateX(-50%);
+      transition: transform .18s ease, background-color .18s ease, color .18s ease, border-color .18s ease, box-shadow .18s ease;
+      z-index: 5;
     }
     .orgchart .node .edge.bottomEdge:hover {
-      background-color: var(--accent-1); color: var(--bg); box-shadow: 0 0 12px var(--accent-1); transform: translateX(-50%) scale(1.1);
+      background-color: var(--accent);
+      border-color: var(--accent);
+      color: var(--surface-0);
+      box-shadow: 0 2px 12px rgba(34, 211, 238, 0.55);
+      transform: translateX(-50%) scale(1.1);
+    }
+
+    /* Selected node's expander adopts the same loud cyan as the selected
+       node itself — keeps the chosen cluster reading as a single visual unit
+       (border + title + expander all on the same intense cyan). */
+    .orgchart .node.selected .edge.bottomEdge {
+      color: var(--accent-vivid);
+      border-color: rgba(34, 211, 238, 0.6);
+      box-shadow: 0 2px 12px rgba(34, 211, 238, 0.55);
+    }
+    .orgchart .node.selected .edge.bottomEdge:hover {
+      background-color: var(--accent);
+      border-color: var(--accent);
+      color: var(--surface-0);
+      box-shadow: 0 2px 14px rgba(34, 211, 238, 0.7);
+    }
+
+    /* Library node expander stays info-blue to match the library identity. */
+    .orgchart .node.library-node .edge.bottomEdge {
+      color: var(--info);
+      border-color: rgba(96, 165, 250, 0.4);
+    }
+    .orgchart .node.library-node .edge.bottomEdge:hover {
+      background-color: var(--info);
+      border-color: var(--info);
+      color: var(--surface-0);
+      box-shadow: 0 2px 12px rgba(96, 165, 250, 0.5);
     }
     .orgchart .node .edge.bottomEdge::before {
       content: "-"; position: absolute; top: 50%; left: 50%; transform: translate(-62%, -50%); line-height: 1;
@@ -730,12 +1275,12 @@
 
     #viewControlPanel {
         width: 250px;
-        background-color: rgba(44, 44, 44, 0.6);
+        background-color: rgba(28, 29, 34, 0.78);  /* matches --surface-1 with alpha for blur */
         backdrop-filter: blur(16px);
         -webkit-backdrop-filter: blur(16px);
-        border: 1px solid rgba(0, 204, 204, 0.4);
-        border-radius: 12px;
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+        border: 1px solid var(--border);
+        border-radius: var(--r-md);
+        box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
         display: flex;
         flex-direction: column;
         padding: 6px;
@@ -746,29 +1291,31 @@
     .control-btn-group {
         display: flex;
         width: 100%;
-        border: 1px solid rgba(0, 204, 204, 0.5);
-        border-radius: 8px;
+        border: 1px solid var(--border);
+        border-radius: var(--r-sm);
         overflow: hidden;
     }
 
     .control-btn {
         flex: 1;
         background-color: transparent;
-        color: #E0E0E0;
+        color: var(--text-muted);
         border: none;
-        padding: 8px;
-        font-size: 13px;
+        padding: 7px 8px;
+        font-size: 0.78rem;
         font-weight: 600;
+        letter-spacing: 0.01em;
         cursor: pointer;
+        transition: background-color 0.15s ease, color 0.15s ease;
     }
 
     .control-btn:hover {
-        background-color: rgba(0, 204, 204, 0.2);
-        color: var(--accent-1);
+        background-color: var(--accent-soft);
+        color: var(--accent);
     }
 
     .control-btn-group .control-btn:first-child {
-        border-right: 1px solid rgba(0, 204, 204, 0.5);
+        border-right: 1px solid var(--border);
     }
 
     .toggle-switch {
@@ -776,56 +1323,69 @@
         align-items: center;
         justify-content: space-between;
         width: 100%;
-        font-size: 11px;
-        background-color: rgba(0, 0, 0, 0.2);
-        border-radius: 8px;
+        font-size: 0.7rem;
+        letter-spacing: 0.02em;
+        background-color: var(--surface-0);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--r-sm);
         padding: 7px 10px;
         box-sizing: border-box;
         font-weight: 600;
-        color: #E0E0E0;
+        color: var(--text-muted);
     }
 
     .toggle-switch input { display: none; }
     .toggle-switch .slider {
         position: relative; width: 34px; height: 18px;
-        background-color: #555; border-radius: 17px;
-        transition: background-color 0.1s ease-in-out;
+        background-color: var(--surface-3);
+        border: 1px solid var(--border);
+        border-radius: 17px;
+        transition: background-color 0.15s ease, border-color 0.15s ease;
         cursor: pointer;
     }
     .toggle-switch .slider:before {
         content: ""; position: absolute;
-        height: 12px; width: 12px; left: 3px; bottom: 3px;
-        background-color: white; border-radius: 50%;
-        transition: transform 0.1s ease-in-out;
+        height: 12px; width: 12px; left: 2px; top: 2px;
+        background-color: var(--text-muted); border-radius: 50%;
+        transition: transform 0.15s ease, background-color 0.15s ease;
     }
-    .toggle-switch input:checked + .slider { background-color:var(--accent-1); }
-    .toggle-switch input:checked + .slider:before { transform: translateX(16px); }
+    .toggle-switch input:checked + .slider {
+        background-color: var(--accent);
+        border-color: var(--accent);
+    }
+    .toggle-switch input:checked + .slider:before {
+        transform: translateX(16px);
+        background-color: var(--surface-0);
+    }
 
     .view-hint {
-        color: #999;
-        font-size: 11px;
+        color: var(--text-faint);
+        font-size: 0.7rem;
         text-align: center;
         font-style: italic;
         width: 250px;
         padding: 2px 0;
+        letter-spacing: 0.02em;
     }
 
     .control-status-bar {
       width: 100%;
-      background-color: rgba(0, 0, 0, 0.2);
-      border-radius: 8px;
+      background-color: var(--surface-0);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--r-sm);
       padding: 7px 10px;
       box-sizing: border-box;
     }
     #clusterCountDisplay {
-      color: #E0E0E0;
-      font-size: 12px;
+      color: var(--text-muted);
+      font-size: 0.72rem;
       font-weight: 500;
+      letter-spacing: 0.02em;
       text-align: center;
     }
     #clusterCountDisplay strong {
-        color: var(--accent-2);
-        font-weight: 600;
+        color: var(--accent-warm);
+        font-weight: 700;
     }
 
     @media (prefers-reduced-motion: reduce){
@@ -849,9 +1409,38 @@
     </div>
 
     <div class="left-tray-scrollable-content">
+      <!-- Anatomical Summary / Report -->
+      <div class="info-card accordion-item">
+          <input type="checkbox" name="left-tray-accordion" id="acc-summary" class="accordion-toggle" checked>
+          <label for="acc-summary" class="accordion-header">
+          <div class="summary-header">
+              <h4 id="summaryTitle">Anatomical Summary</h4>
+              <div class="toggle-control">
+                  <button id="summaryBtn" class="toggle-btn active">Summary</button>
+                  <button id="reportBtn" class="toggle-btn">Report</button>
+              </div>
+          </div>
+          </label>
+          <div class="accordion-content">
+              <div class="accordion-content-inner">
+          <div class="category-row">
+              <span class="category-row-label">Category</span>
+              <span id="binaryCategoryBadge" class="category-badge category-badge--neutral">Undetermined</span>
+          </div>
+          <div id="summaryContentContainer">
+              <p id="anatomicalSummaryContent"><!--SUMMARY_PLACEHOLDER--></p>
+              <!-- Note: <div>, not <p>. Rendered markdown produces block elements
+                   (<h2>, <ul>, <pre>) which are invalid inside <p>. -->
+              <div id="anatomicalReportContent" style="display: none; opacity: 0;"><!--REPORT_PLACEHOLDER--></div>
+          </div>
+          <p class="call-to-action">Select a node in the diagram for cluster-specific details.</p>
+              </div>
+          </div>
+      </div>
+
       <!-- File Details -->
       <div class="info-card accordion-item">
-          <input type="checkbox" name="left-tray-accordion" id="acc-file-details" class="accordion-toggle">
+          <input type="checkbox" name="left-tray-accordion" id="acc-file-details" class="accordion-toggle" checked>
           <label for="acc-file-details" class="accordion-header">
           <h4>File Details</h4>
           </label>
@@ -871,29 +1460,6 @@
                 <span id="fileType" class="detail-value"><!--TYPE_PLACEHOLDER--></span>
                       </div>
                   </div>
-              </div>
-          </div>
-      </div>
-
-      <!-- Anatomical Summary / Report -->
-      <div class="info-card accordion-item">
-          <input type="checkbox" name="left-tray-accordion" id="acc-summary" class="accordion-toggle" checked>
-          <label for="acc-summary" class="accordion-header">
-          <div class="summary-header">
-              <h4 id="summaryTitle">Anatomical Summary</h4>
-              <div class="toggle-control">
-                  <button id="summaryBtn" class="toggle-btn active">Summary</button>
-                  <button id="reportBtn" class="toggle-btn">Report</button>
-              </div>
-          </div>
-          </label>
-          <div class="accordion-content">
-              <div class="accordion-content-inner">
-          <div id="summaryContentContainer">
-              <p id="anatomicalSummaryContent"><!--SUMMARY_PLACEHOLDER--></p>
-              <p id="anatomicalReportContent" style="display: none; opacity: 0;"><!--REPORT_PLACEHOLDER--></p>
-          </div>
-          <p class="call-to-action">Select a node in the diagram for cluster-specific details.</p>
               </div>
           </div>
       </div>
@@ -987,6 +1553,7 @@
         <div class="tabs">
           <div class="tab-btn active" data-tab="details">Details</div>
           <div class="tab-btn" data-tab="apiTrace">API Trace</div>
+          <div class="tab-btn" data-tab="mitreAttack">MITRE ATT&amp;CK</div>
         </div>
         <div id="rightTrayContent">
             <div id="details" class="tab-content active"></div>
@@ -1002,6 +1569,7 @@
                 <div id="apiTraceLines"></div>
               </div>
             </div>
+            <div id="mitreAttack" class="tab-content"></div>
         </div>
     </div>
 
@@ -1171,6 +1739,59 @@ EMBEDDED_NODE_DATA_PLACEHOLDER
           el.textContent = text;
       }
 
+      // Render an LLM-produced markdown string into a target element as sanitized HTML.
+      // Two-stage pipeline:
+      //   1. marked.parse() → HTML string (handles headings, lists, bold, code, etc.)
+      //   2. DOMPurify.sanitize() → strips any <script>, on* event handlers, javascript:
+      //      URLs, etc. — required because the markdown source is influenced by
+      //      attacker-controlled artifact strings (a crafted malware sample could
+      //      prompt-inject the LLM into emitting a <script> tag).
+      // Falls back to textContent if either library failed to load (e.g. offline).
+      function setMarkdown(selector, value) {
+          const el = document.querySelector(selector);
+          if (!el) return;
+          const text = (value ?? '').toString();
+          if (!text.trim()) { el.textContent = '—'; return; }
+          if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
+              el.textContent = text;
+              return;
+          }
+          const html = marked.parse(text, { gfm: true, breaks: false });
+          el.innerHTML = DOMPurify.sanitize(html);
+      }
+
+      // Severity tiers for the binary-category badge. Categories are ordered roughly by
+      // analyst risk: outright offensive capabilities are 'danger', staging/access tools
+      // are 'warning', neutral/ambiguous tooling is 'info', and unknowns are 'neutral'.
+      const CATEGORY_SEVERITY = {
+        'Ransomware': 'danger', 'Backdoor': 'danger', 'Rootkit': 'danger',
+        'Bootkit': 'danger', 'File Infector': 'danger', 'Exploit': 'danger',
+        'Remote Exploitation Tool': 'danger',
+        'Remote Control and Administration Tool': 'danger',
+        'Keylogger': 'danger', 'Credential Stealer': 'danger',
+        'Privilege Escalation Tool': 'danger',
+        'Screen Capture Tool': 'danger', 'Sniffer': 'danger',
+        'Point-of-Sale Malware': 'danger', 'ATM Malware': 'danger',
+        'Disruption Tool': 'danger', 'Spambot': 'danger',
+        'Downloader': 'warning', 'Uploader': 'warning', 'Dropper': 'warning',
+        'Installer': 'warning', 'Launcher': 'warning', 'Controller': 'warning',
+        'Builder': 'warning', 'Tunneler': 'warning',
+        'Lateral Movement Tool': 'warning',
+        'Reconnaissance Tool': 'warning', 'Data Miner': 'warning',
+        'Archiver': 'warning', 'Decoder': 'warning', 'Decrypter': 'warning',
+        'Cryptocurrency Miner': 'warning',
+        'Framework': 'info', 'Utility': 'info',
+      };
+
+      function setCategoryBadge(category) {
+          const el = document.getElementById('binaryCategoryBadge');
+          if (!el) return;
+          const value = (category ?? '').toString().trim() || 'Undetermined';
+          const severity = CATEGORY_SEVERITY[value] || 'neutral';
+          el.textContent = value;
+          el.className = `category-badge category-badge--${severity}`;
+      }
+
       function updateLeftPanelFromReport(data) {
           const meta = data && data.metadata ? data.metadata : {};
           const file = data && data.file_details ? data.file_details : {};
@@ -1185,8 +1806,10 @@ EMBEDDED_NODE_DATA_PLACEHOLDER
           setText('#fileSize', file.file_size);
           setText('#fileType', file.file_type);
 
+          setCategoryBadge(summary.category);
           setParagraph('#anatomicalSummaryContent', summary.summary || '');
-          setParagraph('#anatomicalReportContent', summary.report || '');
+          // Detailed report is rendered as markdown → sanitized HTML; summary stays plain prose.
+          setMarkdown('#anatomicalReportContent', summary.report || '');
       }
 
       function handleFileLoad(file, sourceLabel) {
@@ -1581,6 +2204,92 @@ EMBEDDED_NODE_DATA_PLACEHOLDER
           return html;
       }
 
+      // MITRE ATT&CK kill-chain ordering — tactics outside this list
+      // are rendered after, in the order they first appear.
+      const MITRE_TACTIC_ORDER = [
+          "Reconnaissance",
+          "Resource Development",
+          "Initial Access",
+          "Execution",
+          "Persistence",
+          "Privilege Escalation",
+          "Defense Evasion",
+          "Credential Access",
+          "Discovery",
+          "Lateral Movement",
+          "Collection",
+          "Command and Control",
+          "Exfiltration",
+          "Impact",
+      ];
+
+      function mitreAttackUrl(techniqueId) {
+          // Build a stable attack.mitre.org URL for the technique ID.
+          // Sub-techniques like 'T1059.003' map to /techniques/T1059/003/.
+          if (!techniqueId) return null;
+          const trimmed = String(techniqueId).trim().toUpperCase();
+          if (!/^T\d{4}(\.\d{3})?$/.test(trimmed)) return null;
+          const [parent, sub] = trimmed.split(".");
+          return sub
+              ? `https://attack.mitre.org/techniques/${parent}/${sub}/`
+              : `https://attack.mitre.org/techniques/${parent}/`;
+      }
+
+      function buildMitreHtml(mitreEntries) {
+          if (!Array.isArray(mitreEntries) || !mitreEntries.length) {
+              return `<div class="mitre-empty">No MITRE ATT&amp;CK techniques mapped for this cluster.</div>`;
+          }
+
+          // Group by tactic, preserving entry order within each tactic
+          // (the LLM is asked to place the most strongly-grounded
+          // mappings first within a tactic).
+          const grouped = new Map();
+          mitreEntries.forEach(entry => {
+              if (!entry || !entry.id || !entry.tactic) return;
+              const tactic = String(entry.tactic).trim();
+              if (!grouped.has(tactic)) grouped.set(tactic, []);
+              grouped.get(tactic).push(entry);
+          });
+          if (!grouped.size) {
+              return `<div class="mitre-empty">No MITRE ATT&amp;CK techniques mapped for this cluster.</div>`;
+          }
+
+          // Sort tactics by canonical kill-chain order; unknown tactics
+          // fall through to the end in their first-seen order.
+          const tacticOrder = (tactic) => {
+              const idx = MITRE_TACTIC_ORDER.indexOf(tactic);
+              return idx === -1 ? MITRE_TACTIC_ORDER.length + 1 : idx;
+          };
+          const sortedTactics = [...grouped.keys()].sort((a, b) => tacticOrder(a) - tacticOrder(b));
+
+          let html = '';
+          sortedTactics.forEach(tactic => {
+              html += `<div class="mitre-tactic-group">`;
+              html += `<h5 class="mitre-tactic-header">${escapeHtml(tactic)}</h5>`;
+              grouped.get(tactic).forEach(entry => {
+                  const idText = escapeHtml(entry.id);
+                  const nameText = escapeHtml(entry.name || '');
+                  const rationaleText = escapeHtml(entry.rationale || '');
+                  const url = mitreAttackUrl(entry.id);
+                  const idEl = url
+                      ? `<a class="mitre-technique-id" href="${url}" target="_blank" rel="noopener">${idText}</a>`
+                      : `<span class="mitre-technique-id">${idText}</span>`;
+
+                  html += `<div class="mitre-technique">`;
+                  html += `<div class="mitre-technique-head">`;
+                  html += idEl;
+                  if (nameText) html += `<span class="mitre-technique-name">${nameText}</span>`;
+                  html += `</div>`;
+                  if (rationaleText) {
+                      html += `<div class="mitre-rationale">${rationaleText}</div>`;
+                  }
+                  html += `</div>`;
+              });
+              html += `</div>`;
+          });
+          return html;
+      }
+
       function buildApiTraceHtml(traceText) {
           knownApiFunctions.clear();
           if (!traceText) return "<ol></ol>";
@@ -1632,6 +2341,10 @@ EMBEDDED_NODE_DATA_PLACEHOLDER
           var trace = data.apiTrace || "";
           $("#apiTraceLines").html(buildApiTraceHtml(trace));
           buildApiTraceCheckboxes();
+
+          // MITRE ATT&CK techniques (LLM-mapped). Empty list / missing
+          // field gets the muted empty-state from buildMitreHtml.
+          $("#mitreAttack").html(buildMitreHtml(data.mitreAttack || []));
 
           openTab(currentActiveTab);
       }

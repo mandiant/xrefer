@@ -71,6 +71,7 @@ class XReferPlugin(idaapi.plugin_t):
             register_menu_action("Edit/XRefer/", "XRefer:sync_imagebase", "Re-sync Imagebase", SyncImageBaseHandler())
             register_menu_action("Edit/XRefer/Rename Functions/", "XRefer:rename_rust", "Rename based on Rust compiler strings", RustRenameHandler())
             register_menu_action("Edit/XRefer/Rename Functions/", "XRefer:rename_cluster", "Apply cluster analysis prefixes", ClusterRenameHandler())
+            register_menu_action("Edit/XRefer/", "XRefer:generate_html_report", "Generate HTML Report", GenerateHtmlReportHandler())
             register_menu_action("Edit/XRefer/Configure", "XRefer:Rust:configure", "Configure", XReferSettingsHandler())
             register_menu_action("Edit/XRefer/About", "XRefer:Rust:about", "About", AboutDialogHandler())
         idaapi.msg("[XRefer] Loaded\n")
@@ -106,10 +107,15 @@ class ContextHooks(idaapi.UI_Hooks):
         if plugin_instance:
             tft = idaapi.get_widget_type(form)
             if tft in (idaapi.BWN_DISASM, idaapi.BWN_PSEUDOCODE):
-                menu_path: str = "XRefer/"
-                menu_id: str = "XRefer:analyse_custom_entrypoint"
-                label: str = "Analyse this function as a custom entrypoint"
-                register_popup_action(form, popup, menu_path, menu_id, label, AddEntrypointHandler(), label)
+                # Analyse-this-function-as-custom-entrypoint stays at
+                # the top level under XRefer/ for muscle memory.
+                register_popup_action(
+                    form, popup, "XRefer/",
+                    "XRefer:analyse_custom_entrypoint",
+                    "Analyse this function as a custom entrypoint",
+                    AddEntrypointHandler(),
+                    "Analyse this function as a custom entrypoint",
+                )
 
 
 hooks = ContextHooks()
