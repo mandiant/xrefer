@@ -1095,6 +1095,127 @@ class VivisectBackend(BackEnd):
     def get_exports(self) -> Iterator[Tuple[str, Address]]:
         yield from self._exports
 
+    # ── Rust user-entry (rust_main) detection ─────────────────────────────
+    # Ports the IDA backend's byte-walk heuristic to Vivisect primitives.
+    # A Rust CRT `main` wrapper takes a *data reference* (lea/mov, NOT a call)
+    # to a function-start (the user's real main) and, within a few
+    # instructions, calls the runtime bootstrap (`__libc_start_main` on glibc,
+    # or a statically-linked Rust runtime wrapper). The data-ref target is the
+    # user's rust_main. Without this, the Vivisect backend falls back to the
+    # CRT entry point, so path-building (and clustering) starts inside the Rust
+    # runtime instead of user code.
+
+    _CRT_HELPERS = ('getmainargs', 'set_app_type', 'security_init_cookie',
+                    'cexit', 'amsg_exit', 'initterm', 'getstartupinfo',
+                    'setusermatherr', 'p__commode', 'p__fmode')
+
+    def _func_insn_addrs(self, fva: int) -> list:
+        """Sorted instruction addresses belonging to function `fva`."""
+        fn = self.get_function_at(Address(fva))
+        if fn is None:
+            return []
+        ranges = [(int(b.start), int(b.end)) for b in fn.basic_blocks]
+        if not ranges:
+            return []
+        lo = min(s for s, _ in ranges)
+        hi = max(e for _, e in ranges)
+        return [a for a in self._sorted_insn_addrs
+                if lo <= a < hi and any(s <= a < e for s, e in ranges)]
+
+    def _bootstrap_target_name(self, tgt: int) -> str:
+        return (self.get_name_at(Address(tgt)) or self._va_to_name.get(tgt, '')).lower()
+
+    # Rust/glibc bootstrap routines that receive the user main as an argument.
+    _BOOTSTRAP_NAMES = ('lang_start', 'libc_start_main', 'libc_start_call_main')
+
+    def _is_bootstrap_call_target(self, tgt: int) -> bool:
+        """True if a call to `tgt` is a Rust-runtime bootstrap — by name
+        (`lang_start*`, `__libc_start_main`) directly or via a PLT thunk, or a
+        direct call to a statically-linked runtime wrapper (non-import func)."""
+        name = self._bootstrap_target_name(tgt)
+        if any(s in name for s in self._BOOTSTRAP_NAMES):
+            return True
+        tfn = self.get_function_at(Address(tgt))
+        if tfn is None:
+            return False
+        if tfn.type == FunctionType.THUNK:
+            for xr in self.get_xrefs_from(Address(int(tfn.start))):
+                tn = self._bootstrap_target_name(int(xr.target))
+                if any(s in tn for s in self._BOOTSTRAP_NAMES):
+                    return True
+            return False
+        # statically-linked Rust runtime wrapper: a direct call to a real
+        # (non-import / non-library) user function counts.
+        return tfn.type not in (FunctionType.IMPORT, FunctionType.LIBRARY)
+
+    def _has_following_bootstrap_call(self, addrs: list, idx: int, maxn: int) -> bool:
+        for j in range(idx + 1, min(idx + 1 + maxn, len(addrs))):
+            insn = self._insn_cache.get(addrs[j])
+            if insn is None or not insn.mnemonic.startswith('call'):
+                continue
+            # Accept ALL resolved targets of a call instruction — an indirect
+            # `call [rip+off]` (Rust's lang_start via a pointer slot) is recorded
+            # with XrefType.UNKNOWN, not CALL, so we don't filter on xref type.
+            for xr in self.get_xrefs_from(Address(addrs[j])):
+                if self._is_bootstrap_call_target(int(xr.target)):
+                    return True
+        return False
+
+    def _scan_wrapper_for_rust_main(self, func_ea: int) -> Optional[int]:
+        fn = self.get_function_at(Address(func_ea))
+        if fn is None:
+            return None
+        ranges = [(int(b.start), int(b.end)) for b in fn.basic_blocks]
+        addrs = self._func_insn_addrs(int(fn.start))
+        for i, addr in enumerate(addrs):
+            for xr in self.get_xrefs_from(Address(addr)):
+                tgt = int(xr.target)
+                if xr.type in (XrefType.CALL, XrefType.JUMP):
+                    continue                       # data ref only, not a branch
+                if any(s <= tgt < e for s, e in ranges):
+                    continue                       # must leave the wrapper
+                if tgt not in self._func_start_index:
+                    continue                       # must point at a function start
+                if self._has_following_bootstrap_call(addrs, i, 8):
+                    return tgt
+        return None
+
+    def _iter_user_callees(self, func_ea: int) -> Iterator[int]:
+        seen: set = set()
+        for addr in self._func_insn_addrs(func_ea):
+            insn = self._insn_cache.get(addr)
+            if insn is None or not insn.mnemonic.startswith('call'):
+                continue
+            for xr in self.get_xrefs_from(Address(addr)):
+                if xr.type != XrefType.CALL:
+                    continue
+                tgt = int(xr.target)
+                if tgt not in self._func_start_index or tgt in seen:
+                    continue
+                tfn = self.get_function_at(Address(tgt))
+                if tfn is None or tfn.type in (FunctionType.IMPORT, FunctionType.LIBRARY, FunctionType.THUNK):
+                    continue
+                nm = self._bootstrap_target_name(tgt).lstrip('._')
+                if any(h in nm for h in self._CRT_HELPERS):
+                    continue
+                seen.add(tgt)
+                yield tgt
+
+    def find_rust_main_candidate(self, main_addr: Address) -> Optional[Address]:
+        main_ea = int(main_addr)
+        cand = self._scan_wrapper_for_rust_main(main_ea)
+        if cand is None:
+            for callee in self._iter_user_callees(main_ea):
+                cand = self._scan_wrapper_for_rust_main(callee)
+                if cand is not None:
+                    break
+        if cand is not None:
+            # rename so get_address_for_name("rust_main") short-circuits later
+            self._name_to_va["rust_main"] = cand
+            self._va_to_name.setdefault(cand, "rust_main")
+            return Address(cand)
+        return None
+
     def _add_user_xref_impl(self, source: Address, target: Address) -> None:
         # User-added xrefs are treated as CALL by convention (matches Ghidra)
         xr = VivisectXref(int(source), int(target), XrefType.CALL)
