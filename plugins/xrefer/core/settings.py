@@ -66,6 +66,9 @@ class XReferSettingsManager:
             "llm_model_id": "gemini/gemini-2.5-pro",
             "api_key": "",
             "enable_exclusions": True,
+            "analysis_options": {
+                "cluster_batch_size": 30,
+            },
             "display_options": {"auto_size_graphs": True, "hide_llm_disclaimer": False, "show_help_banner": True, "default_panel_width": 779},
             "use_default_paths": {"analysis": True, "capa": True, "trace": True, "xrefs": True, "categories": True, "exclusions": True},
             "paths": {
@@ -146,9 +149,13 @@ class XReferSettingsManager:
                 if settings["llm_model_id"].startswith("/" ):
                     settings["llm_model_id"] = default_settings["llm_model_id"]
 
-                # Remove deprecated keys to avoid confusion
-                settings.pop("llm_origin", None)
-                settings.pop("llm_model", None)
+                # Drop keys that older xrefer versions wrote but
+                # current code no longer reads. We prune from the
+                # in-memory dict so callers don't see the dead data,
+                # AND rewrite the file (re-reading it fresh first)
+                # so the dead data doesn't linger across sessions.
+                self._prune_deprecated_keys(settings)
+                self._rewrite_pruned_file_in_place()
 
                 # Initialize idb_specific_paths if not present
                 if "idb_specific_paths" not in settings:
@@ -188,6 +195,86 @@ class XReferSettingsManager:
             elif isinstance(value, dict) and isinstance(current_settings[key], dict):
                 # Recursively update nested dictionaries
                 self.migrate_settings(current_settings[key], value)
+
+    # Keys that previous xrefer versions wrote into settings.json but
+    # current code no longer reads. Kept as an explicit list so we
+    # never accidentally remove third-party / future keys we don't
+    # recognize — only the ones we explicitly deprecated. Format:
+    # (path-of-parent-keys, leaf-key). An empty parent-path means
+    # the key is at the top level of the settings dict.
+    _DEPRECATED_KEYS = (
+        # Legacy LLM-id split; replaced by ``llm_model_id``.
+        ((), "llm_origin"),
+        ((), "llm_model"),
+        # Temperature / reasoning-effort surface that was added then
+        # removed mid-development. See
+        # project_llm_settings_and_findings.md "What got reverted"
+        # for the rationale. Provider API defaults apply now.
+        (("analysis_options",), "llm_temperature"),
+        (("analysis_options",), "llm_reasoning_effort"),
+    )
+
+    def _prune_deprecated_keys(self, settings: dict) -> bool:
+        """Remove deprecated keys listed in ``_DEPRECATED_KEYS`` from
+        ``settings`` in place. Returns True if anything was removed,
+        which the caller can use to decide whether to rewrite the
+        file. Safe to call on dicts that don't contain any of the
+        deprecated keys (returns False, no mutation).
+        """
+        pruned = False
+        for parent_path, leaf_key in self._DEPRECATED_KEYS:
+            node = settings
+            for parent in parent_path:
+                next_node = node.get(parent)
+                if not isinstance(next_node, dict):
+                    node = None
+                    break
+                node = next_node
+            if isinstance(node, dict) and leaf_key in node:
+                del node[leaf_key]
+                pruned = True
+        return pruned
+
+    def _rewrite_pruned_file_in_place(self) -> None:
+        """Re-read ``settings.json``, prune deprecated keys, and write
+        the cleaned content back atomically — but only if the file
+        actually contains deprecated keys (so the common no-op case
+        avoids any disk write).
+
+        Must be called WHILE HOLDING the settings lock. We don't dump
+        the caller's already-migrated in-memory settings dict here
+        because ``migrate_settings`` may have added defaults (including
+        resolved file paths) that shouldn't be persisted in file-shape
+        — ``save_settings`` is the only path that knows how to collapse
+        those properly. Reading the file fresh sidesteps that concern.
+        """
+        try:
+            with open(self.settings_file, "r") as f:
+                on_disk = json.load(f)
+        except Exception as e:
+            log(f"[-] Could not re-read settings for cleanup: {str(e)}")
+            return
+
+        if not self._prune_deprecated_keys(on_disk):
+            return  # File already clean — nothing to write.
+
+        temp_file = self.settings_file + ".tmp"
+        try:
+            with open(temp_file, "w") as f:
+                json.dump(on_disk, f, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_file, self.settings_file)
+        except Exception as e:
+            log(f"[-] Could not rewrite settings to drop deprecated keys: {str(e)}")
+            # In-memory state is already pruned, so the running session
+            # is fine — only persistence of the cleanup failed.
+        finally:
+            try:
+                if os.path.exists(temp_file):
+                    os.unlink(temp_file)
+            except Exception:
+                pass
 
     def save_settings(self, settings):
         """Save settings with locking and proper cleanup."""

@@ -16,6 +16,7 @@ from typing import Optional
 
 import idaapi
 
+from xrefer import __version__
 from xrefer.gui.action_handlers import *
 from xrefer.gui.helpers import *
 from xrefer.gui.view import XReferView
@@ -33,7 +34,6 @@ class XReferPlugin(idaapi.plugin_t):
         wanted_name (str): Display name of the plugin in IDA.
         wanted_hotkey (str): Default hotkey to activate the plugin.
         xrefer_view (Optional[XReferView]): The plugin's main view instance.
-        version (float): Plugin version number.
     """
 
     flags: int = idaapi.PLUGIN_KEEP
@@ -43,7 +43,6 @@ class XReferPlugin(idaapi.plugin_t):
     def __init__(self):
         """Initialize plugin with empty view."""
         self.xrefer_view = None
-        self.version = 1.0
 
     def init(self) -> int:
         """
@@ -63,14 +62,13 @@ class XReferPlugin(idaapi.plugin_t):
             initialized = True
             register_menu_action("Edit/XRefer/Run Analysis/", "XRefer:start_analysis_default", "Default Entrypoint", StartHandler())
             register_menu_action("Edit/XRefer/Run Analysis/", "XRefer:start_analysis_custom", "Custom Entrypoint", StartHandlerCustomEntrypoint())
-            register_menu_action("Edit/XRefer/Run Analysis/", "XRefer:cluster_everything", "(Re-)run Cluster Analysis on all Functions (default)", ClusterEverythingHandler())
-            register_menu_action("Edit/XRefer/Run Analysis/", "XRefer:rerun_cluster_analysis", "(Re-)run Cluster Analysis on Interesting Functions", ClusterInterestingFunctionsHandler())
-            register_menu_action("Edit/XRefer/Run Analysis/", "XRefer:rerun_artifact_analysis", "(Re-)run Artifact Analysis", ArtifactAnalysisHandler())
+            register_menu_action("Edit/XRefer/Run Analysis/", "XRefer:cluster_everything", "(Re-)run Cluster Analysis", ClusterEverythingHandler())
             register_menu_action("Edit/XRefer/", "XRefer:show_window", "Show Window", ShowWindowHandler())
             register_menu_action("Edit/XRefer/", "XRefer:dump_indirect_calls", "Dump Indirect Calls", DumpIndirectCallsHandler())
             register_menu_action("Edit/XRefer/", "XRefer:sync_imagebase", "Re-sync Imagebase", SyncImageBaseHandler())
             register_menu_action("Edit/XRefer/Rename Functions/", "XRefer:rename_rust", "Rename based on Rust compiler strings", RustRenameHandler())
             register_menu_action("Edit/XRefer/Rename Functions/", "XRefer:rename_cluster", "Apply cluster analysis prefixes", ClusterRenameHandler())
+            register_menu_action("Edit/XRefer/", "XRefer:generate_html_report", "Generate HTML Report", GenerateHtmlReportHandler())
             register_menu_action("Edit/XRefer/Configure", "XRefer:Rust:configure", "Configure", XReferSettingsHandler())
             register_menu_action("Edit/XRefer/About", "XRefer:Rust:about", "About", AboutDialogHandler())
         idaapi.msg("[XRefer] Loaded\n")
@@ -98,7 +96,7 @@ class XReferPlugin(idaapi.plugin_t):
         Args:
             arg (int): IDA argument value (unused).
         """
-        log(f"Binary Navigator v{self.version} is loaded. Browse to Edit -> XRefer.")
+        log(f"Binary Navigator v{__version__} is loaded. Browse to Edit -> XRefer.")
 
 
 class ContextHooks(idaapi.UI_Hooks):
@@ -106,10 +104,15 @@ class ContextHooks(idaapi.UI_Hooks):
         if plugin_instance:
             tft = idaapi.get_widget_type(form)
             if tft in (idaapi.BWN_DISASM, idaapi.BWN_PSEUDOCODE):
-                menu_path: str = "XRefer/"
-                menu_id: str = "XRefer:analyse_custom_entrypoint"
-                label: str = "Analyse this function as a custom entrypoint"
-                register_popup_action(form, popup, menu_path, menu_id, label, AddEntrypointHandler(), label)
+                # Analyse-this-function-as-custom-entrypoint stays at
+                # the top level under XRefer/ for muscle memory.
+                register_popup_action(
+                    form, popup, "XRefer/",
+                    "XRefer:analyse_custom_entrypoint",
+                    "Analyse this function as a custom entrypoint",
+                    AddEntrypointHandler(),
+                    "Analyse this function as a custom entrypoint",
+                )
 
 
 hooks = ContextHooks()

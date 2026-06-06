@@ -49,91 +49,119 @@ class ContextHelp:
     def __init__(self):
         self.box = {"tl": "╭", "tr": "╮", "bl": "╰", "br": "╯", "h": "─", "v": "│"}
 
-        # States given:
-        # 'base', 'search', 'call focus',
-        # 'function trace', 'path trace', 'full trace',
-        # 'graph', 'pinned graph', 'simplified graph', 'pinned simplified graph',
-        # 'boundary results', 'last boundary results',
-        # 'interesting artifacts', 'clusters', 'pinned cluster graphs', 'cluster graphs',
-        # 'xref listing', 'help'
+        # Shortcut → state map. Audited against gui/view.py handle_key_*
+        # handlers AND gui/state_machine.py transitions (a key is "live" in a
+        # state only when its handler logic AND the transition it fires both
+        # allow that state). A trailing state set scopes the action to those
+        # states; no set ⇒ truly global. Keep in sync with
+        # gui/helpers.py::help_text() and the audit in persistent memory
+        # (project_shortcuts_help_audit.md).
+        #
+        # State display names:
+        #   base, search, call focus, function trace, path trace, full trace,
+        #   graph, pinned graph, simplified graph, pinned simplified graph,
+        #   boundary results, last boundary results, orphans, clusters,
+        #   cluster graphs, pinned cluster graphs, neighborhood graph,
+        #   pinned neighborhood graph, xref listing, help
 
-        # Global actions (no states specified = appear in all states)
+        GRAPH = {"graph", "pinned graph", "simplified graph", "pinned simplified graph"}
+        CLUSTER_GRAPH = {"cluster graphs", "pinned cluster graphs"}
+        TRACE = {"function trace", "path trace", "full trace"}
+        NEIGHBORHOOD = {"neighborhood graph", "pinned neighborhood graph"}
+
+        # Truly global — handlers have no state guard (ESC/ENTER/N) or work in
+        # essentially every banner-bearing state (H).
         global_actions = [
-            Action("ESC", "go back or return to IDA", ActionCategory.KEYBOARD),
-            Action("ENTER", "return to home (base) state", ActionCategory.KEYBOARD),
+            Action("ESC", "go back / return to IDA", ActionCategory.KEYBOARD),
+            Action("ENTER", "return to home view", ActionCategory.KEYBOARD),
             Action("H", "show/hide help", ActionCategory.KEYBOARD),
-            Action("D", "add selected artifacts to exclusions", ActionCategory.KEYBOARD),
-            Action("U", "toggle exclusions globally", ActionCategory.KEYBOARD),
-            Action("E", "expand/collapse table sections", ActionCategory.KEYBOARD),
-            Action("click", "expand items/access details", ActionCategory.MOUSE),
-            Action("dbl-click", "select/deselect artifacts or jump", ActionCategory.MOUSE),
-            Action("hover", "show tooltips/details", ActionCategory.MOUSE),
+            Action("N", "rename function/reference under cursor", ActionCategory.KEYBOARD),
+            Action("click", "expand row / open cluster / show call details", ActionCategory.MOUSE),
+            Action("dbl-click", "select artifact / jump to address", ActionCategory.MOUSE),
+            Action("hover", "show tooltip", ActionCategory.MOUSE),
         ]
 
-        # Actions for 'base' state
+        # Home (base) — the per-function xref tables view.
         base_actions = [
-            Action("S", "enter search mode", ActionCategory.KEYBOARD, {"base"}),
-            Action("T", "enter/cycle trace scopes", ActionCategory.KEYBOARD, {"base"}),
-            Action("C", "enter clusters mode", ActionCategory.KEYBOARD, {"base"}),
-            Action("I", "show interesting artifacts", ActionCategory.KEYBOARD, {"base"}),
-            Action("X", "show cross-references for artifact", ActionCategory.KEYBOARD, {"base"}),
-            Action("B", "run boundary scan (with selected artifacts)", ActionCategory.KEYBOARD, {"base"}),
-            Action("L", "show last boundary scan results", ActionCategory.KEYBOARD, {"base"}),
-            Action("G", "show artifact path graph (press again to pin/unpin)", ActionCategory.KEYBOARD, {"base"}),
-            Action("P", "focus on a call instruction (call focus)", ActionCategory.KEYBOARD, {"base"}),
+            Action("S", "search / filter the view", ActionCategory.KEYBOARD, {"base"}),
+            Action("T", "trace API calls (cycle scopes)", ActionCategory.KEYBOARD, {"base"}),
+            Action("C", "cluster relationship graph", ActionCategory.KEYBOARD, {"base"}),
+            Action("O", "orphan artifacts", ActionCategory.KEYBOARD, {"base"}),
+            Action("X", "cross-references for artifact", ActionCategory.KEYBOARD, {"base"}),
+            Action("B", "boundary scan over selected artifacts", ActionCategory.KEYBOARD, {"base"}),
+            Action("L", "last boundary scan results", ActionCategory.KEYBOARD, {"base"}),
+            Action("P", "call focus (cursor on a 0x… call)", ActionCategory.KEYBOARD, {"base"}),
+            Action("J", "jump to this function's cluster", ActionCategory.KEYBOARD, {"base"}),
+            Action("D", "exclude selected artifacts", ActionCategory.KEYBOARD, {"base"}),
         ]
 
-        # Search mode: no special actions besides global; user just types to filter
-        # call focus: no additional actions except global
+        # U + E each span a couple of states (NOT global, as old code claimed).
+        toggle_actions = [
+            Action("U", "toggle exclusions on/off", ActionCategory.KEYBOARD, {"base", *TRACE}),
+            Action("E", "expand/collapse table sections", ActionCategory.KEYBOARD, {"base", "orphans"}),
+        ]
 
-        # Trace modes:
-        # After pressing T in base:
-        # 'function trace', 'path trace', 'full trace' states:
-        # No unique keys beyond globals.
-        # If desired, we can specify that T is not visible here since it's only for base.
-        # We'll leave them global or no states needed since no new keys for these states.
+        # G has three context-dependent meanings.
+        g_actions = [
+            Action("G", "artifact path graph", ActionCategory.KEYBOARD, {"base", "search"}),
+            Action("G", "pin/unpin graph", ActionCategory.KEYBOARD, set(GRAPH)),
+            Action("G", "pin/unpin cluster graph", ActionCategory.KEYBOARD, set(CLUSTER_GRAPH)),
+        ]
 
-        # Clusters:
-        # After pressing C in base: could be 'clusters' state or if you differentiate:
-        # The user states "clusters" is a state. Possibly pressing C from base leads to 'clusters' first.
-        # from 'clusters' pressing C might lead to 'cluster graphs' or pressing again might revert back.
-        # Add keys relevant to clusters:
-        # If you consider 'clusters' as initial cluster table view, 'cluster graphs' as a separate state:
+        # Inside artifact graphs: S simplifies, V opens neighborhood, G pins.
+        graph_actions = [
+            Action("S", "toggle simplified / normal", ActionCategory.KEYBOARD, set(GRAPH)),
+        ]
+
+        # V opens the neighborhood from many states; closes it from the two
+        # neighborhood states.
+        v_actions = [
+            Action("V", "neighborhood: clusters reachable from cursor", ActionCategory.KEYBOARD, {"base", "clusters", *CLUSTER_GRAPH, *GRAPH}),
+            Action("V", "exit neighborhood view", ActionCategory.KEYBOARD, set(NEIGHBORHOOD)),
+        ]
+
+        # T cycles scope once you are inside a trace view (T from base opens it).
+        trace_actions = [
+            Action("T", "cycle trace scope (function/path/full)", ActionCategory.KEYBOARD, set(TRACE)),
+        ]
+
+        # Cluster table / cluster graph keys.
         cluster_actions = [
-            Action("C", "toggle cluster table/graph", ActionCategory.KEYBOARD, {"clusters", "cluster graphs"}),
-            Action("J", "toggle cluster sync in graphs", ActionCategory.KEYBOARD, {"cluster graphs", "pinned cluster graphs"}),
+            Action("C", "toggle cluster table / graph", ActionCategory.KEYBOARD, {"clusters", "cluster graphs"}),
+            Action("L", "show/hide library clusters", ActionCategory.KEYBOARD, {"clusters", *CLUSTER_GRAPH}),
+            Action("R", "toggle description / report view", ActionCategory.KEYBOARD, {"clusters", *CLUSTER_GRAPH}),
+            Action("J", "toggle cluster sync", ActionCategory.KEYBOARD, set(CLUSTER_GRAPH)),
+            Action("M", "intermediate paths through cursor function", ActionCategory.KEYBOARD, {"base", "clusters", *CLUSTER_GRAPH, *NEIGHBORHOOD}),
+            Action("A", "intermediate scope: this cluster ↔ all", ActionCategory.KEYBOARD, set(CLUSTER_GRAPH)),
         ]
 
-        # Graph states:
-        # 'graph', 'pinned graph', 'simplified graph', 'pinned simplified graph':
-        # Let's assign:
-        # G was only from base. In these states we might not show G again.
-        # S is used to toggle simplified mode in artifact graphs. The user provided states like 'graph', 'pinned graph', etc.
-        # Let's say we show 'S' in any graph-related states that support simplification:
-        graph_states = ["graph", "pinned graph", "simplified graph", "pinned simplified graph"]
-        graph_actions = [Action("S", "toggle simplified graph view", ActionCategory.KEYBOARD, set(graph_states))]
-
+        # Search: only X and G transition out; any other key types into the
+        # filter.
         search_actions = [
-            Action("X", "show cross-references for artifact", ActionCategory.KEYBOARD, {"search"}),
-            Action("G", "show artifact path graph (press again to pin/unpin)", ActionCategory.KEYBOARD, {"search"}),
+            Action("type", "filter the current view", ActionCategory.KEYBOARD, {"search"}),
+            Action("X", "cross-references for artifact", ActionCategory.KEYBOARD, {"search"}),
         ]
 
-        # Interesting artifacts ('interesting artifacts'):
-        # No special keys besides global.
+        # Orphans view exit (E expand/collapse is covered by toggle_actions).
+        orphan_actions = [
+            Action("O", "exit orphan artifacts view", ActionCategory.KEYBOARD, {"orphans"}),
+        ]
 
-        # Xref listing ('xref listing'):
-        # No special keys besides global.
+        # boundary results / last boundary results / call focus / xref listing /
+        # help have no live keys beyond the globals.
 
-        # Boundary results ('boundary results', 'last boundary results'):
-        # If we want L to show in these states as well:
-        # L is already shown in base, if we want it also in these states:
-        boundary_actions = [Action("L", "show last boundary scan results", ActionCategory.KEYBOARD, {"boundary results", "last boundary results"})]
-
-        # Since B triggers boundary scans, you might have 'boundary results' after pressing B or L from base.
-        # Add these if needed.
-
-        # Add all actions together
-        self.actions = global_actions + base_actions + cluster_actions + graph_actions + search_actions + boundary_actions
+        self.actions = (
+            global_actions
+            + base_actions
+            + toggle_actions
+            + g_actions
+            + graph_actions
+            + v_actions
+            + trace_actions
+            + cluster_actions
+            + search_actions
+            + orphan_actions
+        )
 
         self._help_cache: Dict[Tuple[str, int], List[str]] = {}
 

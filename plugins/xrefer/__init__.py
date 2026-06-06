@@ -12,52 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import subprocess
-import sys
+# NOTE: ASCII graph rendering now uses the pure-Python `ascii_graphs` package
+# (a 1:1 port of the ascii-graphs Scala library) instead of `asciinet`/the JVM.
+# The previous subprocess.Popen patch existed only to suppress the Java console
+# window when asciinet spawned a JVM server; with no JVM it is no longer needed.
 
-_original_popen = subprocess.Popen
-
-# asciinet when imported on windows while running openjdk, ends up displaying a console window
-# since asciinet is not maintained anymore submitting a PR is futile and in order to avoid forking
-# our own copy we will replace the Popen function temporarily to appropriately execute javaw.exe
-# and avoid spawning any unnecessary console windows
-
-
-def hooking_popen(*args, **kwargs):
-    """
-    A replacement for subprocess.Popen that intercepts calls from asciinet
-    and modifies them so the Java console window won't appear.
-    """
-    args = list(args)
-    if args:
-        cmd = args[0]
-        if isinstance(cmd, list):
-            # If the command is something like ["java", "-classpath", ...] on Windows,
-            # we switch "java" -> "javaw" or do creationflags below
-            if sys.platform.startswith("win") and cmd and cmd[0].lower() == "java":
-                cmd[0] = "javaw"  # Switch to a windowless Java
-
-    # Also, to avoid popping up a console on Windows, set CREATE_NO_WINDOW
-    if sys.platform.startswith("win"):
-        # Combine or set the creationflags
-        creationflags = kwargs.pop("creationflags", 0)
-        creationflags |= subprocess.CREATE_NO_WINDOW
-        kwargs["creationflags"] = creationflags
-
-    return _original_popen(*args, **kwargs)
-
-
-# -- 1) Patch Popen BEFORE importing asciinet
-subprocess.Popen = hooking_popen
-
-# -- 2) Now import asciinet (which will import "from subprocess import Popen"),
-#       so it picks up our patched Popen.
-import asciinet
-
-# -- 3) Restore original Popen so everything behaves normally
-subprocess.Popen = _original_popen
-
-__version__ = "2.2025-10-30"
+# ``__version__`` lives in a sibling module with zero imports so
+# setuptools' AST-based ``attr:`` reader can resolve it at build time
+# without importing the whole package. To bump the release version,
+# edit ``plugins/xrefer/_version.py`` — that is the single source of
+# truth. See pyproject.toml's ``[tool.setuptools.dynamic]`` section
+# for the wiring.
+from ._version import __version__
 
 from . import core, lang, llm, loaders
 __all__ = ["core", "lang", "llm", "loaders", "__version__"]

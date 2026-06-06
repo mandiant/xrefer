@@ -5,8 +5,10 @@ from typing import Iterator, Optional, Tuple
 import ida_bytes
 import ida_entry
 import ida_funcs
+import ida_ida
 import ida_nalt
 import ida_segment
+import ida_ua
 import ida_xref
 import idaapi
 import idautils
@@ -462,3 +464,211 @@ class IDABackend(BackEnd):
             text=text
         )
         return ins
+
+    def find_rust_main_candidate(self, main_addr: Address) -> Optional[Address]:
+        """IDA-specific rust_main detection — byte-walk through a CRT main wrapper.
+
+        Two CRT shapes are handled:
+
+        1. **Linux / glibc style.** The wrapper itself (``main`` / ``_main``)
+           loads a function pointer to user main into a register and calls
+           ``__libc_start_main``. The byte-walk on the wrapper finds a non-call
+           data-ref to a function-start followed within 8 instructions by a
+           call to ``__libc_start_main`` (directly or via PLT thunk).
+
+        2. **MinGW Windows PE style.** ``start`` is the PE entry: it inlines
+           CRT initialisation, calls ``__getmainargs`` for argv setup, then
+           directly calls a Rust-compiler-generated bootstrap function which
+           holds the data-ref + call pattern. The byte-walk doesn't match on
+           ``start`` itself (the user-bootstrap call is ``fl_CN``, which the
+           walk filters out), so we recurse one level into each user callee
+           of ``start`` — skipping imports, library, thunk, and known CRT
+           helper functions — and re-run the byte-walk there.
+
+        Side effect: when a candidate is found, the function is renamed to
+        ``rust_main`` in the IDB so subsequent calls to
+        ``get_address_for_name("rust_main")`` short-circuit the scan.
+        """
+        main_ea = int(main_addr)
+
+        # Path A: the supplied wrapper itself contains the data-ref +
+        # bootstrap-call pattern (Linux / glibc shape).
+        candidate = self._scan_wrapper_for_rust_main(main_ea)
+        if candidate is not None:
+            idc.set_name(candidate, "rust_main", idc.SN_NOCHECK)
+            return Address(candidate)
+
+        # Path B: the wrapper is a CRT entry that calls a Rust bootstrap
+        # which in turn carries the pattern (MinGW PE shape). Recurse one
+        # level into each user callee.
+        for callee_ea in self._iter_user_callees(main_ea):
+            candidate = self._scan_wrapper_for_rust_main(callee_ea)
+            if candidate is not None:
+                idc.set_name(candidate, "rust_main", idc.SN_NOCHECK)
+                return Address(candidate)
+
+        return None
+
+    def _scan_wrapper_for_rust_main(self, func_ea: int) -> Optional[int]:
+        """Byte-walk ``func_ea`` looking for a non-call out-of-function
+        data-reference to a function-start followed within 8 instructions
+        by a recognised bootstrap call. Returns the data-ref's target ea
+        or ``None``. Does not rename — caller is responsible.
+        """
+        func_start = idc.get_func_attr(func_ea, idc.FUNCATTR_START)
+        end_attr = idc.get_func_attr(func_ea, idc.FUNCATTR_END)
+        if func_start == idc.BADADDR or end_attr == idc.BADADDR:
+            return None
+        func_end = idc.prev_addr(end_attr)
+        # idaapi.get_inf_structure() was removed in IDA 9.x — ida_ida.inf_is_64bit()
+        # is the modern equivalent.
+        is_64 = ida_ida.inf_is_64bit()
+
+        for addr in range(func_start, func_end):
+            for ref in idautils.XrefsFrom(addr):
+                # Only refs that leave the wrapper, and aren't direct calls.
+                if func_start <= ref.to <= func_end:
+                    continue
+                if ref.type == idc.fl_CN:
+                    continue
+                target_func = idaapi.get_func(ref.to)
+                if not target_func or target_func.start_ea != ref.to:
+                    continue
+                if self._has_following_user_call(addr, max_instructions=8, is_64=is_64):
+                    return ref.to
+        return None
+
+    def _iter_user_callees(self, func_ea: int) -> Iterator[int]:
+        """Yield function addresses called from ``func_ea`` that are plausible
+        Rust bootstrap candidates: not imports, not FUNC_LIB / FUNC_STATIC /
+        FUNC_THUNK, not a known CRT helper. Used to descend one level below
+        a PE entry into the Rust-compiler-generated ``main``.
+        """
+        func = idaapi.get_func(func_ea)
+        if not func:
+            return
+        is_64 = ida_ida.inf_is_64bit()
+        seen: set[int] = set()
+        ins = ida_ua.insn_t()
+        call_itypes = (idaapi.NN_call, idaapi.NN_callfi, idaapi.NN_callni)
+        for ea in idautils.FuncItems(func.start_ea):
+            if not idaapi.decode_insn(ins, ea):
+                continue
+            if ins.itype not in call_itypes:
+                continue
+            target = idc.get_operand_value(ea, 0)
+            target_flags = idc.get_func_flags(target)
+            # Indirect call through a function pointer: dereference.
+            if target_flags < 0:
+                target = (ida_bytes.get_qword if is_64 else ida_bytes.get_dword)(target)
+                target_flags = idc.get_func_flags(target)
+            if target == idaapi.BADADDR or target_flags < 0:
+                continue
+            if target_flags & (idc.FUNC_LIB | idc.FUNC_STATIC | idc.FUNC_THUNK):
+                continue
+            if self._is_crt_helper_name(idc.get_name(target) or ""):
+                continue
+            if target in seen:
+                continue
+            seen.add(target)
+            yield target
+
+    # Known C-runtime entry symbols that bootstrap user main with the user
+    # function passed as a function-pointer argument. The PLT-thunk variants
+    # are recognized by name match — IDA labels both the thunk and the
+    # extern alike, modulo leading dots/underscores.
+    _RUNTIME_ENTRY_BASES = ("libc_start_main", "libc_start_call_main")
+
+    def _has_following_user_call(self, start_addr: int, max_instructions: int, is_64: bool) -> bool:
+        """Return True if any of the next ``max_instructions`` instructions is a
+        call that bootstraps user code.
+
+        Two shapes are accepted:
+
+        1. A direct call to a non-import / non-library / non-thunk function —
+           the statically-linked Rust runtime wrapper that invokes user main.
+        2. A call (typically through a PLT thunk) to a known C runtime entry
+           such as ``__libc_start_main``, which receives the user main as
+           its first argument on Linux/glibc PIE binaries.
+
+        Used by :meth:`find_rust_main_candidate` to confirm that an out-of-
+        function reference is followed by an actual bootstrap call rather
+        than a stray data offset.
+        """
+        ins = ida_ua.insn_t()
+        ins_ea = start_addr
+        call_itypes = (idaapi.NN_call, idaapi.NN_callfi, idaapi.NN_callni)
+        for _ in range(max_instructions):
+            ins_ea = idc.next_head(ins_ea)
+            if not idaapi.decode_insn(ins, ins_ea):
+                break
+            if ins.itype not in call_itypes:
+                continue
+            target = idc.get_operand_value(ins_ea, 0)
+            target_flags = idc.get_func_flags(target)
+            # Function-pointer indirection: dereference to get the real target.
+            if target_flags < 0:
+                target = (ida_bytes.get_qword if is_64 else ida_bytes.get_dword)(target)
+                target_flags = idc.get_func_flags(target)
+            if not (target_flags & (idc.FUNC_LIB | idc.FUNC_STATIC | idc.FUNC_THUNK)):
+                return True
+            if self._resolves_to_runtime_entry(target):
+                return True
+        return False
+
+    def _resolves_to_runtime_entry(self, ea: int) -> bool:
+        """Return True if ``ea`` is (or thunks to) a known C runtime entry."""
+        if self._matches_runtime_entry_name(idc.get_name(ea) or ""):
+            return True
+        func = idaapi.get_func(ea)
+        if not (func and (func.flags & idaapi.FUNC_THUNK)):
+            return False
+        thunk_target = ida_funcs.calc_thunk_func_target(func)
+        # IDA returns either an int or a (target_ea, fptr_ea) tuple depending
+        # on version — normalise.
+        if isinstance(thunk_target, tuple):
+            thunk_target = thunk_target[0]
+        if thunk_target is None or thunk_target == idaapi.BADADDR:
+            return False
+        return self._matches_runtime_entry_name(idc.get_name(thunk_target) or "")
+
+    @classmethod
+    def _matches_runtime_entry_name(cls, name: str) -> bool:
+        if not name:
+            return False
+        stripped = name.lstrip(".").lstrip("_")
+        return any(stripped.startswith(base) for base in cls._RUNTIME_ENTRY_BASES)
+
+    # MinGW / MSVCRT helper-function name fragments. Calls to these from
+    # ``start`` are CRT plumbing, not the Rust runtime bootstrap, and should
+    # not be recursed into by :meth:`_iter_user_callees`.
+    _CRT_HELPER_PATTERNS = (
+        "getmainargs",
+        "set_app_type",
+        "initterm",
+        "cexit",
+        "amsg_exit",
+        "mingwthr_",
+        "mingw_tlscallback",
+        "pei386_runtime",
+        "lconv_init",
+        "gcc_register_frame",
+        "gcc_deregister_frame",
+    )
+
+    @classmethod
+    def _is_crt_helper_name(cls, name: str) -> bool:
+        """True for MinGW / MSVCRT helper functions we don't want to recurse
+        into. Conservative — false positives only cost a wasted byte-walk.
+        """
+        if not name:
+            return False
+        stripped = name.lstrip(".").lstrip("_").split(".")[0]
+        # MinGW's static-init helper is named ``__main`` / ``___main`` —
+        # strips down to ``main``. The Rust bootstrap is unnamed (sub_…)
+        # in the stripped binaries we land here for, so an exact ``main``
+        # is always the CRT helper at this stage.
+        if stripped.lower() == "main":
+            return True
+        base = stripped.lower()
+        return any(p in base for p in cls._CRT_HELPER_PATTERNS)

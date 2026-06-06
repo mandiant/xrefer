@@ -161,21 +161,6 @@ wheels = [
 ]
 
 [[package]]
-name = "asciinet"
-version = "0.3.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "msgpack-python" },
-    { name = "natsort" },
-    { name = "networkx" },
-    { name = "requests" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/52/22/241c678da0e862da4a29d2ab06ad771a727434704c84efc349f417241c38/asciinet-0.3.1.tar.gz", hash = "sha256:9830641c81c5b7930c442d7fee4add01fc0518fc4f2f5e5d53de866010074a41", size = 11543299, upload-time = "2023-01-31T10:26:38.023Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/31/79/36a6d4a42c7e2c2928618bf53b9ed1326d6a76226c2edd6a1df2978f5323/asciinet-0.3.1-py3-none-any.whl", hash = "sha256:0aa8754ee9d9eff839f3f6dc3c25f79f486eea5bdd7c1aef4f88062b727b8dbd", size = 11549563, upload-time = "2023-01-31T10:26:33.262Z" },
-]
-
-[[package]]
 name = "asyncer"
 version = "0.0.8"
 source = { registry = "https://pypi.org/simple" }
@@ -1438,12 +1423,6 @@ wheels = [
 ]
 
 [[package]]
-name = "msgpack-python"
-version = "0.5.6"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/8a/20/6eca772d1a5830336f84aca1d8198e5a3f4715cd1c7fc36d3cc7f7185091/msgpack-python-0.5.6.tar.gz", hash = "sha256:378cc8a6d3545b532dfd149da715abae4fda2a3adb6d74e525d0d5e51f46909b", size = 138996, upload-time = "2018-03-10T09:22:56.493Z" }
-
-[[package]]
 name = "msgspec"
 version = "0.21.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1606,15 +1585,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/0c/f7/addf1087b860ac60e6f382240f64fb99f8bfb532bb06f7c542b83c29ca61/multidict-6.7.1-cp314-cp314t-win_amd64.whl", hash = "sha256:497bde6223c212ba11d462853cfa4f0ae6ef97465033e7dc9940cdb3ab5b48e5", size = 53542, upload-time = "2026-01-26T02:46:08.809Z" },
     { url = "https://files.pythonhosted.org/packages/4c/81/4629d0aa32302ef7b2ec65c75a728cc5ff4fa410c50096174c1632e70b3e/multidict-6.7.1-cp314-cp314t-win_arm64.whl", hash = "sha256:2bbd113e0d4af5db41d5ebfe9ccaff89de2120578164f86a5d17d5a576d1e5b2", size = 44719, upload-time = "2026-01-26T02:46:11.146Z" },
     { url = "https://files.pythonhosted.org/packages/81/08/7036c080d7117f28a4af526d794aab6a84463126db031b007717c1a6676e/multidict-6.7.1-py3-none-any.whl", hash = "sha256:55d97cc6dae627efa6a6e548885712d4864b81110ac76fa4e534c03819fa4a56", size = 12319, upload-time = "2026-01-26T02:46:44.004Z" },
-]
-
-[[package]]
-name = "natsort"
-version = "8.4.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/e2/a9/a0c57aee75f77794adaf35322f8b6404cbd0f89ad45c87197a937764b7d0/natsort-8.4.0.tar.gz", hash = "sha256:45312c4a0e5507593da193dedd04abb1469253b601ecaf63445ad80f0a1ea581", size = 76575, upload-time = "2023-06-20T04:17:19.925Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ef/82/7a9d0550484a62c6da82858ee9419f3dd1ccc9aa1c26a1e43da3ecd20b0d/natsort-8.4.0-py3-none-any.whl", hash = "sha256:4732914fb471f56b5cce04d7bae6f164a592c7712e1c85f9ef585e197299521c", size = 38268, upload-time = "2023-06-20T04:17:17.522Z" },
 ]
 
 [[package]]
@@ -2395,6 +2365,18 @@ wheels = [
 ]
 
 [[package]]
+name = "qtpy"
+version = "2.4.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/70/01/392eba83c8e47b946b929d7c46e0f04b35e9671f8bb6fc36b6f7945b4de8/qtpy-2.4.3.tar.gz", hash = "sha256:db744f7832e6d3da90568ba6ccbca3ee2b3b4a890c3d6fbbc63142f6e4cdf5bb", size = 66982, upload-time = "2025-02-11T15:09:25.759Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/69/76/37c0ccd5ab968a6a438f9c623aeecc84c202ab2fabc6a8fd927580c15b5a/QtPy-2.4.3-py3-none-any.whl", hash = "sha256:72095afe13673e017946cc258b8d5da43314197b741ed2890e563cf384b51aa1", size = 95045, upload-time = "2025-02-11T15:09:24.162Z" },
+]
+
+[[package]]
 name = "questionary"
 version = "2.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3064,18 +3046,19 @@ wheels = [
 
 [[package]]
 name = "xrefer"
-version = "2.0.0.20251030"
 source = { editable = "." }
 dependencies = [
-    { name = "asciinet" },
     { name = "beautifulsoup4" },
     { name = "dspy" },
     { name = "flare-capa" },
+    { name = "httpx" },
     { name = "lief" },
+    { name = "litellm" },
     { name = "networkx" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "python-statemachine" },
+    { name = "qtpy" },
     { name = "requests" },
     { name = "tabulate" },
 ]
@@ -3103,15 +3086,17 @@ ida = [
 
 [package.metadata]
 requires-dist = [
-    { name = "asciinet", specifier = ">=0.3.1" },
     { name = "beautifulsoup4", specifier = ">=4.13.4" },
     { name = "dspy", specifier = ">=3.0.3" },
     { name = "flare-capa" },
+    { name = "httpx" },
     { name = "lief", specifier = ">=0.17.6" },
+    { name = "litellm" },
     { name = "networkx", specifier = ">=3.5" },
     { name = "pydantic", specifier = ">=2.11.7" },
     { name = "pydantic-settings", specifier = ">=2.10.1" },
     { name = "python-statemachine", specifier = ">=2.5.0" },
+    { name = "qtpy" },
     { name = "requests", specifier = ">=2.32.4" },
     { name = "tabulate", specifier = ">=0.9.0" },
 ]

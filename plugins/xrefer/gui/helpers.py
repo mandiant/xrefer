@@ -17,9 +17,8 @@ import re
 import time
 from functools import wraps
 from time import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
-import asciinet
 import ida_bytes
 import ida_idp
 import ida_kernwin
@@ -365,7 +364,59 @@ class CollapseIndicator(QtWidgets.QWidget):
         self.reposition()
 
 
-from xrefer.core.helpers import convert_int_to_hex, create_table_from_rows, enrich_string_data_core, find_cluster_analysis, get_visible_width, sort_clusters, word_wrap_text, set_log_function
+from xrefer.core.helpers import convert_int_to_hex, create_table_from_rows, enrich_string_data_core, find_cluster_analysis, get_visible_width, render_markdown_segments, sort_clusters, strip_cluster_citations, word_wrap_text, set_log_function
+
+
+def render_markdown_report_lines(md: str, width: int = 85, indent: str = "") -> List[str]:
+    """Render the ``binary_report`` markdown into IDA-colored lines for
+    the custom viewer.
+
+    Maps the style vocabulary from
+    :func:`xrefer.core.helpers.render_markdown_segments` to ``SCOLOR_*``
+    codes and prefixes each line with ``indent``. Returns lines ready
+    for ``simplecustviewer_t.AddLine`` -- headings, bullets and
+    ``**bold**``/```code``` spans become colored runs so the report
+    reads as structured text instead of an unbroken blob. Prose renders
+    in the string color; HTML-only ``[c5]``/``[c4, c6]`` cluster
+    citations are stripped first. The parsing is backend-agnostic; only
+    the color mapping lives here.
+    """
+    md = strip_cluster_citations(md)
+    style_color = {
+        "h2": ida_lines.SCOLOR_DATNAME,
+        "h3": ida_lines.SCOLOR_DNAME,
+        "h4": ida_lines.SCOLOR_PREFIX,
+        "rule": ida_lines.SCOLOR_AUTOCMT,
+        "bold": ida_lines.SCOLOR_VOIDOP,
+        "code": ida_lines.SCOLOR_DEMNAME,
+        "bullet": ida_lines.SCOLOR_SYMBOL,
+        "plain": ida_lines.SCOLOR_DSTR,
+    }
+    inner_width = max(20, width - len(indent))
+    lines: List[str] = []
+    for seg_line in render_markdown_segments(md, inner_width):
+        if not seg_line:
+            lines.append("")
+            continue
+        # Coalesce consecutive same-color segments so each run is wrapped
+        # in a single COLSTR (fewer color toggles, shorter lines).
+        parts = []
+        buf_text = ""
+        buf_color = None
+        for style, text in seg_line:
+            if not text:
+                continue
+            color = style_color.get(style)
+            if buf_text and color == buf_color:
+                buf_text += text
+            else:
+                if buf_text:
+                    parts.append(ida_lines.COLSTR(buf_text, buf_color) if buf_color else buf_text)
+                buf_text, buf_color = text, color
+        if buf_text:
+            parts.append(ida_lines.COLSTR(buf_text, buf_color) if buf_color else buf_text)
+        lines.append(f"{indent}{''.join(parts)}")
+    return lines
 
 
 def enrich_string_data(str_indexes: List[int], entity_list: List[str], lookup: bool = True, max_threads: int = 50) -> List[Tuple[str, str, int, str, dict, list]]:
@@ -694,185 +745,161 @@ def format_api_call_for_ida(rec: ApiCall) -> str:
     return f"{addr}: {name}{colorize_api_call(rec.call_str)} x {rec.count}"
 
 
-def create_function_rows_for_interesting_artifacts(func_ea: int, artifacts: List[Tuple], xrefer_obj) -> List[List[str]]:
+def _collect_library_cluster_ids(clusters: List["FunctionalCluster"]) -> Set[int]:
+    """Walk a cluster forest and return the IDs of every cluster (or
+    subcluster, recursively) marked ``is_library``. Used by the cluster
+    rendering helpers to skip library nodes when the user has them
+    hidden via the ``L`` toggle.
     """
-    Create properly aligned rows for a function's artifacts with tree structure.
-    Each artifact is colored based on its type (API, string, CAPA, etc.)
+    ids: Set[int] = set()
 
-    Args:
-        func_ea: Function effective address
-        artifacts: List of artifacts (type_id, content) tuples
-        xrefer_obj: XRefer instance for color tag lookup
+    def walk(c: "FunctionalCluster") -> None:
+        if getattr(c, "is_library", False):
+            ids.add(c.id)
+        for sub in c.subclusters:
+            walk(sub)
+
+    for c in clusters:
+        walk(c)
+    return ids
+
+
+def _lifted_descendants(
+    cluster_or_list: Any,
+    trimmed_ids: Set[int],
+) -> List["FunctionalCluster"]:
+    """Return the effective list of clusters to render under (or in
+    place of) the given parent / list, lifting non-trimmed descendants
+    out of trimmed ancestors.
+
+    Given a top-level list or a single cluster's ``subclusters``, walk
+    the children: keep each non-trimmed child as-is, and replace each
+    trimmed child with the recursive lift of its own ``subclusters``.
+    The recursion preserves any non-trimmed cluster whose only
+    structural parent chain runs through trimmed library clusters —
+    without it those user-code clusters would silently disappear when
+    their library parent is hidden by either the L toggle or the
+    boot-prefix trim.
+
+    ``cluster_refs`` are deliberately NOT walked here: they point to
+    sibling clusters that already appear elsewhere in the forest, so
+    lifting through them would risk double-rendering.
+    """
+    out: List["FunctionalCluster"] = []
+    if isinstance(cluster_or_list, list):
+        roots = cluster_or_list
+    else:
+        roots = cluster_or_list.subclusters
+
+    for child in roots:
+        if child.id not in trimmed_ids:
+            out.append(child)
+        else:
+            out.extend(_lifted_descendants(child.subclusters, trimmed_ids))
+    return out
+
+
+def _collect_boot_prefix_cluster_ids(
+    clusters: List["FunctionalCluster"],
+    paths: Optional[Dict[int, Any]],
+) -> Set[int]:
+    """Find the leading non-user (library) cluster prefix at each entry
+    point.
+
+    Rationale: the first few clusters reached from any analyzed EP are
+    almost always boot/CRT/runtime plumbing — initialization, argv
+    setup, runtime bootstrap — and add noise to the cluster relationship
+    graph without telling the analyst anything actionable. This helper
+    identifies those clusters so the renderer can hide them, regardless
+    of whether the user has the L (hide-library) toggle on.
+
+    The walk:
+
+    1. Index every cluster by id (recursing through ``subclusters`` so
+       nested clusters are reachable by id).
+    2. For each EP in ``paths``, find the top-level cluster that
+       contains the EP function in its ``nodes``. That is this EP's
+       root cluster.
+    3. BFS downstream from each root cluster following BOTH
+       ``subclusters`` and ``cluster_refs``. While the current cluster
+       is library, add it to the trimmed set and keep traversing. The
+       moment we hit a non-library cluster on a branch, stop traversing
+       that branch — anything past it (even later library clusters in
+       the middle / tail) is preserved.
 
     Returns:
-        List of formatted rows with proper tree structure and alignment
+        Set of cluster IDs that should be hidden as boot prefix.
+        Always a subset of all library cluster IDs.
     """
-    rows = []
-    first_artifact = artifacts[0]
+    if not clusters or not paths:
+        return set()
 
-    # Get current address string
-    addr_str = f"0x{func_ea:x}"
+    cluster_by_id: Dict[int, "FunctionalCluster"] = {}
 
-    # Fixed components
-    arrow_str = "◄───────┐"
-    min_padding = 2  # Minimum spaces between address and arrow
+    def index(cluster: "FunctionalCluster") -> None:
+        cluster_by_id[cluster.id] = cluster
+        for sub in cluster.subclusters:
+            index(sub)
 
-    # Calculate total width based on address length
-    total_width = len(addr_str) + min_padding + len(arrow_str)
+    for cluster in clusters:
+        index(cluster)
 
-    # Create first row
-    colored_addr = f"\x01{ida_lines.SCOLOR_CREFTAIL}{addr_str}\x02{ida_lines.SCOLOR_CREFTAIL}"
-    colored_arrow = f"{' ' * min_padding}\x01{ida_lines.SCOLOR_LIBNAME}{arrow_str}\x02{ida_lines.SCOLOR_LIBNAME}"
+    ep_set = set(paths.keys())
+    root_ids: List[int] = []
+    for cluster in clusters:
+        if any(ep in cluster.nodes for ep in ep_set):
+            root_ids.append(cluster.id)
 
-    # Color first artifact based on its type
-    artifact_color = xrefer_obj.color_tags[xrefer_obj.table_names[first_artifact[0]]]
-    colored_artifact = f"\x01{artifact_color}{first_artifact[1]}\x02{artifact_color}"
-    colored_func_name = f"\x01{ida_lines.SCOLOR_DEMNAME}{idc.get_func_name(ida_idaapi.ea_t(func_ea))}\x02{ida_lines.SCOLOR_DEMNAME}"
+    trimmed: Set[int] = set()
+    for root_id in root_ids:
+        queue: List[int] = [root_id]
+        seen: Set[int] = set()
+        while queue:
+            cid = queue.pop(0)
+            if cid in seen:
+                continue
+            seen.add(cid)
 
-    first_row = [f"{colored_addr}{colored_arrow}", f" {colored_artifact}", colored_func_name]
-    rows.append(first_row)
+            cluster = cluster_by_id.get(cid)
+            if cluster is None:
+                continue
+            if not getattr(cluster, "is_library", False):
+                # First user-code cluster on this branch — stop.
+                continue
 
-    # Calculate dynamic vertical indent to align with the end of arrow
-    vertical_indent = " " * (total_width - 1)  # -1 to align with the vertical part of ┐
+            trimmed.add(cid)
+            # Continue downstream along both decomposition (subclusters)
+            # and call-flow (cluster_refs) edges.
+            for sub in cluster.subclusters:
+                queue.append(sub.id)
+            for ref_id in cluster.cluster_refs.values():
+                queue.append(ref_id)
 
-    # Process remaining artifacts
-    seen_artifacts = {(first_artifact[0], first_artifact[1])}  # Track seen artifacts by type and content
-
-    for artifact in artifacts[1:]:
-        # Skip if we've already seen this artifact
-        if (artifact[0], artifact[1]) in seen_artifacts:
-            continue
-
-        seen_artifacts.add((artifact[0], artifact[1]))
-
-        # Color artifact based on its type
-        artifact_color = xrefer_obj.color_tags[xrefer_obj.table_names[artifact[0]]]
-        colored_artifact = f"\x01{artifact_color}{artifact[1]}\x02{artifact_color}"
-
-        # Last connector should be └, others should be │
-        connector = "└" if len(seen_artifacts) == len(artifacts) else "│"
-        connector = f"{vertical_indent}\x01{ida_lines.SCOLOR_LIBNAME}{connector}\x02{ida_lines.SCOLOR_LIBNAME}"
-
-        row = [connector, f" {colored_artifact}", ""]
-        rows.append(row)
-
-    return rows
+    return trimmed
 
 
-def prepare_interesting_artifacts_table_rows(func_artifacts_dict, xrefer_obj):
+def create_cluster_relationship_graph(
+    clusters: List["FunctionalCluster"],
+    analysis: Dict,
+    paths: Optional[Dict[int, Any]] = None,
+    hide_library: bool = False,
+) -> Optional[nx.DiGraph]:
+    """Create graph respecting merge hierarchy and hiding merged nodes.
+
+    When ``hide_library`` is True, every cluster (and its subclusters /
+    references) marked ``is_library`` is omitted from the graph. When
+    ``hide_library`` is False, only the *boot prefix* — the leading
+    library clusters at each EP, up to the first user-code cluster — is
+    omitted. Either way, the EP-rooted boot/CRT noise is suppressed and
+    the graph starts at the first meaningful user cluster.
     """
-    Prepare complete table rows with proper spacing between function groups.
-
-    Args:
-        func_artifacts_dict: Dictionary of functions and their artifacts
-        xrefer_obj: XRefer instance for color tags
-
-    Returns:
-        List of formatted and aligned table rows
-    """
-    rows = []
-
-    # Create a map of unique artifact sets for each function
-    unique_artifacts = {}
-    for func_ea, artifacts in func_artifacts_dict.items():
-        # Use tuple of (type_id, content) as key for uniqueness
-        unique_set = []
-        seen = set()
-        for artifact in artifacts:
-            key = (artifact[0], artifact[1])
-            if key not in seen:
-                seen.add(key)
-                unique_set.append(artifact)
-        unique_artifacts[func_ea] = unique_set
-
-    # Sort functions by number of unique artifacts
-    sorted_funcs = sorted(unique_artifacts.items(), key=lambda x: len(x[1]), reverse=True)
-
-    # Generate rows for each function
-    for i, (func_ea, unique_artifact_list) in enumerate(sorted_funcs):
-        func_rows = create_function_rows_for_interesting_artifacts(func_ea, unique_artifact_list, xrefer_obj)
-        rows.extend(func_rows)
-
-        # Add separator between functions, except for the last one
-        if i < len(sorted_funcs) - 1:
-            rows.append(["", "", ""])  # Empty row for spacing
-
-    return rows
-
-
-def create_interesting_artifacts_table(headings, rows, color):
-    """
-    Create complete table with headers and content, maintaining alignment.
-
-    Handles:
-    - Header formatting with proper column widths
-    - Separator lines under headers
-    - Content alignment accounting for color codes
-    - Consistent spacing between columns
-    - Proper indentation throughout table
-
-    Uses color-aware width calculations to ensure alignment remains consistent
-    regardless of different color codes used for different types of artifacts.
-
-    Args:
-        headings: List of column headers
-        rows: List of data rows
-        color: IDA color code for headers
-
-    Returns:
-        List of formatted table lines with proper alignment
-    """
-    col_widths = [0] * len(headings)
-
-    # Include headers in width calculations
-    for i, heading in enumerate(headings):
-        col_widths[i] = len(heading)
-
-    # Calculate widths from data rows
-    for row in rows:
-        for i, cell in enumerate(row):
-            if i < len(col_widths):
-                col_widths[i] = max(col_widths[i], get_visible_width(cell))
-
-    # Add padding between columns
-    col_widths = [w + 2 for w in col_widths]
-
-    # Format headers
-    formatted_rows = []
-    header_row = []
-    for i, heading in enumerate(headings):
-        padding = " " * (col_widths[i] - len(heading))
-        header_row.append(f"\x01{color}{heading}{padding}\x02{color}")
-    formatted_rows.append("".join(header_row))
-
-    # Add header separator
-    separator_row = []
-    for width in col_widths:
-        separator_row.append(f"\x01{color}{'-' * (width - 1)}\x02{color} ")
-    formatted_rows.append("".join(separator_row))
-
-    # Add empty line after header
-    formatted_rows.append("")
-
-    # Format data rows
-    for row in rows:
-        formatted_cells = []
-        for i, cell in enumerate(row):
-            if i < len(col_widths):
-                visible_length = get_visible_width(cell)
-                padding = " " * (col_widths[i] - visible_length)
-                formatted_cells.append(f"{cell}{padding}")
-        formatted_rows.append("".join(formatted_cells))
-
-    formatted_rows.append("")
-    formatted_rows.append("".join(separator_row))
-    return formatted_rows
-
-
-def create_cluster_relationship_graph(clusters: List["FunctionalCluster"], analysis: Dict) -> Optional[nx.DiGraph]:
-    """Create graph respecting merge hierarchy and hiding merged nodes."""
     if not clusters:
         return None
+
+    if hide_library:
+        library_ids = _collect_library_cluster_ids(clusters)
+    else:
+        library_ids = _collect_boot_prefix_cluster_ids(clusters, paths)
 
     try:
         graph = nx.DiGraph()
@@ -933,51 +960,60 @@ def create_cluster_relationship_graph(clusters: List["FunctionalCluster"], analy
             graph.add_edge(source, target)
             return True
 
-        # Recursively process clusters so subclusters at any depth are added
-        # to the graph (the table view in create_cluster_rows already recurses).
-        # Without this, only top-level clusters and their direct children show up,
-        # and any deeper subcluster is silently dropped.
-        def _process(cluster, parent_text=None):
+        # Process multiple clusters case — iterate the lifted top-level
+        # set so user clusters orphaned by trimmed library ancestors
+        # are still rendered as roots.
+        for cluster in _lifted_descendants(clusters, library_ids):
+            cluster_id = f"cluster.id.{cluster.id:04d}"
             if cluster.id in merged_nodes:
-                return  # Skip merged nodes
+                continue  # Skip merged nodes
 
+            # Get cluster data
             cluster_data = find_cluster_analysis(analysis, cluster.id)
             if not cluster_data:
-                return
+                continue
 
-            cluster_id = f"cluster.id.{cluster.id:04d}"
             label = cluster_data.get("label", "").strip()
             if not add_valid_node(cluster_id, label):
-                return
+                continue
 
             node_text = f"{cluster_id}\n{label}" if label else cluster_id
 
-            # Edge from the (already-added) parent in the recursion chain.
-            if parent_text:
-                add_valid_edge(parent_text, node_text)
+            # Process relationships respecting merges
+            if cluster.parent_cluster_id and cluster.parent_cluster_id not in library_ids:
+                parent_data = find_cluster_analysis(analysis, cluster.parent_cluster_id)
+                if parent_data:
+                    parent_id = f"cluster.id.{cluster.parent_cluster_id:04d}"
+                    parent_label = parent_data.get("label", "").strip()
+                    if add_valid_node(parent_id, parent_label):
+                        parent_text = f"{parent_id}\n{parent_label}" if parent_label else parent_id
+                        add_valid_edge(parent_text, node_text)
 
-            # Subclusters — recurse so multi-level hierarchies are fully drawn.
-            for subcluster in cluster.subclusters:
-                _process(subcluster, parent_text=node_text)
+            # Handle subclusters — same lift so a deeper user cluster
+            # nested under a trimmed library subcluster surfaces as a
+            # direct child here (with a parent edge from this cluster
+            # rather than the trimmed intermediate).
+            for subcluster in _lifted_descendants(cluster.subclusters, library_ids):
+                sub_data = find_cluster_analysis(analysis, subcluster.id)
+                if sub_data and subcluster.id not in merged_nodes:
+                    sub_id = f"cluster.id.{subcluster.id:04d}"
+                    sub_label = sub_data.get("label", "").strip()
+                    if add_valid_node(sub_id, sub_label):
+                        sub_text = f"{sub_id}\n{sub_label}" if sub_label else sub_id
+                        add_valid_edge(node_text, sub_text)
 
-            # Cluster references — these point at clusters whose root replaced
-            # one of our nodes during decomposition. Add the referenced cluster
-            # as a node and an edge from us to it (no recursion: the referenced
-            # cluster is already reachable via its own subcluster chain).
+            # Handle cluster references
             for _, ref_id in cluster.cluster_refs.items():
-                if ref_id in merged_nodes:
+                if ref_id in library_ids:
                     continue
-                ref_data = find_cluster_analysis(analysis, ref_id)
-                if not ref_data:
-                    continue
-                ref_id_str = f"cluster.id.{ref_id:04d}"
-                ref_label = ref_data.get("label", "").strip()
-                if add_valid_node(ref_id_str, ref_label):
-                    ref_text = f"{ref_id_str}\n{ref_label}" if ref_label else ref_id_str
-                    add_valid_edge(node_text, ref_text)
-
-        for cluster in clusters:
-            _process(cluster, parent_text=None)
+                if ref_id not in merged_nodes:  # Skip refs to merged nodes
+                    ref_data = find_cluster_analysis(analysis, ref_id)
+                    if ref_data:
+                        ref_id_str = f"cluster.id.{ref_id:04d}"
+                        ref_label = ref_data.get("label", "").strip()
+                        if add_valid_node(ref_id_str, ref_label):
+                            ref_text = f"{ref_id_str}\n{ref_label}" if ref_label else ref_id_str
+                            add_valid_edge(node_text, ref_text)
 
         return graph
 
@@ -988,8 +1024,8 @@ def create_cluster_relationship_graph(clusters: List["FunctionalCluster"], analy
 
 def create_cluster_table(headings: List[str], rows: List[List[Any]], color: int) -> List[str]:
     """
-    Create formatted table for clusters with consistent alignment.
-    Similar to create_interesting_artifacts_table but specialized for cluster format.
+    Create formatted table for clusters with consistent alignment,
+    accounting for IDA color codes when measuring column widths.
     """
     # Calculate max widths for each column
     col_widths = [len(h) for h in headings]
@@ -1058,7 +1094,7 @@ def calculate_first_column_width(clusters, analysis_data):
     return max_width + 15  # minimum space for arrow
 
 
-def create_cluster_rows(cluster, analysis, column_width, paths):
+def create_cluster_rows(cluster, analysis, column_width, paths, library_ids: Optional[Set[int]] = None):
     """
     Create properly aligned rows for a cluster with visual indicators for entry points.
     Dynamically arranges description and function list in parallel, with properly colored separator.
@@ -1068,10 +1104,15 @@ def create_cluster_rows(cluster, analysis, column_width, paths):
         analysis: Dictionary containing analysis for this cluster
         column_width: Width for consistent alignment
         paths: Dictionary of paths to check for entry points
+        library_ids: Optional set of cluster IDs to skip during subcluster
+            recursion (used by ``draw_cluster_hierarchy`` to hide library
+            clusters). ``None`` is equivalent to no filtering.
 
     Returns:
         List[List[str]]: Formatted rows for display
     """
+    if library_ids is None:
+        library_ids = set()
     rows = []
 
     # Get cluster info
@@ -1189,12 +1230,14 @@ def create_cluster_rows(cluster, analysis, column_width, paths):
 
             rows.append([left_col, right_col])
 
-    # Add subclusters
-    for subcluster in cluster.subclusters:
+    # Add subclusters — lift non-trimmed grandchildren out of any
+    # trimmed direct subclusters so user-code nested under library
+    # ancestors still surfaces.
+    for subcluster in _lifted_descendants(cluster.subclusters, library_ids):
         # Add exactly one empty row before each subcluster
         rows.append(["", ""])
 
-        sub_rows = create_cluster_rows(subcluster, analysis, column_width, paths)
+        sub_rows = create_cluster_rows(subcluster, analysis, column_width, paths, library_ids=library_ids)
         # Remove the trailing empty row that comes with sub_rows to avoid accumulation
         if sub_rows and not sub_rows[-1][0] and not sub_rows[-1][1]:
             sub_rows.pop()
@@ -1205,7 +1248,7 @@ def create_cluster_rows(cluster, analysis, column_width, paths):
     return rows
 
 
-def draw_cluster_hierarchy(clusters, analysis, paths):
+def draw_cluster_hierarchy(clusters, analysis, paths, hide_library: bool = False):
     """
     Draw all clusters in a hierarchical table format with proper sorting.
 
@@ -1213,6 +1256,10 @@ def draw_cluster_hierarchy(clusters, analysis, paths):
         clusters: List of clusters to display
         analysis: Dictionary containing analysis data for clusters
         paths: Dictionary of paths to check for entry points
+        hide_library: When True, every cluster (and subcluster,
+            recursively) marked ``is_library`` is omitted. When False,
+            only the leading boot/CRT prefix at each EP is omitted —
+            middle/tail library clusters are kept.
 
     Returns:
         List[str]: Formatted lines ready for display
@@ -1220,8 +1267,20 @@ def draw_cluster_hierarchy(clusters, analysis, paths):
     if not clusters:
         return ["    NO CLUSTERS TO DISPLAY"]
 
+    if hide_library:
+        library_ids = _collect_library_cluster_ids(clusters)
+    else:
+        library_ids = _collect_boot_prefix_cluster_ids(clusters, paths)
+
+    # Lift non-trimmed user-code clusters out of trimmed ancestors so
+    # they aren't accidentally hidden when their only parent is being
+    # filtered (e.g. user code nested inside a CRT library cluster).
+    visible_clusters = _lifted_descendants(clusters, library_ids)
+    if not visible_clusters:
+        return ["    NO NON-LIBRARY CLUSTERS — press L to show library clusters"]
+
     # Sort clusters
-    sorted_clusters = sort_clusters(clusters, paths)
+    sorted_clusters = sort_clusters(visible_clusters, paths)
 
     # Calculate required column width based on all clusters
     column_width = calculate_first_column_width(sorted_clusters, analysis)
@@ -1236,7 +1295,7 @@ def draw_cluster_hierarchy(clusters, analysis, paths):
         if first_non_ep_cluster and cluster.parent_cluster_id is None and not any(ep in cluster.nodes for ep in paths):
             first_non_ep_cluster = False
 
-        cluster_rows = create_cluster_rows(cluster, analysis, column_width, paths)
+        cluster_rows = create_cluster_rows(cluster, analysis, column_width, paths, library_ids=library_ids)
         all_rows.extend(cluster_rows)
 
         # Add spacing between primary clusters
@@ -1359,34 +1418,14 @@ def make_string(ea: int, size: int, undefine_first: bool = True) -> bool:
 
 
 def patch_asciinet() -> None:
+    """No-op retained for backwards compatibility.
+
+    This previously wrapped asciinet's JVM-backed ``graph_to_ascii`` to
+    normalise its bytes/str output for IDA's text display. ASCII rendering now
+    uses the pure-Python ``ascii_graphs.graph_to_ascii``, which already returns
+    a ``str``, so no monkey-patching is required.
     """
-    Patch asciinet library for proper UTF-8 handling.
-
-    Wraps original asciinet functions to ensure proper encoding/decoding
-    of graph output for IDA's text display.
-    """
-    original_graph_to_ascii = asciinet.graph_to_ascii
-    original_AsciiGraphProxy_graph_to_ascii = asciinet._AsciiGraphProxy.graph_to_ascii
-
-    @wraps(original_graph_to_ascii)
-    def patched_graph_to_ascii(graph, timeout=10):
-        result = original_graph_to_ascii(graph, timeout)
-        if isinstance(result, bytes):
-            return result.decode(encoding="UTF-8")
-        return result
-
-    @wraps(original_AsciiGraphProxy_graph_to_ascii)
-    def patched_AsciiGraphProxy_graph_to_ascii(self, graph, timeout=10):
-        result = original_AsciiGraphProxy_graph_to_ascii(self, graph, timeout)
-        if isinstance(result, bytes):
-            return result
-        elif isinstance(result, str):
-            return result.encode("UTF-8")
-        else:
-            raise TypeError(f"Unexpected type returned: {type(result)}")
-
-    asciinet.graph_to_ascii = patched_graph_to_ascii
-    asciinet._AsciiGraphProxy.graph_to_ascii = patched_AsciiGraphProxy_graph_to_ascii
+    return None
 
 
 def help_text() -> List[str]:
@@ -1413,87 +1452,124 @@ def help_text() -> List[str]:
                 The Binary Navigator (XRefer) - Help
  ------------------------------------------------------------------------------------------
 
- KEYS AVAILABLE IN ALL MODES:
- [ESC]      Return to previous state or switch focus back to IDA code view
- [ENTER]    Return to home view
- [H]        Show/hide this help
- [D]        Add selected artifacts (APIs/libs/strings/CAPA) to exclusions
- [U]        Toggle exclusions globally
- [E]        Expand or collapse current table sections
- (MOUSE)    Click/double-click/hover items or nodes to interact, select artifacts, show details
+ GLOBAL KEYS (available in every view):
+ [ESC]      Go back one view, or (at home) switch focus back to IDA
+ [ENTER]    Return to the home view (per-function tables)
+ [H]        Show / hide this help
+ [N]        Rename the function / reference under the cursor
+ (MOUSE)    Click = expand row / open cluster / show call details;
+            Double-click = select artifact or jump to address; Hover = tooltip
 
  ----------------------------------------
 
- HOME VIEW (initial state):
- [S]    Enter search mode to filter the current display by typing text
- [T]    Enter trace mode; press repeatedly to cycle through function/path/full API call scopes
- [C]    Show clusters; press again to toggle between cluster table and cluster relationship graph
- [I]    Show interesting artifacts identified by analysis
- [X]    When on an artifact, show its cross-references listing
- [B]    With artifacts selected, find boundary methods that contain all selected items
- [L]    Show last boundary scan results
+ HOME VIEW (initial state — per-function cross-reference tables):
+ [S]    Search / filter the current view (then type to filter)
+ [T]    Trace API calls; press again to cycle function -> path -> full scope
+ [C]    Cluster relationship graph
+ [O]    Show orphan artifacts (no path to an entry point)
+ [X]    Cross-reference listing for the artifact under the cursor
+ [G]    Artifact path graph for the artifact under the cursor
+ [P]    Call focus (when the cursor is on a 0x... call address)
+ [V]    Neighborhood: clusters reachable from the cursor function
+ [M]    Intermediate paths through the cursor function (when it links a cluster)
+ [J]    Jump to the cluster containing this function
+ [B]    Boundary scan: find functions containing all selected artifacts
+ [L]    Show the last boundary scan results
+ [D]    Add selected artifacts (APIs/libs/strings/CAPA) to exclusions
+ [U]    Toggle exclusions on / off
+ [E]    Expand / collapse table sections
 
  ----------------------------------------
 
- SEARCH MODE:
+ SEARCH MODE ([S] from home):
  Type to filter the current content
- [ESC/ENTER] Exit search mode and return to home view
+ [X]    Cross-references for the artifact under the cursor
+ [G]    Artifact path graph for the artifact under the cursor
+ [ESC/ENTER] Exit search and return home
 
  ----------------------------------------
 
  TRACE SCOPES (after pressing [T] in home view):
- Press [T] repeatedly to cycle:
-  - Function scope: API calls in current function
-  - Path scope: Calls along paths to this function
-  - Full scope: All recorded calls in trace
+ [T]    Cycle scope: function -> path -> full -> function
+          - function: API calls in the current function
+          - path:     calls along paths reaching this function
+          - full:     all recorded calls in the trace
+ [U]    Toggle exclusions on / off
  [ESC/ENTER] Return to home view
 
  ----------------------------------------
 
  CLUSTERS & CLUSTER GRAPHS (after pressing [C] in home view):
- [C]    Switch between cluster table and cluster relationship graph view
- [J]    Enable/disable cluster sync with navigation
+ [C]    Toggle between cluster table and cluster relationship graph
+ [L]    Show / hide library clusters
+ [R]    Toggle cluster description / full report view
+ [J]    Toggle cluster sync (follow the IDA cursor across clusters)
+ [G]    Pin / unpin the cluster graph
+ [M]    Intermediate paths through the cursor function
+ [A]    While in intermediate-paths view: scope this cluster <-> all clusters
+ [V]    Neighborhood: clusters reachable from the cursor function
+ [ESC]  Step back through visited clusters;  [ENTER] returns home
+
+ ----------------------------------------
+
+ ARTIFACT PATH GRAPH (after pressing [G] on an artifact):
+ [G]    Pin / unpin the graph
+ [S]    Toggle simplified / normal graph representation
+ [V]    Neighborhood: clusters reachable from the cursor function
+ (MOUSE) Hover / click / double-click nodes for details or navigation
  [ESC/ENTER] Return to home view
 
  ----------------------------------------
 
- GRAPH VIEWS (after pressing [G] on an artifact in home view):
- [G]    Show path graph to artifact; press again to pin/unpin the graph
- [S]    Toggle simplified/normal graph representation
- (MOUSE) Hover/click/dbl-click nodes for details or navigation
+ NEIGHBORHOOD VIEW (after pressing [V]):
+ Shows the cursor function centered, with adjacent clusters around it
+ [V]    Exit the neighborhood view
+ [M]    Intermediate paths through the cursor function
+ [ESC/ENTER] Return to the previous view / home
+
+ ----------------------------------------
+
+ ORPHAN ARTIFACTS (after pressing [O] in home view):
+ [E]    Expand / collapse table sections
+ [O]    Exit the orphans view
  [ESC/ENTER] Return to home view
 
  ----------------------------------------
 
- INTERESTING ARTIFACTS (after pressing [I] in home view):
+ CALL FOCUS (after pressing [P] on a 0x... call in home view):
+ Shows context specific to the selected call instruction
  [ESC/ENTER] Return to home view
 
  ----------------------------------------
 
- XREF LISTING (after pressing [X] on artifact in home view):
+ XREF LISTING (after pressing [X] on an artifact):
+ Detailed cross-reference listing for the selected artifact
  [ESC/ENTER] Return to home view
 
  ----------------------------------------
 
  BOUNDARY SCANS (after pressing [B] with artifacts selected in home view):
- [L]    Show results of the last boundary scan
+ Double-click artifacts to select them, then press [B]
+ [L]    Re-show the last boundary scan results (from home)
  [ESC/ENTER] Return to home view
 
  ----------------------------------------
 
  MOUSE INTERACTIONS:
-  - Click items to expand or access sub-details
-  - Double-click artifacts to select them for operations
-  - Hover over items or graph nodes for tooltips and context
+  - Click: expand a row ([+]/[-]), open a cluster id, or show call details (->/v)
+  - Double-click: select / deselect an artifact, or jump to an address
+  - Hover: tooltip with details
+  - Right-click: copy / export actions (e.g. copy strings)
 
  ----------------------------------------
 
  TIPS & NOTES:
-  - Pressing [ESC] multiple times often steps you back to home view
-  - Some keys like [T], [C], [G], [I] cycle through related modes each press
-  - Selected artifacts remain chosen until toggled off by double-clicking them again
-  - Use exclusions ([D], [U]) to refine displayed artifacts
-  - Experiment with cluster graphs, traces, and paths for deeper insight
+  - Selection is by double-click; selected artifacts stay selected until
+    double-clicked again. [B] (boundary) and [D] (exclude) act on the selection.
+  - Pressing [ESC] repeatedly steps back through your view history to home
+  - Keys like [T], [C], [G] cycle or toggle related modes each press
+  - Refine what is shown with exclusions: [D] adds the selection, [U] toggles all
+  - Experiment with cluster graphs, neighborhoods, traces, and paths for insight
 
  ----------------------------------------
 

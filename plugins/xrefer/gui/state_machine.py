@@ -41,10 +41,12 @@ class XReferStateMachine(StateMachine):
     pinned_simplified_graph = State("pinned simplified graph")
     boundary_results = State("boundary results")
     last_boundary_results = State("last boundary results")
-    interesting_artifacts = State("interesting artifacts")
+    orphans = State("orphans")
     clusters = State("clusters")
     pinned_cluster_graphs = State("pinned cluster graphs")
     cluster_graphs = State("cluster graphs")
+    neighborhood_graph = State("neighborhood graph")
+    pinned_neighborhood_graph = State("pinned neighborhood graph")
     xref_listing = State("xref listing")
     help = State("help")
 
@@ -52,12 +54,35 @@ class XReferStateMachine(StateMachine):
     start_search = base.to(search)
     start_call_focus = base.to(call_focus)
     start_trace = base.to(trace_scope_function)
-    start_graph = base.to(graph) | search.to(graph) | interesting_artifacts.to(graph)
-    start_xref_listing = base.to(xref_listing) | search.to(xref_listing) | interesting_artifacts.to(xref_listing)
+    start_graph = base.to(graph) | search.to(graph)
+    start_xref_listing = base.to(xref_listing) | search.to(xref_listing)
     start_boundary_results = base.to(boundary_results)
     start_last_boundary_results = base.to(last_boundary_results)
-    start_interesting_artifacts = base.to(interesting_artifacts)
-    start_cluster_graphs = base.to(cluster_graphs) | clusters.to(cluster_graphs)
+    start_orphans = base.to(orphans)
+    start_cluster_graphs = (
+        base.to(cluster_graphs)
+        | clusters.to(cluster_graphs)
+        # M from the neighborhood view is allowed to land back inside
+        # cluster_graphs (auto-activating the intermediate sub-view) so
+        # the analyst can chain "show me my neighborhood" → "show me my
+        # cluster's intermediate paths" without manually ESC-ing first.
+        | neighborhood_graph.to(cluster_graphs)
+        | pinned_neighborhood_graph.to(cluster_graphs)
+    )
+    # Neighborhood view is reachable from any banner-bearing state.
+    # Centered on cursor, shows 1-hop callgraph adjacency to other
+    # clusters; falls back to BFS-discovered nearest clusters when
+    # the cursor has no direct neighbours.
+    start_neighborhood_graph = (
+        base.to(neighborhood_graph)
+        | clusters.to(neighborhood_graph)
+        | cluster_graphs.to(neighborhood_graph)
+        | pinned_cluster_graphs.to(neighborhood_graph)
+        | graph.to(neighborhood_graph)
+        | pinned_graph.to(neighborhood_graph)
+        | simplified_graph.to(neighborhood_graph)
+        | pinned_simplified_graph.to(neighborhood_graph)
+    )
 
     # help transition
     start_help = (
@@ -71,10 +96,12 @@ class XReferStateMachine(StateMachine):
         | last_boundary_results.to(help)
         | xref_listing.to(help)
         | trace_scope_full.to(help)
-        | interesting_artifacts.to(help)
+        | orphans.to(help)
         | clusters.to(help)
         | cluster_graphs.to(help)
         | pinned_cluster_graphs.to(help)
+        | neighborhood_graph.to(help)
+        | pinned_neighborhood_graph.to(help)
     )
 
     # graph transitions
@@ -84,9 +111,8 @@ class XReferStateMachine(StateMachine):
     toggle_normal = simplified_graph.to(graph) | pinned_simplified_graph.to(pinned_graph)
     toggle_pinned_cluster_graph = cluster_graphs.to(pinned_cluster_graphs)
     toggle_unpinned_cluster_graph = pinned_cluster_graphs.to(cluster_graphs)
-
-    # interesting artifact transitions
-    toggle_on_interesting_artifacts = clusters.to(interesting_artifacts)
+    toggle_pinned_neighborhood_graph = neighborhood_graph.to(pinned_neighborhood_graph)
+    toggle_unpinned_neighborhood_graph = pinned_neighborhood_graph.to(neighborhood_graph)
 
     # cluster transitions
     toggle_on_cluster_graphs = clusters.to(cluster_graphs)
@@ -110,18 +136,30 @@ class XReferStateMachine(StateMachine):
     revert_help_to_boundary_results = help.to(boundary_results)
     revert_help_to_last_boundary_results = help.to(last_boundary_results)
     revert_help_to_xref_listing = help.to(xref_listing)
-    revert_help_to_interesting_artifacts = help.to(interesting_artifacts)
+    revert_help_to_orphans = help.to(orphans)
     revert_help_to_interesting_clusters = help.to(clusters)
     revert_help_to_interesting_cluster_graphs = help.to(cluster_graphs)
     revert_help_to_pinned_cluster_graphs = help.to(pinned_cluster_graphs)
+    revert_help_to_neighborhood_graph = help.to(neighborhood_graph)
+    revert_help_to_pinned_neighborhood_graph = help.to(pinned_neighborhood_graph)
+
+    # Exit transitions for the neighborhood view — ``go_back`` walks the
+    # state history looking for a transition from the *current* state to
+    # the *previous* state. Without these, ESC from neighborhood would
+    # always fall through to ``to_base`` (which reaches base only) and
+    # the analyst would lose their cluster context. One reverse per
+    # supported entry state (mirrors ``start_neighborhood_graph``).
+    revert_neighborhood_graph_to_clusters = neighborhood_graph.to(clusters) | pinned_neighborhood_graph.to(clusters)
+    revert_neighborhood_graph_to_cluster_graphs = neighborhood_graph.to(cluster_graphs) | pinned_neighborhood_graph.to(cluster_graphs)
+    revert_neighborhood_graph_to_pinned_cluster_graphs = neighborhood_graph.to(pinned_cluster_graphs) | pinned_neighborhood_graph.to(pinned_cluster_graphs)
+    revert_neighborhood_graph_to_graph = neighborhood_graph.to(graph) | pinned_neighborhood_graph.to(graph)
+    revert_neighborhood_graph_to_simplified_graph = neighborhood_graph.to(simplified_graph) | pinned_neighborhood_graph.to(simplified_graph)
+    revert_neighborhood_graph_to_pinned_graph = neighborhood_graph.to(pinned_graph) | pinned_neighborhood_graph.to(pinned_graph)
+    revert_neighborhood_graph_to_pinned_simplified_graph = neighborhood_graph.to(pinned_simplified_graph) | pinned_neighborhood_graph.to(pinned_simplified_graph)
 
     # search revert transitions
     revert_xref_listing_to_search = xref_listing.to(search)
     revert_graph_to_search = graph.to(search)
-
-    # interesting artifacts revert transitions
-    revert_graph_to_interesting_artifacts = graph.to(interesting_artifacts)
-    revert_xref_listing_to_interesting_artifacts = xref_listing.to(interesting_artifacts)
 
     # base transition
     to_base = (
@@ -134,16 +172,41 @@ class XReferStateMachine(StateMachine):
         | last_boundary_results.to(base)
         | xref_listing.to(base)
         | help.to(base)
-        | interesting_artifacts.to(base)
+        | orphans.to(base)
         | clusters.to(base)
         | cluster_graphs.to(base)
         | pinned_cluster_graphs.to(base)
+        | neighborhood_graph.to(base)
+        | pinned_neighborhood_graph.to(base)
     )
 
     def __init__(self):
         self._search_filter = ""
         self._address_filter = ""
         self._cluster_sync_enabled: bool = False
+        self._hide_library_clusters: bool = True
+        # When non-None, the cluster-graph view renders the
+        # "intermediate function paths" sub-view for this function
+        # instead of the cluster's normal node graph. Set by the M key
+        # from cluster_graphs and cleared by M or ESC. Kept on the
+        # state machine (rather than on the view) so it survives
+        # transitions and is cleared on reset_state alongside other
+        # cluster UI flags.
+        self._intermediate_view_func_ea: Optional[int] = None
+        # When True, the intermediate view shows paths across every
+        # cluster the function appears in. When False (default), it
+        # scopes to the cluster the user came from — so the spider
+        # graph stays small and contextual. Toggled with the A key
+        # while in the intermediate view.
+        self._intermediate_view_show_all: bool = False
+        # Bookkeeping for the ESC / M-exit "full undo" path. When M
+        # opens the intermediate view it may need to push a cluster
+        # (overview state) and/or transition state (cross-view jump
+        # from base / clusters / neighborhood). These flags let the
+        # exit handler know what to roll back so M and ESC fully
+        # mirror each other.
+        self._intermediate_view_pushed_cluster: bool = False
+        self._intermediate_view_transitioned_state: bool = False
         self._selected_index: Optional[int] = None
         self._boundary_methods: Optional[list] = None
         self._selected_refs = {}
@@ -233,6 +296,10 @@ class XReferStateMachine(StateMachine):
         """Reset state machine to initial conditions."""
         self._state_history.clear()
         self._cluster_sync_enabled = False
+        self._intermediate_view_func_ea = None
+        self._intermediate_view_show_all = False
+        self._intermediate_view_pushed_cluster = False
+        self._intermediate_view_transitioned_state = False
         self._search_filter = ""
         self._address_filter = ""
         self._selected_index = None
@@ -256,7 +323,7 @@ class XReferStateMachine(StateMachine):
 
     def is_pinned_graph(self) -> bool:
         """Check if current state is a pinned graph view."""
-        return self.current_state in (self.pinned_graph, self.pinned_simplified_graph, self.pinned_cluster_graphs)
+        return self.current_state in (self.pinned_graph, self.pinned_simplified_graph, self.pinned_cluster_graphs, self.pinned_neighborhood_graph)
 
     def push_cluster_graph(self, cluster_id: int, parent_cluster_id: Optional[int] = None) -> None:
         """Delegate to cluster manager."""
@@ -338,6 +405,68 @@ class XReferStateMachine(StateMachine):
 
         return True
 
+    # NB: these helpers deliberately do *not* use the ``toggle_`` /
+    # ``start_`` / ``revert_`` / ``to_`` / ``end_`` prefix — those
+    # name patterns get auto-wrapped by ``_wrap_transitions`` for
+    # state-transition error handling, and that wrapper double-binds
+    # ``self`` (only safe for transitions taking ``event=None``).
+    # These are plain data-flag flips so the prefix-free names keep
+    # them out of the wrapper.
+
+    def flip_intermediate_view(self, func_ea: Optional[int]) -> bool:
+        """Toggle into / out of the intermediate-paths sub-view.
+
+        The view is only meaningful when the user is currently in a
+        cluster-graph state and the supplied ``func_ea`` is on a
+        function that has at least one intermediate-path entry. The
+        caller (key handler) is responsible for that precondition;
+        this method just flips the flag.
+
+        On exit, the M-undo bookkeeping flags
+        (``_intermediate_view_pushed_cluster`` /
+        ``_intermediate_view_transitioned_state``) are also cleared.
+        Callers that need to inspect the *prior* values must read
+        them before invoking the exit toggle.
+
+        Returns True when the flag changed (caller should redraw).
+        """
+        if self.current_state not in (self.cluster_graphs, self.pinned_cluster_graphs):
+            return False
+        if self._intermediate_view_func_ea is not None:
+            # Currently in intermediate view → exit.
+            self._intermediate_view_func_ea = None
+            self._intermediate_view_show_all = False
+            self._intermediate_view_pushed_cluster = False
+            self._intermediate_view_transitioned_state = False
+            return True
+        if func_ea is None:
+            return False
+        self._intermediate_view_func_ea = func_ea
+        # Default scope is "current cluster only" (False); user can
+        # widen it with A.
+        self._intermediate_view_show_all = False
+        return True
+
+    def flip_intermediate_scope(self) -> bool:
+        """Flip intermediate view between current-cluster and
+        all-clusters scope. Only meaningful while the intermediate
+        view is active.
+        """
+        if self._intermediate_view_func_ea is None:
+            return False
+        self._intermediate_view_show_all = not self._intermediate_view_show_all
+        return True
+
+    def toggle_hide_library_clusters(self, event=None) -> bool:
+        """Flip the hide-library-clusters preference. Only meaningful from
+        cluster table / cluster graph / pinned cluster graph states; returns
+        False otherwise so the caller can fall back to other behavior.
+        """
+        if self.current_state not in (self.clusters, self.cluster_graphs, self.pinned_cluster_graphs):
+            return False
+        self._hide_library_clusters = not self._hide_library_clusters
+        return True
+
     @property
     def search_filter(self) -> str:
         return self._search_filter
@@ -379,6 +508,45 @@ class XReferStateMachine(StateMachine):
     def cluster_sync_enabled(self) -> bool:
         """Check if cluster sync is enabled."""
         return self._cluster_sync_enabled
+
+    @property
+    def hide_library_clusters(self) -> bool:
+        """Whether library clusters are filtered out of cluster views."""
+        return self._hide_library_clusters
+
+    @property
+    def intermediate_view_func_ea(self) -> Optional[int]:
+        """The function the intermediate-paths sub-view is rendering
+        for, or ``None`` when the sub-view isn't active."""
+        return self._intermediate_view_func_ea
+
+    @property
+    def intermediate_view_show_all(self) -> bool:
+        """Whether the intermediate-paths sub-view is in 'all clusters'
+        scope. False = current cluster only (default)."""
+        return self._intermediate_view_show_all
+
+    @property
+    def intermediate_view_pushed_cluster(self) -> bool:
+        """True when M pushed a cluster onto the cluster_manager
+        stack when it opened the intermediate view. Used by the exit
+        handler to know whether to pop on undo."""
+        return self._intermediate_view_pushed_cluster
+
+    @intermediate_view_pushed_cluster.setter
+    def intermediate_view_pushed_cluster(self, value: bool) -> None:
+        self._intermediate_view_pushed_cluster = bool(value)
+
+    @property
+    def intermediate_view_transitioned_state(self) -> bool:
+        """True when M transitioned state to cluster_graphs (cross-
+        view jump) when opening the intermediate view. Used by the
+        exit handler to know whether to ``go_back`` on undo."""
+        return self._intermediate_view_transitioned_state
+
+    @intermediate_view_transitioned_state.setter
+    def intermediate_view_transitioned_state(self, value: bool) -> None:
+        self._intermediate_view_transitioned_state = bool(value)
 
 
 @dataclass

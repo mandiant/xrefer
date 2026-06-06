@@ -5,19 +5,31 @@ authors = [
   {name = "binjo" },
   {name = "rand-tech" },
 ]
-version = "2.0.0.20251030"
+# Version is sourced dynamically from ``plugins/xrefer/_version.py``
+# (the single source of truth — a tiny no-imports module so
+# setuptools' AST static reader can resolve it without importing the
+# package). To bump the release, edit that file. The package-level
+# ``xrefer.__version__`` re-exports the same constant; runtime
+# consumers (About dialog, HTML report, IDA startup log) read from
+# whichever is convenient.
+dynamic = ["version"]
 description = "FLARE Team's Binary Navigator"
 requires-python = ">=3.11"
 dependencies = [
-    "asciinet>=0.3.1",
+    # Pure-Python ASCII graph renderer (replaces asciinet/JVM) is now
+    # vendored at plugins/xrefer/_vendor/ascii_graphs/ — no external
+    # dependency needed; the package ships with the plugin tree.
     "beautifulsoup4>=4.13.4",
     "dspy>=3.0.3",
     "flare-capa",
-    "lief>=0.17.6",
+    "httpx",                   # imported directly in llm/processor.py (was transitive via dspy)
+    "lief>=0.17.6",            # vivisect backend: ELF/PE symbol + section enrichment
+    "litellm",                 # imported directly in llm/* and core/analyzer.py (was transitive via dspy)
     "networkx>=3.5",
     "pydantic>=2.11.7",
     "pydantic-settings>=2.10.1",
     "python-statemachine>=2.5.0",
+    "qtpy",                    # imported directly in gui/* and core/analyzer.py (Qt abstraction)
     "requests>=2.32.4",
     "tabulate>=0.9.0",
 ]
@@ -53,11 +65,26 @@ override-dependencies = [
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools]
+# ``plugins/xrefer.py`` is the IDA-plugin entry-point file (loaded by
+# IDA's plugin scanner) — NOT a top-level Python module to install.
+# Explicitly opt out of py-module auto-discovery so setuptools doesn't
+# try to package it (which collides with the ``plugins/xrefer/`` package
+# and breaks build-time metadata resolution).
+py-modules = []
+
 [tool.setuptools.package-dir]
 "" = "plugins"
 
 [tool.setuptools.packages.find]
 where = ["plugins"]
+
+[tool.setuptools.dynamic]
+# Reads ``plugins/xrefer/_version.py`` via setuptools' static AST
+# reader — that file has no imports so resolution never falls back to
+# a dynamic import (which would collide with ``plugins/xrefer.py``,
+# the IDA-loader entry-point file, and break the build).
+version = {attr = "xrefer._version.__version__"}
 
 [project.urls]
 source = "https://github.com/mandiant/xrefer"
@@ -103,6 +130,11 @@ filterwarnings = [
 
 [tool.ruff]
 line-length = 200
+# Vendored pure-Python port of the Scala `ascii-graphs` library. Its
+# deliberately un-Pythonic, byte-exact structure (1:1 port matched
+# against the JVM original across 2k+ real xrefer graphs) must not be
+# auto-"fixed" by ruff/isort/pyupgrade — exclude the whole tree.
+extend-exclude = ["plugins/xrefer/_vendor"]
 
 [tool.ruff.lint]
 select = [
@@ -168,3 +200,5 @@ line_length = 200
 
 [tool.coverage.run]
 parallel = true
+# Vendored byte-exact port — not our code, no value in coverage stats.
+omit = ["plugins/xrefer/_vendor/*"]
