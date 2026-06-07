@@ -262,6 +262,129 @@ class FunctionalCluster:
         return g
 
 
+def cluster_ids(clusters: List["FunctionalCluster"]) -> Set[int]:
+    """All cluster ids (top-level + nested subclusters) in ``clusters``."""
+    ids: Set[int] = set()
+
+    def _walk(c: "FunctionalCluster") -> None:
+        ids.add(c.id)
+        for sub in c.subclusters:
+            _walk(sub)
+
+    for c in clusters:
+        _walk(c)
+    return ids
+
+
+def compute_closures(clusters: List["FunctionalCluster"]) -> List[List["FunctionalCluster"]]:
+    """Partition top-level clusters into independent **closures** — maximal
+    groups that are linked and therefore must be analyzed together.
+
+    A closure is a connected component of the link graph whose nodes are
+    top-level clusters and whose edges come from ``cluster_refs`` (a node in
+    one cluster "replaced by" another cluster — the analysis of the first
+    genuinely needs the second's context). Subclusters are never separate
+    nodes: each maps to its top-level root, so a subcluster's ref pulls the
+    whole top-level cluster into the component — i.e. a cluster is never split
+    from its subclusters. Within a returned closure every ``cluster_ref``
+    resolves to a cluster also in that closure, so it is self-contained (no
+    dangling cross-references).
+
+    Returns a list of closures, each a list of top-level FunctionalClusters,
+    in a deterministic order (by the smallest cluster id in the closure).
+    A cluster with no links forms its own singleton closure.
+    """
+    # Map every cluster id (top-level or nested) to its top-level root id.
+    id_to_root: Dict[int, int] = {}
+    root_obj: Dict[int, "FunctionalCluster"] = {}
+
+    def _map(c: "FunctionalCluster", root_id: int) -> None:
+        id_to_root[c.id] = root_id
+        for sub in c.subclusters:
+            _map(sub, root_id)
+
+    for top in clusters:
+        root_obj[top.id] = top
+        _map(top, top.id)
+
+    graph = nx.Graph()
+    graph.add_nodes_from(root_obj.keys())  # isolated clusters are singletons
+
+    def _edges(c: "FunctionalCluster") -> None:
+        src_root = id_to_root[c.id]
+        for ref_id in c.cluster_refs.values():
+            tgt_root = id_to_root.get(ref_id)
+            if tgt_root is not None and tgt_root != src_root:
+                graph.add_edge(src_root, tgt_root)
+        for sub in c.subclusters:
+            _edges(sub)
+
+    for top in clusters:
+        _edges(top)
+
+    closures: List[List["FunctionalCluster"]] = []
+    for component in nx.connected_components(graph):
+        closures.append([root_obj[rid] for rid in sorted(component)])
+    closures.sort(key=lambda cl: min(c.id for c in cl))
+    return closures
+
+
+def bottomup_waves(clusters: List["FunctionalCluster"]) -> List[List["FunctionalCluster"]]:
+    """Order the subcluster **containment** hierarchy leaves-first, in waves.
+
+    Returns a list of waves; each wave is a list of unique clusters whose
+    subclusters all appear in EARLIER waves. Wave 0 is the leaf clusters (no
+    subclusters). A cluster shared by several parents (the ``subcluster_cache``
+    DAG in ``decompose_into_clusters``) appears EXACTLY ONCE — in the earliest
+    wave its own children allow — so it is analysed and summarised a single
+    time and both parents reuse that summary. Within a wave, no cluster is an
+    ancestor or descendant of another, so they can be analysed together.
+
+    This is the schedule hierarchical bottom-up stage-1 walks: each cluster is
+    analysed with full detail for its OWN functions plus its already-summarised
+    children, so a call's size is bounded by local fan-out (which
+    ``branching_threshold`` already caps) rather than the whole binary — the
+    property that lets a big binary fit a small/local model on a laptop.
+
+    Deterministic: clusters within a wave are ordered by id, waves by depth.
+    Containment is acyclic by construction; a defensive guard still emits any
+    stuck remainder rather than looping forever.
+    """
+    # Collect every unique cluster (top-level + nested) keyed by id.
+    by_id: Dict[int, "FunctionalCluster"] = {}
+
+    def _collect(c: "FunctionalCluster") -> None:
+        if c.id in by_id:
+            return
+        by_id[c.id] = c
+        for sub in c.subclusters:
+            _collect(sub)
+
+    for c in clusters:
+        _collect(c)
+
+    done: Set[int] = set()
+    remaining: Set[int] = set(by_id.keys())
+    waves: List[List["FunctionalCluster"]] = []
+
+    while remaining:
+        ready = [
+            cid for cid in remaining
+            if all(sub.id in done for sub in by_id[cid].subclusters)
+        ]
+        if not ready:
+            # Containment should be acyclic, so this never fires in practice;
+            # if a cycle ever slipped in, emit the rest in id order as one
+            # final wave so the scheduler terminates instead of spinning.
+            ready = sorted(remaining)
+        ready.sort()
+        waves.append([by_id[cid] for cid in ready])
+        done.update(ready)
+        remaining.difference_update(ready)
+
+    return waves
+
+
 class ClusterManager:
     """
     Manages decomposition of paths into hierarchical clusters.

@@ -1,4 +1,4 @@
-"""Port of com.github.mdr.ascii.java.GraphBuilder (GraphBuilder.java). STUB."""
+"""Port of com.github.mdr.ascii.java.GraphBuilder (GraphBuilder.java)."""
 from __future__ import annotations
 
 

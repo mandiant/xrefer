@@ -15,7 +15,7 @@
 
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Dict, List, Set, Tuple
+from typing import List, Optional, Set
 
 import ida_lines
 
@@ -29,220 +29,238 @@ class ActionCategory(Enum):
 
 @dataclass
 class Action:
+    """One keyboard / mouse affordance plus the states where it is live.
+
+    The list of these on :class:`ContextHelp` (``self.actions``) is the
+    **single source of truth** for the per-view compact help hint rendered at
+    the top of every XRefer view. There used to be two disconnected maps — this
+    registry (which fed a now-removed bordered help box) and a separate
+    hand-written ``if/elif`` inside ``format_compact_hint`` — and they drifted
+    (e.g. the ATT&CK ``K`` mode was live in the home view but missing from its
+    hint). Deriving the hint from this one registry makes that class of bug
+    structurally impossible.
+
+    Fields:
+        key:        the label shown to the user (``"K"``, ``"click"``, ``"type"``).
+        description: long-form text (kept for documentation / future full help).
+        category:   keyboard vs mouse.
+        states:     set of state *display names* (``State.name`` — e.g.
+                    ``"cluster graphs"``, ``"attack matrix"``) where the action
+                    is live. Empty set ⇒ global (live everywhere).
+        hint:       terse label for the one-line compact hint. ``None`` ⇒ the
+                    action is real but never teased on the compact line.
+        weight:     when a state has more hinted actions than fit one line, the
+                    highest-weight ones are kept. ``H`` is always kept and is
+                    always rendered last.
+
+    Keep ``states`` in sync with gui/view.py ``handle_key_*`` and the
+    gui/state_machine.py transitions. tests/test_help_hints.py reads those two
+    files directly and fails if a dispatched key or a real state has no entry
+    here — so new modes/views are caught automatically, no manual re-audit.
+    """
+
     key: str
     description: str
     category: ActionCategory
     states: Set[str] = None
+    hint: Optional[str] = None
+    weight: int = 0
 
     def __post_init__(self):
         if self.states is None:
             self.states = set()
 
-    def format(self) -> str:
-        colored_key = f"\x01{ida_lines.SCOLOR_VOIDOP}{self.key}\x02{ida_lines.SCOLOR_VOIDOP}"
-        colored_sep = f"\x01{ida_lines.SCOLOR_SYMBOL}:\x02{ida_lines.SCOLOR_SYMBOL}"
-        colored_desc = f"\x01{ida_lines.SCOLOR_DATNAME}{self.description}\x02{ida_lines.SCOLOR_DATNAME}"
-        return f"{colored_key}{colored_sep} {colored_desc}"
+    def live_in(self, state: str) -> bool:
+        """True when this action is available in ``state`` (empty states ⇒ global)."""
+        return not self.states or state in self.states
+
+
+# Visible width budget for the single compact hint line (excluding the 4-space
+# indent the caller adds). Sized so the busiest views (home, cluster graphs)
+# surface their primary modes — including ATT&CK — without wrapping a typical
+# side panel. Over-budget views shed their lowest-weight hints to the full
+# help screen (H). tests/test_help_hints.py enforces this bound per state.
+_COMPACT_BUDGET = 92
 
 
 class ContextHelp:
+    """Builds the compact, state-aware help hint shown atop each XRefer view.
+
+    The full keyboard/mouse reference lives in gui/helpers.py::help_text() (the
+    ``H`` screen); this class only renders the terse one-liner. Both are kept
+    honest against the registry below by tests/test_help_hints.py.
+    """
+
     def __init__(self):
-        self.box = {"tl": "╭", "tr": "╮", "bl": "╰", "br": "╯", "h": "─", "v": "│"}
+        KB = ActionCategory.KEYBOARD
+        MS = ActionCategory.MOUSE
 
-        # Shortcut → state map. Audited against gui/view.py handle_key_*
-        # handlers AND gui/state_machine.py transitions (a key is "live" in a
-        # state only when its handler logic AND the transition it fires both
-        # allow that state). A trailing state set scopes the action to those
-        # states; no set ⇒ truly global. Keep in sync with
-        # gui/helpers.py::help_text() and the audit in persistent memory
-        # (project_shortcuts_help_audit.md).
-        #
-        # State display names:
-        #   base, search, call focus, function trace, path trace, full trace,
-        #   graph, pinned graph, simplified graph, pinned simplified graph,
-        #   boundary results, last boundary results, orphans, clusters,
-        #   cluster graphs, pinned cluster graphs, neighborhood graph,
-        #   pinned neighborhood graph, xref listing, help
-
+        # State groups (by State.name). Mirror gui/state_machine.py.
         GRAPH = {"graph", "pinned graph", "simplified graph", "pinned simplified graph"}
         CLUSTER_GRAPH = {"cluster graphs", "pinned cluster graphs"}
         TRACE = {"function trace", "path trace", "full trace"}
         NEIGHBORHOOD = {"neighborhood graph", "pinned neighborhood graph"}
+        # "Simple" detail views: no special keys, just jump / hover / ESC.
+        LISTS = {"boundary results", "last boundary results", "xref listing", "call focus"}
 
-        # Truly global — handlers have no state guard (ESC/ENTER/N) or work in
-        # essentially every banner-bearing state (H).
-        global_actions = [
-            Action("ESC", "go back / return to IDA", ActionCategory.KEYBOARD),
-            Action("ENTER", "return to home view", ActionCategory.KEYBOARD),
-            Action("H", "show/hide help", ActionCategory.KEYBOARD),
-            Action("N", "rename function/reference under cursor", ActionCategory.KEYBOARD),
-            Action("click", "expand row / open cluster / show call details", ActionCategory.MOUSE),
-            Action("dbl-click", "select artifact / jump to address", ActionCategory.MOUSE),
-            Action("hover", "show tooltip", ActionCategory.MOUSE),
+        self.actions: List[Action] = [
+            # ----- Mouse gestures -------------------------------------------------
+            # Modelled per state so the hint phrases the gesture by what it does
+            # there (click "expand" a row vs "open cluster"; dbl-click "select"
+            # an artifact vs "jump" to an address).
+            Action("click", "expand / collapse the row", MS, {"base", "orphans"}, hint="expand", weight=85),
+            Action("click", "open the cluster under the cursor", MS, {"clusters", *CLUSTER_GRAPH}, hint="open cluster", weight=85),
+            Action("click", "open cluster / follow technique link", MS, {"attack matrix"}, hint="open cluster", weight=85),
+            # In base, selection is double-click-only and gates B/D — non-obvious,
+            # so keep it prominent (high weight). The *jump* variant is weighted
+            # low: jump-on-double-click is a near-universal convention, so in the
+            # crowded cluster-graph view it yields its slot to the non-obvious
+            # toggles (R/J), while still surfacing in roomier graph/trace/list views.
+            Action("dbl-click", "select / deselect the artifact", MS, {"base"}, hint="select", weight=82),
+            Action("dbl-click", "jump to the address", MS, {*GRAPH, *CLUSTER_GRAPH, *NEIGHBORHOOD, *TRACE, *LISTS}, hint="jump", weight=64),
+            Action("hover", "show a details tooltip", MS, {"orphans", *NEIGHBORHOOD, *LISTS}, hint="details", weight=20),
+
+            # ----- Global keyboard ------------------------------------------------
+            Action("ESC", "go back / return to IDA", KB),
+            Action("ENTER", "return to the home view", KB),
+            Action("H", "show / hide the full help", KB, hint="full help"),
+            Action("N", "rename the function / reference under the cursor", KB),
+            # ESC teased only where the view is otherwise sparse.
+            Action("ESC", "exit search", KB, {"search"}, hint="exit", weight=40),
+            Action("ESC", "go back", KB, set(LISTS), hint="back", weight=40),
+
+            # ----- Home (base) keyboard ------------------------------------------
+            Action("S", "search / filter the view", KB, {"base"}, hint="search", weight=50),
+            Action("T", "trace API calls (cycle scopes)", KB, {"base"}, hint="trace", weight=64),
+            Action("C", "cluster relationship graph", KB, {"base"}, hint="clusters", weight=80),
+            Action("O", "orphan artifacts", KB, {"base"}, hint="orphans", weight=46),
+            Action("X", "cross-references for the artifact", KB, {"base"}),
+            Action("B", "boundary scan over selected artifacts", KB, {"base"}),
+            Action("L", "last boundary scan results", KB, {"base"}),
+            Action("P", "call focus (cursor on a 0x… call)", KB, {"base"}),
+            Action("J", "jump to this function's cluster", KB, {"base"}),
+            Action("D", "exclude selected artifacts", KB, {"base"}),
+
+            # ----- Toggles spanning a few states ---------------------------------
+            Action("U", "toggle exclusions on / off", KB, {"base", *TRACE}, hint="exclusions", weight=58),
+            # Expand/collapse is the signature interaction of both the dense xref
+            # tables (base) and the orphans table, so it earns a compact slot in
+            # both — high enough to survive base's crowd of mode keys.
+            Action("E", "expand / collapse all table sections", KB, {"base", "orphans"}, hint="expand all", weight=78),
+
+            # ----- G: context-dependent ------------------------------------------
+            Action("G", "artifact path graph", KB, {"base", "search"}, hint="paths", weight=76),
+            Action("G", "pin / unpin the graph", KB, set(GRAPH), hint="pin", weight=76),
+            Action("G", "pin / unpin the cluster graph", KB, set(CLUSTER_GRAPH), hint="pin", weight=76),
+            Action("G", "open the ATT&CK heat-grid popup", KB, {"attack matrix"}, hint="heat-grid", weight=80),
+
+            # ----- Inside artifact graphs ----------------------------------------
+            Action("S", "toggle simplified / normal", KB, set(GRAPH), hint="simplify", weight=72),
+            Action("D", "show / hide each node's artifacts", KB, set(GRAPH), hint="node detail", weight=70),
+
+            # ----- V: neighborhood -----------------------------------------------
+            Action("V", "neighborhood: clusters reachable from cursor", KB, {"base", "clusters", *CLUSTER_GRAPH, *GRAPH}, hint="neighborhood", weight=40),
+            Action("V", "exit the neighborhood view", KB, set(NEIGHBORHOOD), hint="exit", weight=84),
+
+            # ----- T: trace scope cycling ----------------------------------------
+            Action("T", "cycle trace scope (function / path / full)", KB, set(TRACE), hint="cycle scope", weight=80),
+
+            # ----- Cluster table / cluster graph ---------------------------------
+            Action("C", "switch to the cluster graph", KB, {"clusters"}, hint="graph", weight=80),
+            Action("C", "switch to the cluster table", KB, {"cluster graphs"}, hint="table", weight=60),
+            Action("L", "show / hide library clusters", KB, {"clusters", *CLUSTER_GRAPH}, hint="hide library", weight=54),
+            Action("R", "toggle description / report view", KB, {"clusters", *CLUSTER_GRAPH}, hint="report", weight=66),
+            Action("J", "toggle cluster sync", KB, set(CLUSTER_GRAPH), hint="sync", weight=70),
+            Action("M", "intermediate paths through cursor function", KB, {"base", "clusters", *CLUSTER_GRAPH}),
+            Action("M", "intermediate paths through cursor function", KB, set(NEIGHBORHOOD), hint="paths", weight=70),
+            Action("A", "intermediate scope: this cluster ↔ all", KB, set(CLUSTER_GRAPH)),
+
+            # ----- ATT&CK matrix (K) ---------------------------------------------
+            Action("K", "ATT&CK matrix (kill-chain)", KB, {"base", "clusters", *CLUSTER_GRAPH}, hint="ATT&CK", weight=90),
+            Action("K", "exit the ATT&CK matrix", KB, {"attack matrix"}, hint="exit", weight=60),
+            Action("L", "show / hide library clusters", KB, {"attack matrix"}, hint="hide library", weight=70),
+
+            # ----- Search --------------------------------------------------------
+            Action("type", "filter the current view", KB, {"search"}, hint="filter", weight=90),
+            Action("X", "cross-references for the artifact", KB, {"search"}, hint="xrefs", weight=60),
+
+            # ----- Orphans -------------------------------------------------------
+            Action("O", "exit the orphan artifacts view", KB, {"orphans"}, hint="exit", weight=60),
         ]
 
-        # Home (base) — the per-function xref tables view.
-        base_actions = [
-            Action("S", "search / filter the view", ActionCategory.KEYBOARD, {"base"}),
-            Action("T", "trace API calls (cycle scopes)", ActionCategory.KEYBOARD, {"base"}),
-            Action("C", "cluster relationship graph", ActionCategory.KEYBOARD, {"base"}),
-            Action("O", "orphan artifacts", ActionCategory.KEYBOARD, {"base"}),
-            Action("X", "cross-references for artifact", ActionCategory.KEYBOARD, {"base"}),
-            Action("B", "boundary scan over selected artifacts", ActionCategory.KEYBOARD, {"base"}),
-            Action("L", "last boundary scan results", ActionCategory.KEYBOARD, {"base"}),
-            Action("P", "call focus (cursor on a 0x… call)", ActionCategory.KEYBOARD, {"base"}),
-            Action("J", "jump to this function's cluster", ActionCategory.KEYBOARD, {"base"}),
-            Action("D", "exclude selected artifacts", ActionCategory.KEYBOARD, {"base"}),
-        ]
+    # ------------------------------------------------------------------ queries
+    def live_actions(self, state: str) -> List[Action]:
+        """Every registered action available in ``state`` (in registry order)."""
+        return [a for a in self.actions if a.live_in(state)]
 
-        # U + E each span a couple of states (NOT global, as old code claimed).
-        toggle_actions = [
-            Action("U", "toggle exclusions on/off", ActionCategory.KEYBOARD, {"base", *TRACE}),
-            Action("E", "expand/collapse table sections", ActionCategory.KEYBOARD, {"base", "orphans"}),
-        ]
+    def live_keys(self, state: str) -> Set[str]:
+        """Set of keys/gestures that have at least one live action in ``state``."""
+        return {a.key for a in self.actions if a.live_in(state)}
 
-        # G has three context-dependent meanings.
-        g_actions = [
-            Action("G", "artifact path graph", ActionCategory.KEYBOARD, {"base", "search"}),
-            Action("G", "pin/unpin graph", ActionCategory.KEYBOARD, set(GRAPH)),
-            Action("G", "pin/unpin cluster graph", ActionCategory.KEYBOARD, set(CLUSTER_GRAPH)),
-        ]
+    # --------------------------------------------------------------- rendering
+    def _sep(self) -> str:
+        return f"\x01{ida_lines.SCOLOR_SYMBOL} · \x02{ida_lines.SCOLOR_SYMBOL}"
 
-        # Inside artifact graphs: S simplifies, V opens neighborhood, G pins.
-        graph_actions = [
-            Action("S", "toggle simplified / normal", ActionCategory.KEYBOARD, set(GRAPH)),
-        ]
-
-        # V opens the neighborhood from many states; closes it from the two
-        # neighborhood states.
-        v_actions = [
-            Action("V", "neighborhood: clusters reachable from cursor", ActionCategory.KEYBOARD, {"base", "clusters", *CLUSTER_GRAPH, *GRAPH}),
-            Action("V", "exit neighborhood view", ActionCategory.KEYBOARD, set(NEIGHBORHOOD)),
-        ]
-
-        # T cycles scope once you are inside a trace view (T from base opens it).
-        trace_actions = [
-            Action("T", "cycle trace scope (function/path/full)", ActionCategory.KEYBOARD, set(TRACE)),
-        ]
-
-        # Cluster table / cluster graph keys.
-        cluster_actions = [
-            Action("C", "toggle cluster table / graph", ActionCategory.KEYBOARD, {"clusters", "cluster graphs"}),
-            Action("L", "show/hide library clusters", ActionCategory.KEYBOARD, {"clusters", *CLUSTER_GRAPH}),
-            Action("R", "toggle description / report view", ActionCategory.KEYBOARD, {"clusters", *CLUSTER_GRAPH}),
-            Action("J", "toggle cluster sync", ActionCategory.KEYBOARD, set(CLUSTER_GRAPH)),
-            Action("M", "intermediate paths through cursor function", ActionCategory.KEYBOARD, {"base", "clusters", *CLUSTER_GRAPH, *NEIGHBORHOOD}),
-            Action("A", "intermediate scope: this cluster ↔ all", ActionCategory.KEYBOARD, set(CLUSTER_GRAPH)),
-        ]
-
-        # Search: only X and G transition out; any other key types into the
-        # filter.
-        search_actions = [
-            Action("type", "filter the current view", ActionCategory.KEYBOARD, {"search"}),
-            Action("X", "cross-references for artifact", ActionCategory.KEYBOARD, {"search"}),
-        ]
-
-        # Orphans view exit (E expand/collapse is covered by toggle_actions).
-        orphan_actions = [
-            Action("O", "exit orphan artifacts view", ActionCategory.KEYBOARD, {"orphans"}),
-        ]
-
-        # boundary results / last boundary results / call focus / xref listing /
-        # help have no live keys beyond the globals.
-
-        self.actions = (
-            global_actions
-            + base_actions
-            + toggle_actions
-            + g_actions
-            + graph_actions
-            + v_actions
-            + trace_actions
-            + cluster_actions
-            + search_actions
-            + orphan_actions
+    def _part(self, label: str, desc: str) -> str:
+        return (
+            f"\x01{ida_lines.SCOLOR_DNAME}{label}\x02{ida_lines.SCOLOR_DNAME}"
+            f"\x01{ida_lines.SCOLOR_AUTOCMT}: {desc}\x02{ida_lines.SCOLOR_AUTOCMT}"
         )
 
-        self._help_cache: Dict[Tuple[str, int], List[str]] = {}
+    def _display_rank(self, action: Action) -> int:
+        """Stable grouping for the rendered order of a compact line.
 
-    def _create_help_section(self, title: str, actions: List[Action], width: int) -> List[str]:
-        box_color = f"\x01{ida_lines.SCOLOR_DATNAME}"
-        box_end = f"\x02{ida_lines.SCOLOR_DATNAME}"
-        lines = []
+        Mouse gestures lead, then ``type`` (search), then the lettered keys,
+        then navigation (``ESC`` / ``ENTER``); ``H`` is appended separately and
+        always last.
+        """
+        if action.category == ActionCategory.MOUSE:
+            return 0
+        if action.key == "type":
+            return 1
+        if action.key in ("ESC", "ENTER"):
+            return 3
+        return 2
 
-        title_colored = f"\x01{ida_lines.SCOLOR_PREFIX}{title}:\x02{ida_lines.SCOLOR_PREFIX}"
-        base_padding = get_visible_width(f"{self.box['v']} {title}: ")
+    def format_compact_hint(self, current_state: str) -> str:
+        """Single dim, *state-aware* hint line for the top of each view.
 
-        current_line = []
-        current_width = base_padding
+        Derived entirely from ``self.actions``: it lists only gestures/keys
+        actually live in ``current_state`` (so it never claims e.g. 'G: paths'
+        in a graph where G pins, nor omits 'K: ATT&CK' in the home view), packs
+        them to :data:`_COMPACT_BUDGET` keeping the highest-weight ones, always
+        ends with 'H: full help', and returns '' for the help view itself.
+        """
+        if current_state == "help":
+            return ""
 
-        for action in actions:
-            formatted_action = action.format()
-            action_width = get_visible_width(formatted_action)
-            if current_width + action_width + 3 > width - 5:
-                line_content = " ".join(current_line)
-                padding = width - get_visible_width(line_content) - 5
-                full_line = f"{box_color}{self.box['v']}{box_end} {line_content}{' ' * (padding + 1)}{box_color}{self.box['v']}{box_end}"
-                lines.append(full_line)
-                current_line = [formatted_action]
-                current_width = base_padding + action_width
-            else:
-                if current_line:
-                    current_line.append(f"\x01{ida_lines.SCOLOR_SYMBOL}•\x02{ida_lines.SCOLOR_SYMBOL}")
-                current_line.append(formatted_action)
-                current_width += action_width + 3
+        eligible = [a for i, a in enumerate(self.actions) if a.hint and a.live_in(current_state)]
+        help_action = next((a for a in eligible if a.key == "H"), None)
+        candidates = [a for a in eligible if a.key != "H"]
 
-        if current_line:
-            line_content = " ".join(current_line)
-            padding = width - get_visible_width(line_content) - 5
-            full_line = f"{box_color}{self.box['v']}{box_end} {line_content}{' ' * (padding + 1)}{box_color}{self.box['v']}{box_end}"
-            lines.append(full_line)
+        # The final line is `sep.join(kept + [H])` → N parts have N-1 separators.
+        # So reserve H's own width but NOT a separator for it; each token then
+        # carries the single separator that precedes it. (Counting a separator
+        # for H too would over-reserve by one and needlessly drop a token that
+        # actually fits.)
+        sep_w = get_visible_width(self._sep())
+        used = 0
+        if help_action is not None:
+            used += get_visible_width(self._part(help_action.key, help_action.hint))
 
-        return lines
+        index_of = {id(a): i for i, a in enumerate(self.actions)}
+        kept: List[Action] = []
+        # Highest weight first decides *what* survives the budget; ties break on
+        # registry order for determinism.
+        for action in sorted(candidates, key=lambda a: (-a.weight, index_of[id(a)])):
+            width = get_visible_width(self._part(action.key, action.hint)) + sep_w
+            if used + width <= _COMPACT_BUDGET:
+                kept.append(action)
+                used += width
 
-    def _create_box_border(self, width: int, is_top: bool = True) -> str:
-        box_color = f"\x01{ida_lines.SCOLOR_DATNAME}"
-        box_end = f"\x02{ida_lines.SCOLOR_DATNAME}"
-
-        adjusted_width = width - 1
-        if is_top:
-            return f"{box_color}{self.box['tl']}{self.box['h'] * (adjusted_width - 2)}{self.box['tr']}{box_end}"
-        else:
-            return f"{box_color}{self.box['bl']}{self.box['h'] * (adjusted_width - 2)}{self.box['br']}{box_end}"
-
-    def format_help_text(self, current_state: str, width: int = 80) -> List[str]:
-        if (current_state, width) in self._help_cache:
-            return self._help_cache[(current_state, width)]
-
-        lines = []
-        lines.append(self._create_box_border(width, True))
-
-        state_actions = self.get_state_actions(current_state)
-
-        # Keyboard actions
-        if state_actions[ActionCategory.KEYBOARD]:
-            kb_lines = self._create_help_section("Keys", state_actions[ActionCategory.KEYBOARD], width)
-            lines.extend(kb_lines)
-
-        # Mouse actions
-        if state_actions[ActionCategory.MOUSE]:
-            mouse_lines = self._create_help_section("Mouse", state_actions[ActionCategory.MOUSE], width)
-            lines.extend(mouse_lines)
-
-        lines.append(self._create_box_border(width, False))
-
-        self._help_cache[(current_state, width)] = lines
-        return lines
-
-    def get_state_actions(self, current_state: str) -> Dict[ActionCategory, List[Action]]:
-        state_actions = {cat: [] for cat in ActionCategory}
-
-        for action in self.actions:
-            # If no states specified, global action. Otherwise, check membership
-            if not action.states or current_state in action.states:
-                state_actions[action.category].append(action)
-
-        return state_actions
-
-    def clear_cache(self) -> None:
-        self._help_cache.clear()
+        # Then re-order what survived for a readable line.
+        kept.sort(key=lambda a: (self._display_rank(a), index_of[id(a)]))
+        parts = [self._part(a.key, a.hint) for a in kept]
+        if help_action is not None:
+            parts.append(self._part(help_action.key, help_action.hint))
+        return self._sep().join(parts)

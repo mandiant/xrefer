@@ -1,8 +1,7 @@
-"""Port of com.github.mdr.ascii.layout.prefs.LayoutPrefs (trait). STUB.
+"""Port of com.github.mdr.ascii.layout.prefs.LayoutPrefs (trait).
 
 A LayoutPrefs exposes: remove_kinks, compactify, elevate_edges, vertical,
-unicode, double_vertices, rounded, explicit_ascii_bends. Port the trait +
-RendererPrefs split from reference/ascii-graphs/.../layout/prefs/.
+unicode, double_vertices, rounded, explicit_ascii_bends.
 """
 from __future__ import annotations
 from typing import Protocol

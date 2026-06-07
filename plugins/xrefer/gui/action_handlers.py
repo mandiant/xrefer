@@ -95,8 +95,17 @@ class ClusterEverythingHandler(idaapi.action_handler_t):
             if current_state in (plugin_instance.xrefer_view.state_machine.clusters, plugin_instance.xrefer_view.state_machine.cluster_graphs):
                 plugin_instance.xrefer_view.update(True)
 
-            log("Cluster analysis complete")
+            if getattr(xrefer_obj, "cluster_token_budget_exceeded", None):
+                log("Cluster analysis skipped — request exceeds the model's context window")
+            else:
+                log("Cluster analysis complete")
             idaapi.hide_wait_box()
+
+            # Show the budget bar (blocked framing) if the run was skipped for
+            # exceeding the model's context window. After hide_wait_box so the
+            # modal isn't stacked under the wait box.
+            from xrefer.gui.token_estimate import show_budget_block_if_pending
+            show_budget_block_if_pending(xrefer_obj)
             return True
 
         except Exception as e:
@@ -562,7 +571,11 @@ class ClusterRenameHandler(idaapi.action_handler_t):
         from xrefer.plugin import plugin_instance
 
         try:
-            plugin_instance.xrefer_view.xrefer_obj.rename_cluster_functions()
+            idaapi.show_wait_box("HIDECANCEL\nRenaming cluster functions...")
+            try:
+                plugin_instance.xrefer_view.xrefer_obj.rename_cluster_functions()
+            finally:
+                idaapi.hide_wait_box()
             return True
         except Exception as e:
             log(f"[-] Error during cluster-based renaming: {str(e)}")
@@ -575,6 +588,211 @@ class ClusterRenameHandler(idaapi.action_handler_t):
         from xrefer.plugin import plugin_instance
 
         if plugin_instance.xrefer_view and plugin_instance.xrefer_view.xrefer_obj.clusters:
+            return idaapi.AST_ENABLE_ALWAYS
+        else:
+            return idaapi.AST_DISABLE
+
+
+class OrganizeFoldersHandler(idaapi.action_handler_t):
+    """Organize the Functions window into library/user folders.
+
+    Applies ``XRefer.compute_function_folders()`` to IDA's function dirtree:
+    FUNC_LIB / library-cluster functions go under ``/Library``, user-cluster
+    functions under ``/User`` (cluster-nested), multi-cluster functions at the
+    bare origin root, and everything unclassified is left at the IDB root.
+    Re-runnable and reversible (see RemoveAllFoldersHandler). Enabled only once
+    cluster *analysis* data exists, since the verdict needs the LLM's
+    is_library + labels (not just the structural clusters).
+    """
+
+    def activate(self, ctx: Any) -> bool:
+        from xrefer.gui.foldering import apply_function_folders
+        from xrefer.plugin import plugin_instance
+
+        try:
+            idaapi.show_wait_box("HIDECANCEL\nOrganizing functions into folders...")
+            try:
+                apply_function_folders(plugin_instance.xrefer_view.xrefer_obj)
+            finally:
+                idaapi.hide_wait_box()
+            return True
+        except Exception as e:
+            log(f"[-] Error organizing functions into folders: {str(e)}")
+            import traceback
+
+            traceback.print_exc()
+            return False
+
+    def update(self, ctx: Any) -> int:
+        from xrefer.plugin import plugin_instance
+
+        view = plugin_instance.xrefer_view
+        if view and view.xrefer_obj.clusters and view.xrefer_obj.cluster_analysis:
+            return idaapi.AST_ENABLE_ALWAYS
+        else:
+            return idaapi.AST_DISABLE
+
+
+class RemoveAllFoldersHandler(idaapi.action_handler_t):
+    """Flatten the entire Functions-window folder tree back to the root.
+
+    Broader than xrefer's own folders on purpose: xrefer's roots use the
+    generic names Library/User and can't be reliably told apart from folders
+    the user made by hand, so the honest "reset to a flat list" removes them
+    all. Reverses OrganizeFoldersHandler (and any other foldering)."""
+
+    def activate(self, ctx: Any) -> bool:
+        from xrefer.gui.foldering import remove_all_folders
+
+        try:
+            idaapi.show_wait_box("HIDECANCEL\nRemoving all function folders...")
+            try:
+                remove_all_folders()
+            finally:
+                idaapi.hide_wait_box()
+            return True
+        except Exception as e:
+            log(f"[-] Error removing function folders: {str(e)}")
+            import traceback
+
+            traceback.print_exc()
+            return False
+
+    def update(self, ctx: Any) -> int:
+        from xrefer.plugin import plugin_instance
+
+        if plugin_instance.xrefer_view:
+            return idaapi.AST_ENABLE_ALWAYS
+        else:
+            return idaapi.AST_DISABLE
+
+
+class ViewAttackMatrixHandler(idaapi.action_handler_t):
+    """Open the ATT&CK matrix heat-grid popup (Navigator-style) for the current
+    clusters' MITRE ATT&CK mappings.
+
+    Delegates to ``XReferView.open_attack_matrix_popup`` (the same path the
+    in-view ``G`` key uses), so the menu/context entry and the key stay in
+    sync. Enabled only once cluster analysis has produced at least one mapped
+    technique (a non-empty matrix), so the action greys out when there's
+    nothing to render.
+    """
+
+    def activate(self, ctx: Any) -> bool:
+        from xrefer.plugin import plugin_instance
+
+        view = plugin_instance.xrefer_view
+        if not (view and view.xrefer_obj and view.xrefer_obj.clusters
+                and view.xrefer_obj.cluster_analysis):
+            log("[-] ATT&CK matrix: run cluster analysis first.")
+            return False
+        try:
+            view.open_attack_matrix_popup()
+            return True
+        except Exception as e:
+            log(f"[-] Error opening ATT&CK matrix: {str(e)}")
+            return False
+
+    def update(self, ctx: Any) -> int:
+        from xrefer.core.mitre import has_any_techniques
+        from xrefer.plugin import plugin_instance
+
+        view = plugin_instance.xrefer_view
+        if (view and view.xrefer_obj and view.xrefer_obj.clusters
+                and view.xrefer_obj.cluster_analysis
+                and has_any_techniques(view.xrefer_obj.cluster_analysis)):
+            return idaapi.AST_ENABLE_ALWAYS
+        return idaapi.AST_DISABLE
+
+
+class EstimateClusterTokensHandler(idaapi.action_handler_t):
+    """Show a pre-flight token-budget estimate for cluster analysis.
+
+    Renders the real stage-1 DSPy request for the current clusters,
+    counts request + max-response tokens against the configured model's
+    context window, and shows a budget-bar dialog that warns when the
+    projected total approaches or exceeds the window. Read-only: makes no
+    LLM call and needs no API key. Enabled once clustering has produced
+    clusters (the analysis verdict isn't required — this is meant to be
+    run *before* analysis to decide whether the request will fit).
+    """
+
+    def activate(self, ctx: Any) -> bool:
+        from xrefer.gui.settings import _curated_llm_models
+        from xrefer.gui.token_estimate import show_token_estimate_dialog
+        from xrefer.llm.cluster_analyzer import ClusterAnalyzer
+        from xrefer.plugin import plugin_instance
+
+        view = plugin_instance.xrefer_view
+        if not (view and view.xrefer_obj and view.xrefer_obj.clusters):
+            log("[-] Token estimate: no clusters yet — run cluster analysis first.")
+            return False
+
+        try:
+            idaapi.show_wait_box("HIDECANCEL\nEstimating token usage...")
+            try:
+                xobj = view.xrefer_obj
+                # Build the model-independent requests ONCE (full + hierarchical
+                # shapes); the dialog's model dropdown re-estimates per model
+                # cheaply, picking the shape that model would actually run under
+                # (local always hierarchical; commercial full-if-it-fits).
+                full_ctx = ClusterAnalyzer.build_estimate_context(xobj.clusters, xobj)
+                hier_ctx = ClusterAnalyzer.build_hier_estimate_context(xobj.clusters, xobj)
+                try:
+                    _mode_setting = xobj.settings.get("analysis_options", {}).get("cluster_context_mode", "auto")
+                except Exception:
+                    _mode_setting = "auto"
+
+                def _estimate_for(m):
+                    from xrefer.llm.cluster_analyzer import exceeds_context_window
+                    from xrefer.llm.ollama import is_ollama_model
+                    ms = (_mode_setting or "auto").strip().lower()
+                    if ms == "hierarchical" or (ms == "auto" and is_ollama_model(m)):
+                        return ClusterAnalyzer.estimate_for_model(hier_ctx, m)
+                    fe = ClusterAnalyzer.estimate_for_model(full_ctx, m)
+                    if ms == "full" or not exceeds_context_window(fe):
+                        return fe
+                    return ClusterAnalyzer.estimate_for_model(hier_ctx, m)
+                # Current model = the configured one (current_config or settings).
+                current_model = None
+                cfg = ClusterAnalyzer.current_config
+                if cfg and getattr(cfg, "model_id", None):
+                    current_model = cfg.model_id
+                if not current_model:
+                    try:
+                        current_model = xobj.settings.get("llm_model_id") or None
+                    except Exception:
+                        current_model = None
+                # Curated dropdown list; keep the current model present + first
+                # so the initial render matches the selection, and default to
+                # the first model when nothing is configured yet.
+                models = _curated_llm_models()
+                if current_model and current_model not in models:
+                    models = [current_model] + models
+                if not current_model and models:
+                    current_model = models[0]
+                initial = _estimate_for(current_model)
+            finally:
+                idaapi.hide_wait_box()
+            show_token_estimate_dialog(
+                initial,
+                recompute=_estimate_for,
+                models=models,
+                current_model=current_model,
+            )
+            return True
+        except Exception as e:
+            log(f"[-] Error estimating token usage: {str(e)}")
+            import traceback
+
+            traceback.print_exc()
+            return False
+
+    def update(self, ctx: Any) -> int:
+        from xrefer.plugin import plugin_instance
+
+        view = plugin_instance.xrefer_view
+        if view and view.xrefer_obj and view.xrefer_obj.clusters:
             return idaapi.AST_ENABLE_ALWAYS
         else:
             return idaapi.AST_DISABLE

@@ -74,6 +74,13 @@ class IDAFunction(Function):
         """Check if the function is a thunk."""
         return bool(idc.get_func_flags(self._func.start_ea) & idc.FUNC_THUNK)
 
+    @property
+    def has_default_name(self) -> bool:
+        """True if IDA still shows a dummy/auto name (sub_/loc_/nullsub_/…)
+        rather than a FLIRT, import, or user-assigned name. Precise override of
+        the base name-prefix heuristic, via IDA's own dummy-name flag."""
+        return bool(ida_bytes.has_dummy_name(ida_bytes.get_flags(self._func.start_ea)))
+
     def contains(self, address: Address) -> bool:
         """Check if the address is within the function."""
         return idc.func_contains(self._func.start_ea, address.value)

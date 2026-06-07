@@ -30,11 +30,10 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union, 
 import xrefer
 from xrefer.backend import Address, BackEnd, FunctionType, XrefType, get_current_backend
 from xrefer.core.clusters import ClusterManager, FunctionalCluster
-from xrefer.core.helpers import enrich_string_data_core, find_cluster_analysis, log, log_elapsed_time
-from xrefer.core.settings import XReferSettingsManager
+from xrefer.core.helpers import enrich_string_data_core, find_cluster_analysis, log, log_elapsed_time, sanitize_dirtree_name
+from xrefer.core.settings import XReferSettingsManager, deep_merge_settings
 from xrefer.lang import get_language_object
 from xrefer.llm import ClusterAnalyzer, CATEGORIES, Categorizer
-from xrefer.llm.base import ModelConfig
 from xrefer.loaders.capa import load_capa_json
 from xrefer.loaders.trace import parse_api_trace
 
@@ -97,6 +96,28 @@ ReportDataMode = Literal["html", "json", "none"]
 """html: standalone HTML with embedded data, json: write JSON only, none: skip report output (default)."""
 
 
+@dataclass(frozen=True)
+class FunctionPlacement:
+    """Per-function origin classification, the single source of truth shared by
+    the folder organizer (``compute_function_folders``) and the cluster
+    renamer (``rename_cluster_functions``), so names and folders never disagree.
+
+    category:
+        ``"func_lib"``       — FUNC_LIB / thunk (FLIRT-ish library code).
+        ``"cluster_member"`` — node of exactly one cluster, OR an intermediate
+                               that bridges exactly one cluster (its glue).
+                               ``cluster_id`` is that home cluster.
+        ``"shared"``         — node of >1 cluster, or an intermediate bridging
+                               >1 cluster. No single home (``cluster_id`` None).
+    origin: ``"library"`` | ``"user"`` (fail-open: any user membership → user).
+    cluster_id: home cluster for ``cluster_member``, else ``None``.
+    """
+
+    category: str
+    origin: str
+    cluster_id: Optional[int]
+
+
 class XRefer:
     """
     A class for managing and analyzing cross-references in IDA Pro.
@@ -118,16 +139,40 @@ class XRefer:
         *,
         mode: Optional[AnalysisMode] = 'full',
         report_data_mode: ReportDataMode = "none",
+        settings_overrides: Optional[Dict[str, Any]] = None,
+        persist_settings: bool = False,
+        report_path: Optional[str] = None,
     ) -> None:
         """
         Initialize the XRefer object.
 
         Args:
             ep (Optional[int]): The entry point address. If None, the default entry point will be used.
+            settings_overrides (Optional[dict]): Settings to deep-merge on top of
+                the loaded settings.json for this run only (e.g. from CLI flags).
+            persist_settings (bool): When True (and overrides were given), write the
+                merged settings back to settings.json so they apply to future runs.
+            report_path (Optional[str]): Explicit output path for the generated
+                report; defaults to ``<binary>_report.html`` / ``_report_data.json``.
         """
         try:
             self.settings_manager = XReferSettingsManager()
             self.settings = self.settings_manager.load_settings()
+            # Apply ephemeral CLI/programmatic overrides on top of the loaded
+            # settings. Overriding a path also flips its use_default_paths flag
+            # off so the value sticks (and, with persist_settings, is saved as an
+            # IDB-specific path rather than a global default).
+            if settings_overrides:
+                deep_merge_settings(self.settings, settings_overrides)
+                for path_type in settings_overrides.get("paths", {}):
+                    self.settings.setdefault("use_default_paths", {})[path_type] = False
+                if persist_settings:
+                    try:
+                        self.settings_manager.save_settings(self.settings)
+                        log(f"Saved settings to {self.settings_manager.settings_file}")
+                    except Exception as err:
+                        log(f"[-] Failed to persist settings: {err}")
+            self.report_path: Optional[str] = report_path
             self.exclusions = self.settings_manager.load_exclusions()
             self.report_data_mode: ReportDataMode = report_data_mode
             self.analysis_warnings: List[str] = []
@@ -227,6 +272,10 @@ class XRefer:
             self._processed_orphan_thunks: Set[int] = set()
             self.clusters = None
             self.cluster_analysis = None
+            # Set by the pre-flight token-budget gate in analyze_clusters when a
+            # run is skipped for exceeding the model's context window; consumed
+            # (and cleared) by the GUI to show the budget bar. None = no block.
+            self.cluster_token_budget_exceeded = None
             self.mode = mode
             self.configure_llm_and_lookups()
             # Run analysis if requested
@@ -1277,6 +1326,46 @@ class XRefer:
                 log(f"Creating clusters from {len(graph_paths)} paths with {len(root_nodes)} root nodes")
                 self.clusters = ClusterManager.decompose_into_clusters(graph_paths, intermediate_paths_map, root_nodes, self.artifact_functions, backend=self._backend)
 
+            # ── Pre-flight token-budget gate ─────────────────────────
+            # Estimate the stage-1 request against the configured model's
+            # context window. If it would overflow, do NOT send anything to
+            # the LLM: record the estimate (the GUI shows the budget bar),
+            # restore prior cluster state, and bail. The dropdown's
+            # min-context filter is only a coarse cut — a big enough binary
+            # can overflow even a wide window, so this is the real per-binary
+            # backstop.
+            self.cluster_token_budget_exceeded = None
+            from xrefer.llm.cluster_analyzer import exceeds_context_window
+            try:
+                _estimate = ClusterAnalyzer.estimate_cluster_request(self.clusters, self)
+            except Exception as _budget_err:
+                _estimate = None
+                log(f"[-] Token-budget pre-check skipped ({_budget_err.__class__.__name__})")
+            if _estimate is not None and exceeds_context_window(_estimate):
+                self.cluster_token_budget_exceeded = _estimate
+                if getattr(_estimate, "mode", "full") == "hierarchical":
+                    _guidance = (
+                        "Even a single cluster's bottom-up call overflows this window. Pick a "
+                        "larger-context model (this is the genuine last resort — bottom-up "
+                        "already shrank the request as far as the frozen clusters allow)."
+                    )
+                else:
+                    _guidance = (
+                        "Set analysis_options.cluster_context_mode to 'hierarchical' to summarise "
+                        "bottom-up (much smaller per-call requests), pick a larger-context model, "
+                        "or reduce scope, then re-run."
+                    )
+                log(
+                    "[!] Cluster analysis NOT sent to the LLM: estimated "
+                    f"{_estimate.total_tokens:,} tokens (request {_estimate.request_tokens:,} "
+                    f"+ max response {_estimate.max_response_tokens or 0:,}) exceeds "
+                    f"{_estimate.model_id}'s {_estimate.context_window:,}-token context "
+                    f"window [{getattr(_estimate, 'mode', 'full')} mode]. {_guidance}"
+                )
+                self.clusters = current_clusters or []
+                self.cluster_analysis = current_analysis or {}
+                return
+
             # Setup and run cluster analysis
             try:
                 # Batch size pulled from user settings; falls back to
@@ -1857,16 +1946,40 @@ class XRefer:
             if self.llm_lookups:
                 model_id = self.settings["llm_model_id"]
                 api_key = self.settings["api_key"]
+                api_base = self.settings.get("api_base", "") or ""
+                # Local models (Ollama) authenticate via the base URL, not an
+                # API key — don't require a key for them.
+                from xrefer.llm.ollama import is_ollama_model
+                _is_local_model = is_ollama_model(model_id)
                 if not model_id:
                     log(f"LLM lookups are enabled but missing setting(s): llm_model_id. Disabling LLM for this session. Update {self.settings_manager.settings_file} to enable it.")
                     self.llm_lookups = False
                     self.settings["llm_lookups"] = False
                     return
-                if not api_key:
-                    log(f"LLM lookups are enabled but missing setting(s): api_key. Disabling LLM for this session. Update {self.settings_manager.settings_file} to enable it.")
-                    self.llm_lookups = False
-                    self.settings["llm_lookups"] = False
-                    return
+                if not api_key and not _is_local_model:
+                    # No explicit key in settings, but litellm may find one in
+                    # the environment (the provider-standard vars: GEMINI_API_KEY,
+                    # OPENAI_API_KEY, ANTHROPIC_API_KEY, XAI_API_KEY, ...). Honor
+                    # that so `GEMINI_API_KEY=... xrefer ...` works with zero
+                    # config. Only disable the LLM when no key is available from
+                    # the settings OR the environment.
+                    env_has_key = False
+                    try:
+                        import litellm
+                        env_has_key = bool(
+                            litellm.validate_environment(model=model_id).get("keys_in_environment")
+                        )
+                    except Exception:
+                        env_has_key = False
+                    if not env_has_key:
+                        log(f"LLM lookups are enabled but no API key was found (in settings or the "
+                            f"environment) for '{model_id}'. Disabling LLM for this session. Set "
+                            f"api_key in {self.settings_manager.settings_file}, pass --api-key, or "
+                            f"export the provider's API key environment variable.")
+                        self.llm_lookups = False
+                        self.settings["llm_lookups"] = False
+                        return
+                    log(f"Using API key from the environment for {model_id}")
                 log(f"Setting LLM model to: {model_id}")
                 # Temperature and reasoning-effort are deliberately not
                 # exposed as user settings — we let the provider's API
@@ -1874,18 +1987,29 @@ class XRefer:
                 # for hybrid reasoning models like Gemini 3. See
                 # ``_build_lm_kwargs`` in plugins/xrefer/llm/processor.py
                 # for the OpenAI-reasoning-model special case.
-                config_1 = ModelConfig(
-                    model_id=model_id,
-                    api_key=api_key,
-                    ignore_token_limit=True,
-                )
-                config_2 = ModelConfig(
-                    model_id=model_id,
-                    api_key=api_key,
-                )
-                assert config_2 is not None
-                ClusterAnalyzer.set_model_config(config_1)
-                Categorizer.set_model_config(config_2)
+                #
+                # Dual-model routing: the HEAVY model (this primary config)
+                # runs cluster analysis; the LIGHT model runs categorization.
+                # resolve_model_configs decides whether categorization reuses
+                # the primary model (default / "one model for everything") or a
+                # separately-configured lighter model (see the Settings dialog).
+                # Each analyzer holds its own LLMProcessor, and the processor
+                # re-asserts its own LM per call (dspy.context), so the two
+                # models never clobber each other through DSPy's global config.
+                from xrefer.llm.base import resolve_model_configs
+                config_heavy, config_light = resolve_model_configs(self.settings)
+                if config_light.model_id != config_heavy.model_id:
+                    log(f"Using a separate categorization model: {config_light.model_id}")
+                    # A hosted (non-Ollama) light model with no usable key would
+                    # fail at categorization time. Warn but don't disable LLM —
+                    # cluster analysis (the primary model) is independent and
+                    # categorization failures are already tolerated gracefully.
+                    if not config_light.api_key and not is_ollama_model(config_light.model_id):
+                        log(f"Warning: categorization model '{config_light.model_id}' has no API key "
+                            f"— categorization may fail. Give it a key, or enable 'Use the main "
+                            f"model's API key' in Settings (only valid when both are the same provider).")
+                ClusterAnalyzer.set_model_config(config_heavy)
+                Categorizer.set_model_config(config_light)
 
         except Exception as err:
             log(f"[-] Error loading config: {str(err)}")
@@ -2387,11 +2511,11 @@ class XRefer:
 
         * the **language module** — language-typed strings land in
           ``strings[1]``; plain ones in ``strings[0]``;
-        * a **grep.app / GitHub lookup** — ``enrich_string_data_core``
-          writes the matching repo name into ``entity[0]``, or the
-          literal ``'UNCATEGORIZED'`` when the string was not found in
-          any repo (also the case when the lookup is disabled or, as is
-          currently the case, unavailable because grep.app changed).
+        * a **GitHub code lookup** — ``enrich_string_data_core`` (now via
+          the Grep MCP server, the successor to the old grep.app HTTP API)
+          writes the matching repo name into ``entity[0]``, or the literal
+          ``'UNCATEGORIZED'`` when the string was not found in any repo
+          (also the case when the lookup is disabled).
 
         A string is "uncategorized" only when BOTH agree it is: it is a
         plain (``strings[0]``) string AND carries the ``'UNCATEGORIZED'``
@@ -2837,12 +2961,26 @@ class XRefer:
             raise AssertionError(f"No call paths were generated for entry point 0x{self.current_analysis_ep:x}")
         if not any(ep_paths.values()):
             raise AssertionError(f"Call path generation produced only empty targets for entry point 0x{self.current_analysis_ep:x}")
-        if self.mode=='full':
+        if self.mode == 'full':
             iters = 1
             while self.propagate_xref_nodes(iters):
                 iters += 1
-            self.fix_thunk_xrefs()
-        self.populate_xref_addrs()
+        # fix_thunk_xrefs runs in BOTH modes. It forwards a thunk's resolved
+        # import onto the calling function's DIRECT xrefs (global_xrefs[...]
+        # [DIRECT_XREFS]['imports'] and entity_xrefs), which both the cluster
+        # analysis and the generated report read directly. Skipping it would
+        # change which APIs a caller node lists and which functions become
+        # clustering candidates, so the report would differ between modes.
+        # It only reads DIRECT child imports + the (already built) call paths,
+        # so it does not depend on the full-mode propagation loop above.
+        self.fix_thunk_xrefs()
+        if self.mode == 'full':
+            # populate_xref_addrs only builds the INDIRECT/COMBINED xref sets.
+            # Those feed the interactive views (indirect-call display, boundary
+            # scan, context tables) but are never read by the report or by the
+            # clustering, so it is skipped in light mode — it is a heavy
+            # per-call-path walk.
+            self.populate_xref_addrs()
         self.cluster_all_non_excluded()
         if self.mode == 'full':
             log("Populating function context tables...")
@@ -3090,200 +3228,263 @@ class XRefer:
         return True
 
     def rename_cluster_functions(self) -> None:
-        """
-        Rename functions based on their roles in clusters, following a strict priority:
+        """Give auto-named cluster functions a behavior-conveying name prefix,
+        from the shared origin verdict (``classify_functions``).
 
-        Priority (to determine final category):
-        1. Multi-Cluster (xutil_): Functions that belong to multiple clusters.
-        2. Cluster-Specific (cluster prefix): Functions that belong to exactly one cluster.
-        3. Intermediate (xint_): True intermediate nodes that:
-        - Appear in intermediate paths
-        - Are not in any cluster nodes
-        - Are not in artifact_functions
-        - Are not cluster references
-        4. Unclustered (xunc_): Functions not part of any cluster and not intermediate.
-        """
-        KNOWN_PREFIXES = {"xunc_", "xint_", "xutil_"}
+        Only functions that still carry a disassembler-generated name
+        (``sub_4012a0``, ``FUN_…``) are touched — FLIRT library names, imports,
+        and user-assigned names are never clobbered. Library (``FUNC_LIB``) and
+        unclustered functions are left alone. New names are address-based, so
+        they're unique and re-applied cleanly on re-runs:
 
+          * cluster_member -> ``<cluster function_prefix>_<addr>``  (fileenc_4012a0)
+          * shared         -> ``xutil_<addr>``
+
+        Intermediates inherit their bridged cluster's prefix (Option A), exactly
+        like that cluster's nodes — so names and folders stay in lockstep.
+        """
         if not self.clusters or not self.cluster_analysis:
             log("No cluster data available for function renaming")
             return
 
-        # Helper to parse cluster IDs from various formats
-        def parse_cluster_id(cluster_id_str: str) -> Optional[int]:
-            # Handle various formats: "cluster_XXXX", "cluster.id.XXXX", or pure integer strings.
-            if cluster_id_str.startswith("cluster_"):
-                try:
-                    return int(cluster_id_str.split("_")[1])
-                except (ValueError, IndexError):
-                    return None
-            elif cluster_id_str.startswith("cluster.id."):
-                parts = cluster_id_str.split(".")
-                if len(parts) >= 3:
-                    try:
-                        return int(parts[-1])
-                    except ValueError:
-                        return None
-                return None
-            else:
-                try:
-                    return int(cluster_id_str)
-                except ValueError:
-                    return None
+        SHARED_PREFIX = "xutil"
 
-        # Step 1: Gather all necessary data
-        func_clusters = defaultdict(set)  # func_ea -> set of cluster IDs
+        def _clean_prefix(pre: Optional[str]) -> str:
+            # Prefixes feed identifiers, so strip anything but [A-Za-z0-9_];
+            # an empty result means "no usable prefix".
+            return re.sub(r"[^0-9A-Za-z_]+", "", pre or "")
 
-        def map_function_clusters(cluster):
-            for node in cluster.nodes:
-                func_clusters[node].add(cluster.id)
-            for subcluster in cluster.subclusters:
-                map_function_clusters(subcluster)
+        # cluster id -> cleaned LLM function_prefix (find_cluster_analysis
+        # already normalizes the various cluster-id key formats).
+        def _prefix_for(cid: int) -> Optional[str]:
+            analysis = find_cluster_analysis(self.cluster_analysis, cid)
+            pre = analysis.get("function_prefix") if isinstance(analysis, dict) else None
+            return _clean_prefix(pre) or None
 
-        for cluster in self.clusters:
-            map_function_clusters(cluster)
+        # Every prefix xrefer might emit, so a re-run can re-prefix names it
+        # produced earlier (no longer "default" names, but still ours —
+        # "<prefix>_<hex>").
+        xrefer_prefixes = {SHARED_PREFIX}
+        for analysis in self.cluster_analysis.get("clusters", {}).values():
+            if isinstance(analysis, dict):
+                pre = _clean_prefix(analysis.get("function_prefix"))
+                if pre:
+                    xrefer_prefixes.add(pre)
 
-        all_functions = set(fn.start for fn in self._backend.functions())
+        def _is_xrefer_name(name: str) -> bool:
+            pre, sep, suf = name.rpartition("_")
+            return bool(sep) and pre in xrefer_prefixes and suf != "" and all(c in "0123456789abcdefABCDEF" for c in suf)
 
-        # Recursively gather all cluster nodes, root nodes, and cluster_refs from all levels
-        def gather_all_cluster_nodes(clusters):
-            all_nodes = set()
+        placements = self.classify_functions()
+        renamed = skipped = 0
+        for ea, p in placements.items():
+            if p.category == "func_lib":
+                continue  # never rename library / FLIRT code
 
-            def recurse(c):
-                all_nodes.update(c.nodes)
-                all_nodes.add(c.root_node)
-                all_nodes.update(c.cluster_refs.keys())
-                for sc in c.subclusters:
-                    recurse(sc)
+            if p.category == "cluster_member" and p.cluster_id is not None:
+                prefix = _prefix_for(p.cluster_id)
+                if not prefix:
+                    continue  # cluster has no usable LLM prefix -> nothing to apply
+            else:  # shared
+                prefix = SHARED_PREFIX
 
-            for top_cluster in clusters:
-                recurse(top_cluster)
-            return all_nodes
+            fn = self._backend.get_function_at(Address(ea))
+            if fn is None:
+                continue
+            old_name = fn.name or ""
 
-        # Combine all cluster nodes (including nested subclusters) for quick membership checks
-        all_cluster_nodes = gather_all_cluster_nodes(self.clusters)
+            # Only auto-named functions (never FLIRT/import/user names), OR a
+            # name xrefer itself assigned earlier (so re-runs re-apply).
+            try:
+                eligible = fn.has_default_name or _is_xrefer_name(old_name)
+            except Exception:
+                eligible = False
+            if not eligible:
+                continue
 
-        # Identify true intermediate functions
-        # A node is intermediate if it appears in intermediate_paths but is not:
-        # - In cluster nodes or cluster refs
-        # - In artifact_functions
-        potential_intermediates = set()
-        for cluster in self.clusters:
-            for _, paths in cluster.intermediate_paths.items():
-                for path in paths:
-                    for node in path:
-                        if node not in cluster.nodes and node not in cluster.cluster_refs and node not in self.artifact_functions:
-                            potential_intermediates.add(node)
-
-        intermediate_funcs = {f for f in potential_intermediates if f not in all_cluster_nodes and f not in self.artifact_functions}
-
-        # Step 2: Classify each function
-        func_classification = {}
-
-        # Identify multi-cluster functions
-        multi_cluster_funcs = {func_ea for func_ea, clusters in func_clusters.items() if len(clusters) > 1}
-
-        # Identify single-cluster functions
-        single_cluster_funcs = {func_ea for func_ea, clusters in func_clusters.items() if len(clusters) == 1}
-
-        # Functions not in any cluster
-        no_cluster_funcs = all_functions - single_cluster_funcs - multi_cluster_funcs
-
-        # Classify according to priority
-        # - multi_cluster_funcs: 'xutil_'
-        # - single_cluster_funcs: 'cluster_specific'
-        # - no_cluster_funcs + intermediate: 'xint_'
-        # - no_cluster_funcs + not intermediate: 'xunc_'
-        for f_ea in multi_cluster_funcs:
-            func_classification[f_ea] = "xutil_"
-        for f_ea in single_cluster_funcs:
-            func_classification[f_ea] = "cluster_specific"
-        for f_ea in no_cluster_funcs:
-            if f_ea in intermediate_funcs:
-                func_classification[f_ea] = "xint_"
-            else:
-                func_classification[f_ea] = "xunc_"
-
-        # Step 3: Determine cluster-specific prefixes
-        cluster_prefix_map = {}
-        for cluster_id_str, analysis in self.cluster_analysis.get("clusters", {}).items():
-            prefix = analysis.get("function_prefix")
-            if prefix:
-                cid = parse_cluster_id(cluster_id_str)
-                if cid is None:
-                    log(f"Invalid cluster id format: {cluster_id_str}")
-                else:
-                    cluster_prefix_map[cid] = prefix
-
-        # Build reverse mapping: function -> cluster_id (for single cluster funcs)
-        func_single_cluster_id = {}
-        for f_ea in single_cluster_funcs:
-            # Exactly one cluster_id in func_clusters[f_ea]
-            cid = next(iter(func_clusters[f_ea]))
-            func_single_cluster_id[f_ea] = cid
-
-        # Step 4: Rename functions
-        def has_known_prefix(old_name):
-            if not old_name:
-                return True  # Not a valid function name, skip
-            return any(old_name.startswith(p) for p in KNOWN_PREFIXES)
-
-        def rename_function(func_ea, new_prefix, allow_cluster_prefix_check=False):
-            # Check if this is a simple API thunk
-            fn = self._backend.get_function_at(Address(func_ea))
-            if self.is_simple_api_thunk(func_ea):
-                return
-
-            old_name = fn.name
-            if not old_name:
-                # Not a valid function name or no name known, skip
-                return
-
-            # If this function already has a known prefix, skip
-            if has_known_prefix(old_name):
-                return
-
-            # If applying a cluster-specific prefix, also check if old_name already starts with that prefix
-            if allow_cluster_prefix_check and new_prefix and old_name.startswith(new_prefix + "_"):
-                # Already has this cluster prefix
-                return
-
-            # If cluster prefix provided, ensure it ends with '_'
-            if new_prefix and not new_prefix.endswith("_"):
-                new_prefix += "_"
-
-            new_name = f"{new_prefix}{old_name}"
+            new_name = f"{prefix}_{ea:x}"
+            if old_name == new_name:
+                continue
             try:
                 fn.name = new_name
-                log(f"Renamed {old_name} -> {new_name}")
-            except ValueError as e:
+                renamed += 1
+            except Exception as e:
                 log(f"Failed to rename {old_name} -> {new_name}: {e}")
+                skipped += 1
 
-        # Handle multi-cluster (xutil_)
-        for f_ea, category in func_classification.items():
-            if category == "xutil_":
-                rename_function(f_ea, "xutil", allow_cluster_prefix_check=False)
+        log(f"Function renaming complete: renamed {renamed}, skipped {skipped}")
 
-        # Handle cluster-specific functions
-        for f_ea, category in func_classification.items():
-            if category == "cluster_specific":
-                cid = func_single_cluster_id[f_ea]
-                prefix = cluster_prefix_map.get(cid, None)
-                if prefix:
-                    # For cluster-specific prefixes, check again if prefix already applied
-                    rename_function(f_ea, prefix, allow_cluster_prefix_check=True)
+    def classify_functions(self) -> Dict[int, "FunctionPlacement"]:
+        """Classify every function we can confidently place by origin — the
+        single source of truth shared by ``compute_function_folders`` (folders)
+        and ``rename_cluster_functions`` (name prefixes).
 
-        # Handle intermediate (xint_)
-        for f_ea, category in func_classification.items():
-            if category == "xint_":
-                rename_function(f_ea, "xint", allow_cluster_prefix_check=False)
+        Categories (first match wins):
+          1. ``FUNC_LIB`` / thunk                 -> ``func_lib`` (library)
+          2. node of exactly one cluster          -> ``cluster_member`` (it)
+          3. intermediate bridging exactly one    -> ``cluster_member`` (it)
+          4. node OR intermediate spanning >1     -> ``shared``
+          5. unclustered, not FUNC_LIB            -> omitted (left at root)
 
-        # Handle unclustered (xunc_)
-        for f_ea, category in func_classification.items():
-            if category == "xunc_":
-                rename_function(f_ea, "xunc", allow_cluster_prefix_check=False)
+        Intermediates (pure connectors on a cluster's ``intermediate_paths``
+        that are not a node anywhere and bear no artifacts) fold into the
+        cluster they connect — same treatment as that cluster's nodes
+        (Option A). Simple API thunks are skipped. Fail-open: any user
+        membership wins over library, since hiding user code is the costlier
+        error.
 
-        log("Function renaming complete")
+        Returns ``{func_ea: FunctionPlacement}``; functions with no confident
+        verdict are absent (leave them alone). Backend-agnostic.
+        """
+        placements: Dict[int, FunctionPlacement] = {}
+        if not self._backend:
+            return placements
+
+        # func_ea -> set of cluster ids whose .nodes contain it (every level)
+        func_clusters: Dict[int, Set[int]] = defaultdict(set)
+        id_to_cluster: Dict[int, "FunctionalCluster"] = {}
+
+        def _walk(cluster: "FunctionalCluster") -> None:
+            id_to_cluster[cluster.id] = cluster
+            for node in cluster.nodes:
+                func_clusters[node].add(cluster.id)
+            for sub in cluster.subclusters:
+                _walk(sub)
+
+        for c in self.clusters or []:
+            _walk(c)
+
+        # "Structural" set = nodes + roots + replaced cluster-ref keys. A true
+        # intermediate is a connector that is none of these and bears no
+        # artifacts.
+        structural: Set[int] = set()
+        for c in id_to_cluster.values():
+            structural |= c.nodes
+            structural.add(c.root_node)
+            structural |= set(c.cluster_refs.keys())
+
+        # func_ea -> set of cluster ids whose intermediate_paths contain it
+        inter_clusters: Dict[int, Set[int]] = defaultdict(set)
+        for c in id_to_cluster.values():
+            for _key, paths in c.intermediate_paths.items():
+                for path in paths:
+                    for node in path:
+                        if node not in structural and node not in self.artifact_functions:
+                            inter_clusters[node].add(c.id)
+
+        is_lib = {cid: bool(getattr(cl, "is_library", False)) for cid, cl in id_to_cluster.items()}
+
+        def _origin(cids: Set[int]) -> str:
+            # Fail-open: library only if EVERY containing cluster is library.
+            return "library" if cids and all(is_lib.get(c) for c in cids) else "user"
+
+        for fn in self._backend.functions():
+            ea = fn.start
+
+            try:
+                if self.is_simple_api_thunk(ea):
+                    continue
+            except Exception:
+                pass
+
+            # Rule 1: FUNC_LIB / thunk -> library, overriding cluster membership.
+            try:
+                if fn.type == FunctionType.LIBRARY or fn.is_thunk:
+                    placements[ea] = FunctionPlacement("func_lib", "library", None)
+                    continue
+            except Exception:
+                pass
+
+            node_cids = func_clusters.get(ea)
+            if node_cids:
+                if len(node_cids) == 1:
+                    cid = next(iter(node_cids))
+                    placements[ea] = FunctionPlacement("cluster_member", _origin({cid}), cid)
+                else:
+                    placements[ea] = FunctionPlacement("shared", _origin(node_cids), None)
+                continue
+
+            bridged = inter_clusters.get(ea)
+            if bridged:
+                if len(bridged) == 1:
+                    cid = next(iter(bridged))
+                    placements[ea] = FunctionPlacement("cluster_member", _origin({cid}), cid)
+                else:
+                    placements[ea] = FunctionPlacement("shared", _origin(bridged), None)
+                continue
+
+            # Unclustered, not FUNC_LIB -> no verdict; leave at root.
+
+        return placements
+
+    def _cluster_folder_path(self, cid: int, id_to_cluster: Dict[int, "FunctionalCluster"],
+                             label_cache: Dict[int, str], path_cache: Dict[int, List[str]]) -> List[str]:
+        """[root-cluster component, ..., this-cluster component] for a cluster,
+        each component a sanitized ``NNNN <label>``. Walks parent links."""
+        if cid in path_cache:
+            return path_cache[cid]
+
+        def _component(c_id: int) -> str:
+            if c_id in label_cache:
+                return label_cache[c_id]
+            analysis = find_cluster_analysis(self.cluster_analysis, c_id)
+            label = analysis.get("label") if isinstance(analysis, dict) else None
+            comp = sanitize_dirtree_name(f"{c_id:04d} {label}" if label else f"cluster {c_id:04d}")
+            label_cache[c_id] = comp
+            return comp
+
+        chain: List[str] = []
+        seen: Set[int] = set()
+        cur = id_to_cluster.get(cid)
+        while cur is not None and cur.id not in seen:
+            seen.add(cur.id)
+            chain.append(_component(cur.id))
+            pid = getattr(cur, "parent_cluster_id", None)
+            cur = id_to_cluster.get(pid) if pid is not None else None
+        chain.reverse()
+        path_cache[cid] = chain
+        return chain
+
+    def compute_function_folders(self) -> Dict[int, List[str]]:
+        """Origin-based folder path for each classified function, for organizing
+        the IDA Functions window via ``ida_dirtree``. Thin mapping over
+        ``classify_functions`` (the shared verdict):
+
+          * ``func_lib``                 -> ``Library`` (flat)
+          * ``cluster_member`` (library) -> ``Library`` / <cluster path>
+          * ``cluster_member`` (user)    -> ``User`` / <cluster path>
+          * ``shared``                   -> bare ``Library`` / ``User`` root
+
+        Intermediates fold into their bridged cluster (Option A), same as that
+        cluster's nodes. Functions with no verdict are absent (left at root).
+
+        Returns ``{func_ea: [path components below the function-tree root]}``.
+        """
+        placements = self.classify_functions()
+        if not placements:
+            return {}
+
+        id_to_cluster: Dict[int, "FunctionalCluster"] = {}
+
+        def _index(cluster: "FunctionalCluster") -> None:
+            id_to_cluster[cluster.id] = cluster
+            for sub in cluster.subclusters:
+                _index(sub)
+
+        for c in self.clusters or []:
+            _index(c)
+
+        label_cache: Dict[int, str] = {}
+        path_cache: Dict[int, List[str]] = {}
+
+        folders: Dict[int, List[str]] = {}
+        for ea, p in placements.items():
+            root = "Library" if p.origin == "library" else "User"
+            if p.category == "cluster_member" and p.cluster_id is not None:
+                folders[ea] = [root] + self._cluster_folder_path(p.cluster_id, id_to_cluster, label_cache, path_cache)
+            else:  # func_lib or shared -> bare origin root
+                folders[ea] = [root]
+        return folders
 
     def get_artifacts_for_cluster(self, cluster: "FunctionalCluster") -> Dict[str, List[str]]:
         """Aggregates all unique artifacts for a given cluster."""
@@ -3439,7 +3640,7 @@ class XRefer:
         """Write report data JSON only (no HTML)."""
         report_data = self.generate_report_data()
         report_json_suffix = "_report_data.json"
-        json_path = Path(f"{self._backend.path}{report_json_suffix}")
+        json_path = Path(getattr(self, "report_path", None) or f"{self._backend.path}{report_json_suffix}")
         json_payload = json.dumps(report_data, indent=2, default=str)
         json_path.write_text(json_payload, encoding="utf-8")
         log(f"Report data saved to: {json_path}")
@@ -3457,7 +3658,7 @@ class XRefer:
         json_data = json.dumps(report_data, indent=2, default=str)
         report_html_suffix = "_report.html"
 
-        save_path = f"{self._backend.path}{report_html_suffix}"
+        save_path = getattr(self, "report_path", None) or f"{self._backend.path}{report_html_suffix}"
 
         data_url_value = json.dumps("")
         embedded_payload = json_data.replace("</", "<\\/")

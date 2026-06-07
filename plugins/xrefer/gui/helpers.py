@@ -419,11 +419,12 @@ def render_markdown_report_lines(md: str, width: int = 85, indent: str = "") -> 
     return lines
 
 
-def enrich_string_data(str_indexes: List[int], entity_list: List[str], lookup: bool = True, max_threads: int = 50) -> List[Tuple[str, str, int, str, dict, list]]:
+def enrich_string_data(str_indexes: List[int], entity_list: List[str], lookup: bool = True, max_threads: int = 12) -> List[Tuple[str, str, int, str, dict, list]]:
     """
-    Enrich string information by searching in Git repositories.
+    Enrich string information by searching public GitHub code.
 
-    Performs parallel queries to grep.app API to find string usage in public repositories.
+    Performs parallel queries to the Grep MCP server (the supported successor to
+    the old grep.app HTTP API) to find string usage in public repositories.
     Enriches strings with repository context and matched code lines.
 
     Args:
@@ -1466,6 +1467,7 @@ def help_text() -> List[str]:
  [S]    Search / filter the current view (then type to filter)
  [T]    Trace API calls; press again to cycle function -> path -> full scope
  [C]    Cluster relationship graph
+ [K]    ATT&CK matrix (kill-chain coverage of the clusters)
  [O]    Show orphan artifacts (no path to an entry point)
  [X]    Cross-reference listing for the artifact under the cursor
  [G]    Artifact path graph for the artifact under the cursor
@@ -1507,14 +1509,29 @@ def help_text() -> List[str]:
  [G]    Pin / unpin the cluster graph
  [M]    Intermediate paths through the cursor function
  [A]    While in intermediate-paths view: scope this cluster <-> all clusters
+ [K]    ATT&CK matrix for these clusters (scoped to the current cluster)
  [V]    Neighborhood: clusters reachable from the cursor function
  [ESC]  Step back through visited clusters;  [ENTER] returns home
+
+ ----------------------------------------
+
+ ATT&CK MATRIX (after pressing [K] from the home or a cluster view):
+ Kill-chain coverage built from the clusters' MITRE ATT&CK mappings:
+ a per-tactic coverage strip, then techniques grouped by tactic, each
+ with a rationale and the cluster(s) that ground it.
+ [K]    Exit the matrix
+ [G]    Open the ATT&CK heat-grid popup (Navigator-style, cells shaded by coverage)
+ [L]    Show / hide library clusters (binary-wide view)
+ (MOUSE) Click a cluster.id.xxxx to open that cluster;
+            click a T#### id to open its attack.mitre.org page
+ [ESC/ENTER] Return to the previous view / home
 
  ----------------------------------------
 
  ARTIFACT PATH GRAPH (after pressing [G] on an artifact):
  [G]    Pin / unpin the graph
  [S]    Toggle simplified / normal graph representation
+ [D]    Node detail: show / hide each node's direct artifacts in the box
  [V]    Neighborhood: clusters reachable from the cursor function
  (MOUSE) Hover / click / double-click nodes for details or navigation
  [ESC/ENTER] Return to home view
@@ -1556,7 +1573,7 @@ def help_text() -> List[str]:
  ----------------------------------------
 
  MOUSE INTERACTIONS:
-  - Click: expand a row ([+]/[-]), open a cluster id, or show call details (->/v)
+  - Click: expand/collapse a section (click the ▸/▾ header row), open a cluster id, or expand call details (→)
   - Double-click: select / deselect an artifact, or jump to an address
   - Hover: tooltip with details
   - Right-click: copy / export actions (e.g. copy strings)

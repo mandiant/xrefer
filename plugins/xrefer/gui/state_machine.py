@@ -49,6 +49,7 @@ class XReferStateMachine(StateMachine):
     pinned_neighborhood_graph = State("pinned neighborhood graph")
     xref_listing = State("xref listing")
     help = State("help")
+    attack_matrix = State("attack matrix")
 
     # primary transitions
     start_search = base.to(search)
@@ -68,6 +69,9 @@ class XReferStateMachine(StateMachine):
         # cluster's intermediate paths" without manually ESC-ing first.
         | neighborhood_graph.to(cluster_graphs)
         | pinned_neighborhood_graph.to(cluster_graphs)
+        # Clicking a cluster chip inside the ATT&CK matrix jumps into that
+        # cluster's graph.
+        | attack_matrix.to(cluster_graphs)
     )
     # Neighborhood view is reachable from any banner-bearing state.
     # Centered on cursor, shows 1-hop callgraph adjacency to other
@@ -82,6 +86,17 @@ class XReferStateMachine(StateMachine):
         | pinned_graph.to(neighborhood_graph)
         | simplified_graph.to(neighborhood_graph)
         | pinned_simplified_graph.to(neighborhood_graph)
+    )
+
+    # ATT&CK matrix view — binary-wide (or cluster-scoped) kill-chain
+    # coverage built from the per-cluster MITRE mappings. Reachable from the
+    # home view and the cluster views; scoped to the active cluster when
+    # entered from a cluster graph.
+    start_attack_matrix = (
+        base.to(attack_matrix)
+        | clusters.to(attack_matrix)
+        | cluster_graphs.to(attack_matrix)
+        | pinned_cluster_graphs.to(attack_matrix)
     )
 
     # help transition
@@ -102,6 +117,7 @@ class XReferStateMachine(StateMachine):
         | pinned_cluster_graphs.to(help)
         | neighborhood_graph.to(help)
         | pinned_neighborhood_graph.to(help)
+        | attack_matrix.to(help)
     )
 
     # graph transitions
@@ -157,6 +173,14 @@ class XReferStateMachine(StateMachine):
     revert_neighborhood_graph_to_pinned_graph = neighborhood_graph.to(pinned_graph) | pinned_neighborhood_graph.to(pinned_graph)
     revert_neighborhood_graph_to_pinned_simplified_graph = neighborhood_graph.to(pinned_simplified_graph) | pinned_neighborhood_graph.to(pinned_simplified_graph)
 
+    # ATT&CK matrix exits — one reverse per entry state so go_back (ESC / K)
+    # returns the analyst to wherever they opened it (base is covered by
+    # to_base below).
+    revert_attack_matrix_to_clusters = attack_matrix.to(clusters)
+    revert_attack_matrix_to_cluster_graphs = attack_matrix.to(cluster_graphs)
+    revert_attack_matrix_to_pinned_cluster_graphs = attack_matrix.to(pinned_cluster_graphs)
+    revert_help_to_attack_matrix = help.to(attack_matrix)
+
     # search revert transitions
     revert_xref_listing_to_search = xref_listing.to(search)
     revert_graph_to_search = graph.to(search)
@@ -178,6 +202,7 @@ class XReferStateMachine(StateMachine):
         | pinned_cluster_graphs.to(base)
         | neighborhood_graph.to(base)
         | pinned_neighborhood_graph.to(base)
+        | attack_matrix.to(base)
     )
 
     def __init__(self):
@@ -207,6 +232,10 @@ class XReferStateMachine(StateMachine):
         # mirror each other.
         self._intermediate_view_pushed_cluster: bool = False
         self._intermediate_view_transitioned_state: bool = False
+        # Cluster the ATT&CK matrix is scoped to (None = binary-wide). Set
+        # when K opens the matrix from a cluster graph; read by
+        # draw_attack_matrix; cleared on reset_state.
+        self._attack_matrix_scope_cluster_id: Optional[int] = None
         self._selected_index: Optional[int] = None
         self._boundary_methods: Optional[list] = None
         self._selected_refs = {}
@@ -300,6 +329,7 @@ class XReferStateMachine(StateMachine):
         self._intermediate_view_show_all = False
         self._intermediate_view_pushed_cluster = False
         self._intermediate_view_transitioned_state = False
+        self._attack_matrix_scope_cluster_id = None
         self._search_filter = ""
         self._address_filter = ""
         self._selected_index = None
@@ -462,7 +492,7 @@ class XReferStateMachine(StateMachine):
         cluster table / cluster graph / pinned cluster graph states; returns
         False otherwise so the caller can fall back to other behavior.
         """
-        if self.current_state not in (self.clusters, self.cluster_graphs, self.pinned_cluster_graphs):
+        if self.current_state not in (self.clusters, self.cluster_graphs, self.pinned_cluster_graphs, self.attack_matrix):
             return False
         self._hide_library_clusters = not self._hide_library_clusters
         return True
@@ -513,6 +543,16 @@ class XReferStateMachine(StateMachine):
     def hide_library_clusters(self) -> bool:
         """Whether library clusters are filtered out of cluster views."""
         return self._hide_library_clusters
+
+    @property
+    def attack_matrix_scope_cluster_id(self) -> Optional[int]:
+        """Cluster id the ATT&CK matrix is scoped to, or None for the
+        binary-wide matrix."""
+        return self._attack_matrix_scope_cluster_id
+
+    @attack_matrix_scope_cluster_id.setter
+    def attack_matrix_scope_cluster_id(self, value: Optional[int]) -> None:
+        self._attack_matrix_scope_cluster_id = value
 
     @property
     def intermediate_view_func_ea(self) -> Optional[int]:

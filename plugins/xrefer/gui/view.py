@@ -35,11 +35,12 @@ from qtpy import QtCore, QtGui, QtWidgets
 
 from xrefer._vendor import ascii_graphs
 from xrefer.core.analyzer import ApiCall, XRefer
-from xrefer.core.helpers import (find_cluster_analysis, get_addr_from_text, longest_line_length, parse_cluster_id, remove_non_displayable, strip_color_codes,
-                                 word_wrap_text, wrap_substring_with_string)
+from xrefer.core.helpers import (cap_artifact_entries, find_cluster_analysis, get_addr_from_text, longest_line_length, parse_cluster_id, remove_non_displayable,
+                                 strip_color_codes, word_wrap_text, wrap_substring_with_string)
+from xrefer.core.mitre import aggregate_mitre_matrix, mitre_attack_url
 from xrefer.core.settings import XReferSettingsManager
-from xrefer.gui.action_handlers import (ClusterEverythingHandler, CopyAllStringsHandler, CopyDirectIndirectStringsHandler, CopyDirectStringsHandler,
-                                        CopyOrphanStringsHandler, CopyUncategorizedStringsHandler, PeekViewToggleHandler)
+from xrefer.gui.action_handlers import (ClusterEverythingHandler, EstimateClusterTokensHandler, CopyAllStringsHandler, CopyDirectIndirectStringsHandler, CopyDirectStringsHandler,
+                                        CopyOrphanStringsHandler, CopyUncategorizedStringsHandler, PeekViewToggleHandler, ViewAttackMatrixHandler)
 from xrefer.gui.help import ContextHelp
 from xrefer.gui.helpers import (CollapseEventFilter, CollapseIndicator, FocusEventFilter, KeyEventFilter, colorize_api_call, create_cluster_relationship_graph,
                                 create_colored_table_from_cols, create_xrefs_table_colored, draw_cluster_hierarchy, find_cluster_analysis,
@@ -93,6 +94,8 @@ class XReferView(idaapi.simplecustviewer_t):
         self.context_help = ContextHelp()
         self.cell_regex: re.Pattern = re.compile(
             r"(?:^ {4,8}|[│┐└]\x02\x18\x20{3})"  # Match either standard indent or vertical line pattern
+            r"(?:[☐☑]\x20)?"  # Optional selection checkbox (T2)
+            r"(?:(?:imp|lib)\x20)?"  # Optional imp/lib type tag in the merged table (T2)
             r"\x01[^\x10]"  # Start of color code. Exclude CREFTAIL for address
             r"(?:\x20{0,4}(?:[→↓]\x20)?)?"  # Optional arrow with spaces
             r"(.+?)"  # The actual content (non-greedy)
@@ -202,6 +205,19 @@ class XReferView(idaapi.simplecustviewer_t):
         self._is_collapsed = False
         self._from_double_click = False
         self._explicit_cluster_click = False
+        # EXPERIMENT: "node detail" mode for the artifact-path graph. When on,
+        # each function node also lists its direct artifacts (imports/strings/
+        # capa/libs) inside the box — like the hover tooltip, but in-node. A
+        # render flag (NOT a state) so it composes with the simplified/pinned
+        # graph states instead of multiplying them; toggled by D in graph views
+        # and folded into the graph cache key. Default off (it enlarges nodes).
+        self.graph_node_artifacts = False
+        # Per-artifact colour map for "node detail" mode, keyed by the same
+        # graph cache_key: {displayed_artifact_text: SCOLOR}. Used to re-colour
+        # each artifact by type AFTER the (colour-blind) ASCII layout. Kept
+        # parallel to graph_cache (not inside it) because graph_cache is
+        # serialized to the .xrefer DB and must keep its existing tuple shape.
+        self._graph_artifact_colors: Dict[Any, Dict[str, int]] = {}
 
         if self.xrefer_obj.lang:
             self.create()
@@ -345,6 +361,15 @@ class XReferView(idaapi.simplecustviewer_t):
             log(traceback.format_exc())
             self.cleanup()
 
+        # Surface a 'cluster analysis blocked' dialog if the just-run analysis
+        # was skipped for exceeding the model's context window. Outside the
+        # try/except above so a dialog hiccup can't trigger view cleanup.
+        try:
+            from xrefer.gui.token_estimate import show_budget_block_if_pending
+            show_budget_block_if_pending(getattr(self, "xrefer_obj", None))
+        except Exception:
+            pass
+
     def show_custom_window(self) -> None:
         """
         Show custom docked window without using the default IDA tab view.
@@ -421,6 +446,14 @@ class XReferView(idaapi.simplecustviewer_t):
                 tooltip = "Cluster all functions with non-excluded artifacts"
                 label = "(Re-)run Cluster Analysis"
                 register_popup_action(form, popup, menu_path, menu_id, label, ClusterEverythingHandler(), tooltip)
+                menu_id = "XRefer:estimate_cluster_tokens"
+                tooltip = "Estimate the cluster-analysis request + max response tokens against the model's context window"
+                label = "Estimate Cluster Analysis Token Usage"
+                register_popup_action(form, popup, menu_path, menu_id, label, EstimateClusterTokensHandler(), tooltip)
+                menu_id = "XRefer:view_attack_matrix"
+                tooltip = "Open the ATT&CK matrix heat-grid for the analyzed clusters' MITRE mappings"
+                label = "View ATT&CK Matrix"
+                register_popup_action(form, popup, menu_path, menu_id, label, ViewAttackMatrixHandler(), tooltip)
                 menu_id = "XRefer:toggle_peek"
                 tooltip = "Enable peeking of downstream cross-references of a clicked function in disassembly/pseudocode view"
                 label = "Enable Peek View"
@@ -650,12 +683,22 @@ class XReferView(idaapi.simplecustviewer_t):
         except Exception as err:
             return False
 
+        # ATT&CK matrix: clicking a technique id opens its MITRE page.
+        if self.state_machine.current_state == self.state_machine.attack_matrix:
+            url = mitre_attack_url(word)
+            if url:
+                try:
+                    QtGui.QDesktopServices.openUrl(QtCore.QUrl(url))
+                except Exception:
+                    pass
+                return True
+
         # Handle cluster navigation
-        if self.state_machine.current_state in (self.state_machine.cluster_graphs, self.state_machine.pinned_cluster_graphs, self.state_machine.clusters, self.state_machine.base):
+        if self.state_machine.current_state in (self.state_machine.cluster_graphs, self.state_machine.pinned_cluster_graphs, self.state_machine.clusters, self.state_machine.base, self.state_machine.attack_matrix):
             cluster_manager = self.state_machine.cluster_manager
 
             # If in cluster graph states, store current position before switching
-            if self.state_machine.current_state not in (self.state_machine.base, self.state_machine.clusters):
+            if self.state_machine.current_state not in (self.state_machine.base, self.state_machine.clusters, self.state_machine.attack_matrix):
                 lineno, x, y = self.GetPos()
                 if current := cluster_manager.get_current_cluster():
                     # Save cursor for the old cluster
@@ -700,23 +743,23 @@ class XReferView(idaapi.simplecustviewer_t):
                     self.update(True)
                     return True
 
-        # Handle table expansions
+        # Expand / collapse: click anywhere on a heading or category row (each
+        # starts with a ▸/▾ chevron) to toggle it. The label is parsed by
+        # stripping color codes + chevron + the trailing "(N)" count, so it
+        # works wherever on the row the click landed.
         try:
-            if word in ("[+]", "[-]"):
-                line: str = self.GetCurrentLine()
-                key: str = line[6:-2].strip()
-                self.table_states[key] = not self.table_states[key]
-                self.update(True)
-                return True
-
-            elif "(-)" in word or "(+)" in word:
-                line: str = self.GetCurrentLine()
-                key: str = line[14:-2].strip()
+            clean = strip_color_codes(self.GetCurrentLine()).strip()
+            if clean[:1] in ("▸", "▾"):
+                label = self._strip_count_suffix(clean[1:].strip())
+                if label in self.table_states:
+                    self.table_states[label] = not self.table_states[label]
+                    self.update(True)
+                    return True
                 table_name: Optional[str] = self.get_parent_table()
-                if table_name:
-                    self.subtable_states[table_name][key] = not self.subtable_states[table_name][key]
-                self.update(True)
-                return True
+                if table_name and label in self.subtable_states.get(table_name, {}):
+                    self.subtable_states[table_name][label] = not self.subtable_states[table_name][label]
+                    self.update(True)
+                    return True
         except Exception:
             pass
 
@@ -769,6 +812,17 @@ class XReferView(idaapi.simplecustviewer_t):
         Returns:
             bool: True to indicate event was handled
         """
+        # While a modal dialog is open (e.g. the token-estimate box with its
+        # model-search completer), the xrefer view must not process keys. IDA
+        # can still route OnKeydown here even with the dialog up, which would
+        # scroll the view behind it and steal arrow keys from the completer.
+        # Report them as handled so nothing moves underneath the dialog.
+        try:
+            if QtWidgets.QApplication.activeModalWidget() is not None:
+                return True
+        except Exception:
+            pass
+
         # Store current position before state change
         lineno, x, y = self.GetPos()
         self.state_machine.store_cursor_position(self.state_machine.current_state, lineno, x, y)
@@ -856,9 +910,19 @@ class XReferView(idaapi.simplecustviewer_t):
                 if xref_item:
                     try:
                         e_index: int = self.xrefer_obj.reverse_entity_lookup_index[xref_item]
-                        matched_lines = self.xrefer_obj.entities[e_index][4]
-                        all_repos = self.xrefer_obj.entities[e_index][5]
-                        tooltip = self.generate_str_tooltip(matched_lines, all_repos)
+                        # Indirect rows: list the callee functions this artifact
+                        # is reached through (the indirection's "through what").
+                        via_tip = self._indirect_via_tooltip(e_index)
+                        str_tip = None
+                        try:
+                            matched_lines = self.xrefer_obj.entities[e_index][4]
+                            all_repos = self.xrefer_obj.entities[e_index][5]
+                            str_tip = self.generate_str_tooltip(matched_lines, all_repos)
+                        except Exception:
+                            str_tip = None
+                        # OnHint must return an IDA hint tuple (num_lines, text)
+                        # to display; merge the two (each already that shape).
+                        tooltip = self._combine_tooltips(via_tip, str_tip)
                     except Exception as err:
                         tooltip = None
 
@@ -897,6 +961,7 @@ class XReferView(idaapi.simplecustviewer_t):
             ord("G"): self.handle_key_g,
             ord("H"): self.handle_key_h,
             ord("J"): self.handle_key_j,
+            ord("K"): self.handle_key_k,
             ord("L"): self.handle_key_l,
             ord("M"): self.handle_key_m,
             ord("N"): self.handle_key_n,
@@ -993,17 +1058,27 @@ class XReferView(idaapi.simplecustviewer_t):
 
     def handle_key_d(self, shift: bool) -> bool:
         """
-        Handle 'd' key press for exclusions.
+        Handle 'd' key press.
 
-        Adds currently selected items to appropriate exclusions.
+        Context-sensitive:
+            * In the artifact-path graph states (graph / pinned / simplified /
+              pinned-simplified), toggles "node detail" — whether each function
+              node lists its direct artifacts inside the box.
+            * In ``base``, adds the currently selected items to exclusions.
 
         Args:
             shift (bool): Whether shift key is pressed
 
         Returns:
-            bool: True if exclusions was successful, False if not in appropriate state
+            bool: True if handled, False if not in an appropriate state
         """
-        if self.state_machine.current_state != self.state_machine.base:
+        sm = self.state_machine
+        if sm.current_state in (sm.graph, sm.pinned_graph, sm.simplified_graph, sm.pinned_simplified_graph):
+            # EXPERIMENT: flip in-node artifact rendering for the paths graph.
+            self.graph_node_artifacts = not self.graph_node_artifacts
+            return True
+
+        if sm.current_state != sm.base:
             return False
 
         self.handle_exclusions()
@@ -1049,6 +1124,11 @@ class XReferView(idaapi.simplecustviewer_t):
         """
         current_state = self.state_machine.current_state
 
+        if current_state == self.state_machine.attack_matrix:
+            # G opens the Navigator-style heat-grid popup for the matrix.
+            self.open_attack_matrix_popup()
+            return True
+
         if current_state == self.state_machine.cluster_graphs:
             # Pin cluster graph
             return self.state_machine.toggle_pinned_cluster_graph()
@@ -1086,6 +1166,39 @@ class XReferView(idaapi.simplecustviewer_t):
             bool: True if help was displayed
         """
         return self.state_machine.start_help()
+
+    def handle_key_k(self, shift: bool) -> bool:
+        """Handle 'k' key — toggle the ATT&CK matrix view.
+
+        Opens a kill-chain matrix built from the per-cluster MITRE ATT&CK
+        mappings: a coverage strip plus tactic-grouped techniques, each
+        linking back to the cluster(s) that ground it. Binary-wide from the
+        home / cluster-table views; scoped to the active cluster when opened
+        from a cluster graph. Pressing K again (or ESC) returns to the prior
+        view. No-op until cluster analysis exists.
+        """
+        sm = self.state_machine
+        current = sm.current_state
+
+        if current == sm.attack_matrix:
+            success, cursor_pos = sm.go_back()
+            if cursor_pos:
+                self.Jump(*cursor_pos)
+            return True
+
+        if current not in (sm.base, sm.clusters, sm.cluster_graphs, sm.pinned_cluster_graphs):
+            return False
+        if not self.xrefer_obj.clusters or not self.xrefer_obj.cluster_analysis:
+            return False
+
+        # Scope to the active cluster when opened from a cluster graph;
+        # otherwise present the whole binary.
+        scope_id = None
+        if current in (sm.cluster_graphs, sm.pinned_cluster_graphs):
+            if cur := sm.cluster_manager.get_current_cluster():
+                scope_id = cur.cluster_id
+        sm.attack_matrix_scope_cluster_id = scope_id
+        return sm.start_attack_matrix()
 
     def handle_key_j(self, shift: bool) -> bool:
         """
@@ -1873,18 +1986,17 @@ class XReferView(idaapi.simplecustviewer_t):
         """Draw the orphan-artifacts view.
 
         One table per entity type (imports, libraries, strings, capa
-        rules), each rendered with the same colored heading + ``[-]`` /
-        ``[+]`` expand markers and ``(-)`` / ``(+)`` per-group sub-toggle
-        used by the per-function xref tables, so the layout is visually
-        identical to the rest of xrefer. Every row carries the artifact
-        name in the first column followed by every address that
-        references it (``self.entity_xrefs[idx]``), matching the
-        address-after-name layout of the regular xrefs tables.
+        rules), each rendered with the same colored heading + ``▾`` / ``▸``
+        chevron disclosure and per-group sub-toggle used by the per-function
+        xref tables, so the layout is visually identical to the rest of
+        xrefer. Every row carries the artifact name in the first column
+        followed by every address that references it
+        (``self.entity_xrefs[idx]``), matching the address-after-name layout
+        of the regular xrefs tables.
 
-        Expand/collapse keys re-use ``self.table_states`` and
-        ``self.subtable_states``, so ``[+]`` / ``[-]`` clicks, ``(+)`` /
-        ``(-)`` clicks, and the ``E`` shortcut all work without any
-        bespoke wiring.
+        Expand/collapse re-uses ``self.table_states`` and
+        ``self.subtable_states``, so clicking a ▾/▸ header row and the ``E``
+        shortcut all work without any bespoke wiring.
         """
         self.ClearLines()
         self.print_ribbon()
@@ -2028,18 +2140,22 @@ class XReferView(idaapi.simplecustviewer_t):
         state in ``self.subtable_states[table_name]``."""
         self.current_table = table_name
         is_expanded = bool(self.table_states.get(table_name, 1))
-        # Top-level heading line with [+] / [-] marker — same format as
-        # draw_function_context_table_heading.
-        fmt = "[-] %s" if is_expanded else "[+] %s"
+        # Top-level heading: ▾/▸ chevron + artifact count — same idiom as the
+        # function context tables (T1/T2). Markers/labels are parsed back via
+        # strip_color_codes + chevron, so click-toggle and E work here too.
+        total = sum(len(r) for r in built.get("rows", {}).values() if r)
+        fmt = "▾ %s" if is_expanded else "▸ %s"
         head_text = built["heading"][0] if built["heading"] else table_name
-        self.AddLine(ida_lines.COLSTR(fmt % head_text, ida_lines.SCOLOR_DATNAME))
+        hline = ida_lines.COLSTR(fmt % head_text, ida_lines.SCOLOR_DATNAME)
+        if total:
+            hline += "  " + ida_lines.COLSTR(f"({total})", ida_lines.SCOLOR_VOIDOP)
+        self.AddLine(hline)
 
         if not is_expanded:
             self.AddLine("")
             return
 
-        # Separator line with the "----" continuation that visually
-        # extends the dash from the [-] marker on the line above.
+        # Separator line with the "----" continuation under the heading.
         if len(built["heading"]) > 1:
             sep = built["heading"][1]
             self.AddLine(ida_lines.COLSTR(f"    ----{sep}", ida_lines.SCOLOR_DATNAME))
@@ -2048,16 +2164,16 @@ class XReferView(idaapi.simplecustviewer_t):
         for group_key, group_rows in built["rows"].items():
             sub_expanded = subtable_states.setdefault(group_key, False)
             if sub_expanded:
-                self.AddLine(ida_lines.COLSTR("    %s %s" % (ida_lines.COLSTR("(-)", ida_lines.SCOLOR_DATNAME), group_key), ida_lines.SCOLOR_ASMDIR))
+                self.AddLine(self._category_line("▾", group_key, len(group_rows)))
                 # Rows are already colored via create_xrefs_table_colored;
                 # AddLine directly so we don't drag in print_xref_item's
                 # per-function coverage-coloring path (it dereferences
-                # ``xref_coverage_dict[self.func_ea]`` which isn't
-                # populated for the orphans view).
+                # ``xref_coverage_dict[self.func_ea]`` which isn't populated
+                # for the orphans view).
                 for line in group_rows:
                     self.AddLine(f"{self.indent}{line}")
             else:
-                self.AddLine(ida_lines.COLSTR("    %s %s" % (ida_lines.COLSTR("(+)", ida_lines.SCOLOR_DATNAME), group_key), ida_lines.SCOLOR_ASMDIR))
+                self.AddLine(self._category_line("▸", group_key, len(group_rows)))
 
         self.AddLine("")
 
@@ -2087,21 +2203,18 @@ class XReferView(idaapi.simplecustviewer_t):
         for cluster in self.xrefer_obj.clusters:
             count_cluster_stats(cluster)
 
-        # Add main heading with statistics
+        # Quiet stat header — the ribbon already names this view, so no
+        # ALL-CAPS title / arrows / full-width rule.
         header = (
-            f"FUNCTION CLUSTERS DISCOVERED → "
-            f"{ida_lines.COLSTR(str(total_clusters), ida_lines.SCOLOR_VOIDOP)} "
-            f"(CONTAINING {ida_lines.COLSTR(str(len(total_functions)), ida_lines.SCOLOR_VOIDOP)} "
-            f"UNIQUE FUNCTIONS)"
+            ida_lines.COLSTR(str(total_clusters), ida_lines.SCOLOR_VOIDOP)
+            + ida_lines.COLSTR(" clusters · ", ida_lines.SCOLOR_DSTR)
+            + ida_lines.COLSTR(str(len(total_functions)), ida_lines.SCOLOR_VOIDOP)
+            + ida_lines.COLSTR(" functions", ida_lines.SCOLOR_DSTR)
         )
-        self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_DATNAME}{header}\x02{ida_lines.SCOLOR_DATNAME}")
-        self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_DATNAME}{'=' * LINE_WIDTH}\x02{ida_lines.SCOLOR_DATNAME}")
+        self.AddLine(f"{INDENT}{header}")
         self.AddLine("")
 
-        if self.print_llm_disclaimer():
-            # Add separator matching disclaimer width
-            self.AddLine(f"{INDENT}{'-' * LINE_WIDTH}")
-            self.AddLine("")
+        self.print_llm_disclaimer()
 
         # Get cluster analysis data
         cluster_analysis = self.xrefer_obj.cluster_analysis
@@ -2123,8 +2236,6 @@ class XReferView(idaapi.simplecustviewer_t):
             "binary_report" if showing_report else "binary_description", "Not available"
         )
         self._emit_binary_summary_body(binary_desc, showing_report, INDENT, LINE_WIDTH)
-
-        self.AddLine(f"{INDENT}(Press R to toggle between binary description and report)")
         self.AddLine("")
 
         # Get formatted lines from helper
@@ -2141,6 +2252,198 @@ class XReferView(idaapi.simplecustviewer_t):
 
         self.Jump(0, 0)
         self.Refresh()
+
+    def draw_attack_matrix(self) -> None:
+        """Draw the ATT&CK matrix view.
+
+        Aggregates the per-cluster MITRE ATT&CK mappings into a binary-wide
+        (or cluster-scoped) kill-chain matrix: a coverage strip listing every
+        tactic with a bar scaled to its technique count, then the techniques
+        grouped by tactic in kill-chain order. Each technique shows a single
+        representative rationale and the cluster(s) that ground it as
+        clickable ``cluster.id.NNNN`` tokens; the technique id is clickable
+        too (opens its attack.mitre.org page).
+        """
+        self.ClearLines()
+        self.print_ribbon()
+
+        LINE_WIDTH = 85
+        INDENT = "    "
+        BAR_CELLS = 10
+
+        def col(text: str, tag: int) -> str:
+            return ida_lines.COLSTR(text, tag)
+
+        sm = self.state_machine
+        scope_id = sm.attack_matrix_scope_cluster_id
+
+        cluster_analysis = self.xrefer_obj.cluster_analysis
+        if not cluster_analysis:
+            self.AddLine(f"{INDENT}{col('NO CLUSTER ANALYSIS AVAILABLE', ida_lines.SCOLOR_DATNAME)}")
+            self.Jump(0, 0)
+            self.Refresh()
+            return
+
+        hide_library = sm.hide_library_clusters
+        matrix = aggregate_mitre_matrix(
+            self.xrefer_obj.clusters,
+            cluster_analysis,
+            scope_cluster_id=scope_id,
+            hide_library=hide_library if scope_id is None else False,
+        )
+
+        # ---- Header ----------------------------------------------------
+        if scope_id is not None:
+            header = (
+                f"ATT&CK MATRIX → cluster.id.{scope_id:04d}  "
+                f"{col(str(matrix.technique_count), ida_lines.SCOLOR_VOIDOP)} TECHNIQUE(S) / "
+                f"{col(str(matrix.tactic_count), ida_lines.SCOLOR_VOIDOP)} TACTIC(S)"
+            )
+        else:
+            header = (
+                f"ATT&CK MATRIX → "
+                f"{col(str(matrix.technique_count), ida_lines.SCOLOR_VOIDOP)} TECHNIQUES ACROSS "
+                f"{col(str(matrix.tactic_count), ida_lines.SCOLOR_VOIDOP)} TACTICS"
+            )
+        self.AddLine(f"{INDENT}{col(header, ida_lines.SCOLOR_DATNAME)}")
+        self.AddLine(f"{INDENT}{col('=' * LINE_WIDTH, ida_lines.SCOLOR_DATNAME)}")
+        self.AddLine("")
+
+        self.print_llm_disclaimer()
+
+        # Summary subline + interaction hint.
+        if scope_id is not None:
+            sub = f"Scope: cluster.id.{scope_id:04d} — press K or ESC to return to all clusters"
+        else:
+            uncovered = len(matrix.uncovered_tactics)
+            sub = (
+                f"Grounded in {matrix.clusters_with_techniques} of {matrix.total_clusters} "
+                f"clusters · {uncovered} tactic(s) not observed · Enterprise matrix"
+            )
+            if hide_library:
+                sub += " · library clusters hidden (L)"
+        self.AddLine(f"{INDENT}{col(sub, ida_lines.SCOLOR_DSTR)}")
+        if scope_id is None:
+            hint = "(K/ESC exit · G grid · L hide library · click cluster.id.xxxx · T#### → MITRE)"
+        else:
+            hint = "(K/ESC exit · G grid · click cluster.id.xxxx · T#### → MITRE)"
+        self.AddLine(f"{INDENT}{col(hint, ida_lines.SCOLOR_AUTOCMT)}")
+        self.AddLine("")
+
+        if matrix.is_empty:
+            self.AddLine(f"{INDENT}{col('No MITRE ATT&CK techniques were mapped for these clusters.', ida_lines.SCOLOR_DSTR)}")
+            self.AddLine(f"{INDENT}{col('(Techniques are produced during cluster analysis when artifacts support them.)', ida_lines.SCOLOR_AUTOCMT)}")
+            self.Jump(0, 0)
+            self.Refresh()
+            return
+
+        # ---- Kill-chain coverage strip ---------------------------------
+        self.AddLine(f"{INDENT}{col('KILL-CHAIN COVERAGE', ida_lines.SCOLOR_DATNAME)}")
+        self.AddLine(f"{INDENT}{col('-' * LINE_WIDTH, ida_lines.SCOLOR_AUTOCMT)}")
+        max_n = matrix.max_tactic_count or 1
+        label_w = max((len(t) for t, _ in matrix.coverage), default=10)
+        for tactic, count in matrix.coverage:
+            filled = int(round(count / max_n * BAR_CELLS)) if max_n else 0
+            if count > 0 and filled == 0:
+                filled = 1
+            filled = min(filled, BAR_CELLS)
+            label = tactic.ljust(label_w)
+            count_str = str(count) if count else "·"
+            if count > 0:
+                self.AddLine(
+                    f"{INDENT}  {col(label, ida_lines.SCOLOR_DNAME)}  "
+                    f"{col('█' * filled, ida_lines.SCOLOR_VOIDOP)}"
+                    f"{col('░' * (BAR_CELLS - filled), ida_lines.SCOLOR_AUTOCMT)}  "
+                    f"{col(count_str, ida_lines.SCOLOR_VOIDOP)}"
+                )
+            else:
+                self.AddLine(
+                    f"{INDENT}  {col(label, ida_lines.SCOLOR_AUTOCMT)}  "
+                    f"{col('░' * BAR_CELLS, ida_lines.SCOLOR_AUTOCMT)}  "
+                    f"{col(count_str, ida_lines.SCOLOR_AUTOCMT)}"
+                )
+        self.AddLine("")
+
+        # ---- Techniques by tactic --------------------------------------
+        self.AddLine(f"{INDENT}{col('TECHNIQUES BY TACTIC', ida_lines.SCOLOR_DATNAME)}")
+        self.AddLine(f"{INDENT}{col('-' * LINE_WIDTH, ida_lines.SCOLOR_AUTOCMT)}")
+
+        id_w = 11
+        body_indent = INDENT + "  " + " " * id_w  # aligns under the technique name
+        rat_width = max(20, LINE_WIDTH - len(body_indent))
+        name_avail = LINE_WIDTH - len(INDENT) - 2 - id_w
+        for group in matrix.tactics:
+            self.AddLine("")
+            self.AddLine(f"{INDENT}{col(group.tactic, ida_lines.SCOLOR_DNAME)}")
+            for t in group.techniques:
+                name = t.name or ""
+                if len(name) > name_avail:
+                    name = name[: name_avail - 2] + ".."
+                id_col = t.id.ljust(id_w)
+                self.AddLine(
+                    f"{INDENT}  {col(id_col, ida_lines.SCOLOR_VOIDOP)}{col(name, ida_lines.SCOLOR_DSTR)}"
+                )
+                rat = t.representative_rationale
+                if rat:
+                    for wrapped in word_wrap_text(rat, rat_width):
+                        self.AddLine(f"{body_indent}{col(wrapped, ida_lines.SCOLOR_AUTOCMT)}")
+                # Cluster chips — binary-wide only (the scoped view already
+                # names its cluster in the header).
+                if scope_id is None and t.cluster_ids:
+                    chip_lines = self._pack_cluster_chips(t.cluster_ids, rat_width - 2)
+                    for i, chip_line in enumerate(chip_lines):
+                        prefix = col("↳ ", ida_lines.SCOLOR_SYMBOL) if i == 0 else "  "
+                        self.AddLine(f"{body_indent}{prefix}{col(chip_line, ida_lines.SCOLOR_DEMNAME)}")
+
+        self.Jump(0, 0)
+        self.Refresh()
+
+    def _pack_cluster_chips(self, cluster_ids: List[int], width: int) -> List[str]:
+        """Pack ``cluster.id.NNNN`` tokens into lines no wider than ``width``,
+        keeping each token whole so it stays clickable."""
+        tokens = [f"cluster.id.{cid:04d}" for cid in cluster_ids]
+        lines: List[str] = []
+        cur = ""
+        for tok in tokens:
+            cand = tok if not cur else f"{cur}   {tok}"
+            if len(cand) > width and cur:
+                lines.append(cur)
+                cur = tok
+            else:
+                cur = cand
+        if cur:
+            lines.append(cur)
+        return lines
+
+    def open_attack_matrix_popup(self) -> None:
+        """Open the Qt heat-grid popup for the current ATT&CK matrix.
+
+        Aggregates the same matrix the TUI view shows (honoring the current
+        cluster scope and the hide-library toggle) and hands it to the
+        modal popup. Defensive — a popup failure must never crash the view.
+        """
+        try:
+            cluster_analysis = self.xrefer_obj.cluster_analysis
+            if not cluster_analysis:
+                return
+            sm = self.state_machine
+            scope_id = sm.attack_matrix_scope_cluster_id
+            matrix = aggregate_mitre_matrix(
+                self.xrefer_obj.clusters,
+                cluster_analysis,
+                scope_cluster_id=scope_id,
+                hide_library=sm.hide_library_clusters if scope_id is None else False,
+            )
+            from xrefer.gui.attack_matrix_popup import show_attack_matrix_popup
+
+            suffix = f"cluster.id.{scope_id:04d}" if scope_id is not None else None
+            try:
+                base_name = idaapi.get_root_filename() or None
+            except Exception:
+                base_name = None
+            show_attack_matrix_popup(matrix, title_suffix=suffix, base_name=base_name)
+        except Exception as e:
+            log(f"[-] Error opening ATT&CK matrix popup: {str(e)}")
 
     def _emit_binary_summary_body(self, binary_desc: str, showing_report: bool, indent: str, line_width: int) -> None:
         """Emit the binary report (markdown) or plain description.
@@ -2647,20 +2950,19 @@ class XReferView(idaapi.simplecustviewer_t):
             self.draw_individual_cluster_graph(current_view.cluster_id)
             return
 
-        # Add main heading with enhanced statistics
+        # Quiet stat header (ribbon names the view) + compact cursor context
+        # instead of the full View/Function/Status/Adjacent banner.
         header = (
-            f"CLUSTER GRAPH VIEW → {ida_lines.COLSTR(str(total_clusters), ida_lines.SCOLOR_VOIDOP)} "
-            f"DISCOVERED CLUSTERS, {ida_lines.COLSTR(str(len(unique_functions)), ida_lines.SCOLOR_NUMBER)} FUNCTIONS"
+            ida_lines.COLSTR(str(total_clusters), ida_lines.SCOLOR_VOIDOP)
+            + ida_lines.COLSTR(" clusters · ", ida_lines.SCOLOR_DSTR)
+            + ida_lines.COLSTR(str(len(unique_functions)), ida_lines.SCOLOR_VOIDOP)
+            + ida_lines.COLSTR(" functions", ida_lines.SCOLOR_DSTR)
         )
-        self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_DATNAME}{header}\x02{ida_lines.SCOLOR_DATNAME}")
-        self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_DATNAME}{'=' * LINE_WIDTH}\x02{ida_lines.SCOLOR_DATNAME}")
-        for line in self._build_cluster_context_banner(None):
-            self.AddLine(line)
+        self.AddLine(f"{INDENT}{header}")
         self.AddLine("")
+        self._emit_compact_cluster_context(self.func_ea)
 
-        if self.print_llm_disclaimer():
-            self.AddLine(f"{INDENT}{'-' * LINE_WIDTH}")
-            self.AddLine("")
+        self.print_llm_disclaimer()
 
         # Get cluster analysis data
         cluster_analysis = self.xrefer_obj.cluster_analysis
@@ -2684,8 +2986,6 @@ class XReferView(idaapi.simplecustviewer_t):
             "binary_report" if showing_report else "binary_description", "Not available"
         )
         self._emit_binary_summary_body(binary_desc, showing_report, INDENT, LINE_WIDTH)
-
-        self.AddLine(f"{INDENT}(Press R to toggle between binary description and report)")
         self.AddLine("")
 
         try:
@@ -3293,6 +3593,47 @@ class XReferView(idaapi.simplecustviewer_t):
             [hint("(no nearby cluster within 3 hops)")],
         )
 
+    def _emit_compact_cluster_context(self, func_ea: int) -> None:
+        """Emit a compact 2-line cluster-context strip (membership + adjacency)
+        for the xref and cluster-graph-overview views.
+
+        Replaces the full multi-row banner (View/Function/Status/Adjacent) plus
+        the verbose ``print_cluster_membership`` roles block: the current
+        function's address/name already live in the ribbon, and the full role
+        breakdown lives in the cluster views. Reuses the banner's classification
+        and adjacency helpers, so the membership chip + labels are identical —
+        just without the repetition. No-op when the cursor isn't on a function.
+        """
+        try:
+            on_func = bool(self.func_ea) and ida_funcs.get_func(ida_idaapi.ea_t(int(self.func_ea))) is not None
+        except Exception:
+            on_func = False
+        if not on_func:
+            return
+
+        status_kind, cluster_ids = self._classify_cursor_relative_to_clusters(None)
+        if status_kind == "no_function":
+            return
+        value, _cont = self._format_status_value(status_kind, cluster_ids, None)
+        for line in self._banner_field("Clusters:", value):
+            self.AddLine(line)
+
+        adj = self._adjacent_clusters_for_cursor(exclude_ids=set(cluster_ids))
+        if adj:
+            adj.sort(key=lambda t: t[0])
+            shown = adj[:4]
+            cont: List[str] = []
+            for cid, _neighbor_ea, edge_addr, direction in shown:
+                chip = self._format_cluster_chip(cid)
+                arrow = ida_lines.COLSTR("←" if direction == "caller" else "→", ida_lines.SCOLOR_VOIDOP)
+                edge = ida_lines.COLSTR(f"0x{edge_addr:x}", ida_lines.SCOLOR_DEMNAME)
+                cont.append(f"↳ {chip} {arrow} {edge}")
+            if len(adj) > len(shown):
+                cont.append(ida_lines.COLSTR(f"↳ …and {len(adj) - len(shown)} more", ida_lines.SCOLOR_DSTR))
+            for line in self._banner_field("Adjacent:", "", cont):
+                self.AddLine(line)
+        self.AddLine("")
+
     def _build_cluster_context_banner(
         self,
         current_cluster_id: Optional[int],
@@ -3358,23 +3699,17 @@ class XReferView(idaapi.simplecustviewer_t):
             )
         out.extend(self._banner_field("View:", view_value))
 
-        # ── Cursor row ─────────────────────────────────────────────
+        # ── Function gate ──────────────────────────────────────────
+        # The current function (addr + name) already lives in the ribbon, so
+        # the banner no longer repeats it as a "Function:" row; it only needs
+        # to know whether the cursor is on a function to decide whether the
+        # Status / Adjacent rows below apply.
         try:
             on_func = ida_funcs.get_func(ida_idaapi.ea_t(int(self.func_ea))) is not None if self.func_ea else False
         except Exception:
             on_func = False
         if not self.func_ea or not on_func:
-            cursor_value = ida_lines.COLSTR("(not inside a recognised function)", ida_lines.SCOLOR_DSTR)
-            out.extend(self._banner_field("Function:", cursor_value))
             return out
-
-        try:
-            fname = idc.get_func_name(ida_idaapi.ea_t(int(self.func_ea))) or ""
-        except Exception:
-            fname = ""
-        addr_chip = ida_lines.COLSTR(f"0x{self.func_ea:x}", ida_lines.SCOLOR_DEMNAME)
-        name_part = f"  {ida_lines.COLSTR(fname, ida_lines.SCOLOR_LIBNAME)}" if fname else ""
-        out.extend(self._banner_field("Function:", f"{addr_chip}{name_part}"))
 
         # ── Status row ─────────────────────────────────────────────
         # Both the M and V discoverability hints live as continuation
@@ -4239,25 +4574,22 @@ class XReferView(idaapi.simplecustviewer_t):
             self.load_function_context()
 
     def print_context_help(self) -> None:
-        """Print context-sensitive help with properly aligned borders."""
+        """Print a single compact context hint.
+
+        Replaces the old multi-line bordered help box (which ate ~6-8 lines of
+        a usually-short panel and whose width was only an estimate). The hint
+        teaches the non-obvious gestures and points to H for the full per-state
+        shortcut screen. Still gated by the ``show_help_banner`` setting.
+        """
         if not self.xrefer_obj.settings["display_options"]["show_help_banner"]:
             return
 
         current_state = self.state_machine.current_state.name
-
-        # Get view width in characters, ensuring proper right border alignment
-        try:
-            width = (self.qt_widget.width() // 10) + 15  # Added +1 for right border alignment
-        except:
-            width = 80
-
-        help_lines = self.context_help.format_help_text(current_state, width)
-
-        # Add consistent indentation
-        indent = "    "
-        for line in help_lines:
-            self.AddLine(f"{indent}{line}")
-        self.AddLine("")  # Add spacing after help box
+        hint = self.context_help.format_compact_hint(current_state)
+        if not hint:  # e.g. the help view itself — no self-referential hint line
+            return
+        self.AddLine(f"    {hint}")
+        self.AddLine("")
 
     def print_ribbon(self) -> None:
         """Print status ribbon and aligned context help."""
@@ -4279,7 +4611,11 @@ class XReferView(idaapi.simplecustviewer_t):
         """
         base_text: str = "[ XRefer ]"
         esc_str: str = "[ ESC to go back ]"
-        h_str: str = "[ H for help ]"
+        # Compact H affordance kept in the ribbon so help stays discoverable
+        # even when the compact help line is turned off (show_help_banner) or
+        # suppressed (the help view). Minor overlap with the help line's
+        # 'H: full help' when both are shown is accepted.
+        h_str: str = "[ H help ]"
         exclusions_str: str = f"[ exclusions: {'on' if self.xrefer_obj.settings['enable_exclusions'] else 'off'} ]"
         content: str = ""
 
@@ -4321,8 +4657,10 @@ class XReferView(idaapi.simplecustviewer_t):
             # Added handling for clusters state (cluster table view)
             content = f"[ clusters ]{esc_str}{h_str}"
         else:
-            # Default if no matching state: show func info, exclusions, help
-            content = f"[ func_ea: 0x{self.func_ea:x} ][ func_name: {func_name} ]{exclusions_str}{h_str}"
+            # Default (base): show func info, exclusions, selection count, help.
+            selected_n = len(self.state_machine.get_selected_refs(self.func_ea))
+            sel_str = f"[ selected: {selected_n} ]" if selected_n else ""
+            content = f"[ func_ea: 0x{self.func_ea:x} ][ func_name: {func_name} ]{exclusions_str}{sel_str}{h_str}"
 
         return f"{base_text}{content}"
 
@@ -4446,17 +4784,8 @@ class XReferView(idaapi.simplecustviewer_t):
             return False
 
         disclaimer_lines = [
-            (
-                "===> Some aspects of cluster analysis use LLM processing to enhance code relationship",
-                "s with semantic context. Results may be inconsistent or incomplete, and thus the anal",
-                "ysis provided is considered low confidence. Right-click to re-run analysis if current",
-                "results appear inaccurate. Always verify findings through manual inspection. <===",
-            ),
-            (
-                "===> Do not solely rely on this listing. These artifacts are bubbled up",
-                "via an LLM which can be inconsistent, miss indicators and be in need of",
-                "further prompt tuning. This is meant to jump start triage analysis <===",
-            ),
+            ("LLM-assisted analysis — low confidence; verify findings manually. Right-click to re-run.",),
+            ("LLM-bubbled artifacts — may be inconsistent or miss indicators; a triage starting point.",),
         ]
         INDENT = "    "  # Standard 4-space indent
         for line in disclaimer_lines[disclaimer_index]:
@@ -4503,6 +4832,7 @@ class XReferView(idaapi.simplecustviewer_t):
             self.state_machine.trace_scope_path: self.handle_trace_scope_path,
             self.state_machine.trace_scope_full: self.handle_trace_scope_full,
             self.state_machine.xref_listing: self.draw_entity_xrefs,
+            self.state_machine.attack_matrix: self.draw_attack_matrix,
             self.state_machine.help: self.draw_help,
         }
 
@@ -4625,20 +4955,11 @@ class XReferView(idaapi.simplecustviewer_t):
 
         if ida_funcs.get_func(self.func_ea):
             if self.func_ea in self.xrefer_obj.global_xrefs:
-                # Sticky context banner — same one used by the cluster
-                # graph view so the analyst gets a consistent "where
-                # am I" anchor across the whole xrefer UI. Sync state
-                # is hidden here because it only governs cluster-graph
-                # behavior; surfacing it in the base view would imply
-                # functionality that doesn't exist in this context.
-                for line in self._build_cluster_context_banner(
-                    current_cluster_id=None,
-                    view_label="function context (xrefs)",
-                    show_sync=False,
-                ):
-                    self.AddLine(line)
-                self.AddLine("")
-                self.print_cluster_membership(self.func_ea)
+                # Compact 2-line cluster context (membership + 1-hop adjacency).
+                # Replaces the full banner + the verbose roles block: the
+                # function addr/name live in the ribbon and the full role
+                # breakdown lives in the cluster views.
+                self._emit_compact_cluster_context(self.func_ea)
                 self.draw_function_context_tables(self.func_ea)
             else:
                 self.handle_no_context_available()
@@ -4713,6 +5034,44 @@ class XReferView(idaapi.simplecustviewer_t):
         self._align_merged_name_columns(merged_rows)
         td[self.merged_indirect_name] = {"heading": heading, "rows": merged_rows}
 
+    def _emit_reaches_summary(self, func_ea: int) -> None:
+        """Emit a one-line 'at a glance' summary of what this function reaches.
+
+        Counts are taken from the same ``table_data`` the tables below render
+        (post-merge, post-exclusion), so the summary's numbers always match the
+        per-table counts. No-op when the function reaches nothing.
+        """
+        td = self.xrefer_obj.table_data.get(func_ea, {})
+
+        def tcount(name: str) -> int:
+            tbl = td.get(name)
+            if not tbl:
+                return 0
+            return sum(len(v) for v in tbl.get("rows", {}).values() if v)
+
+        direct = tcount("DIRECT XREFS")
+        imps_libs = tcount(self.merged_indirect_name)
+        strings = tcount(self.xrefer_obj.table_names[3])
+        capa = tcount(self.xrefer_obj.table_names[4])
+        total = direct + imps_libs + strings + capa
+        if not total:
+            return
+
+        def num(n: int) -> str:
+            return ida_lines.COLSTR(str(n), ida_lines.SCOLOR_VOIDOP)
+
+        def dim(s: str) -> str:
+            return ida_lines.COLSTR(s, ida_lines.SCOLOR_DSTR)
+
+        line = (
+            f"    {dim('Reaches ')}{num(total)}{dim(' artifacts')}"
+            f"{dim(' · direct ')}{num(direct)}"
+            f"{dim(' · indirect: ')}{num(imps_libs)}{dim(' imports & libs, ')}"
+            f"{num(strings)}{dim(' strings, ')}{num(capa)}{dim(' capa')}"
+        )
+        self.AddLine(line)
+        self.AddLine("")
+
     def draw_function_context_tables(self, func_ea: int) -> bool:
         """
         Draw all relevant tables for a function.
@@ -4732,6 +5091,7 @@ class XReferView(idaapi.simplecustviewer_t):
         if func_ea not in self.xrefer_obj.table_data:
             self.xrefer_obj.table_data[func_ea] = self.xrefer_obj.create_sorted_table(func_ea)
         self._merge_indirect_tables(func_ea)
+        self._emit_reaches_summary(func_ea)
 
         for table_index in range(self.table_count):
             table_start_index: int = (table_index + self.table_index_offset) % self.table_count
@@ -4748,7 +5108,7 @@ class XReferView(idaapi.simplecustviewer_t):
                 if self.table_states[table_name] or self.state_machine.current_state in (self.state_machine.call_focus, self.state_machine.search):
                     self.draw_function_context_table(func_ea, table_name)
                 else:
-                    self.draw_function_context_table_heading(func_ea, table_name, "[+] %s")
+                    self.draw_function_context_table_heading(func_ea, table_name, "▸ %s")
                     self.AddLine("")
 
         return printed
@@ -4775,7 +5135,8 @@ class XReferView(idaapi.simplecustviewer_t):
             if is_expanded or table_name.startswith("D") or self.state_machine.current_state in (self.state_machine.call_focus, self.state_machine.search):
                 self.display_function_context_table_contents(table_name, inner_table_key, inner_table)
             else:
-                self.AddLine(ida_lines.COLSTR("    %s %s" % (ida_lines.COLSTR("(+)", ida_lines.SCOLOR_DATNAME), inner_table_key), ida_lines.SCOLOR_ASMDIR))
+                # Collapsed category — chevron + artifact count, gaugeable without expanding.
+                self.AddLine(self._category_line("▸", inner_table_key, len(inner_table)))
 
         if self.xrefer_obj.table_data[func_ea][table_name]["rows"]:
             self.AddLine("")
@@ -4793,14 +5154,136 @@ class XReferView(idaapi.simplecustviewer_t):
             inner_table (List[str]): Content rows to display
         """
         if not table_name.startswith("D") and not self.state_machine.current_state == self.state_machine.call_focus:
-            self.AddLine(ida_lines.COLSTR("    %s %s" % (ida_lines.COLSTR("(-)", ida_lines.SCOLOR_DATNAME), inner_table_key), ida_lines.SCOLOR_ASMDIR))
+            self.AddLine(self._category_line("▾", inner_table_key, len(inner_table)))
 
         line_prefix: str = "    " if table_name.startswith("D") else self.indent
+        is_merged = table_name == self.merged_indirect_name
 
         for line in inner_table:
-            self.print_xref_item(f"{line_prefix}{line}", self.state_machine.address_filter)
+            # T2: a selection checkbox (☑ when the row carries a \x04 select
+            # mark) and, in the merged table, an imp/lib type tag inferred from
+            # the row's leading color byte. Both are uncolored and accounted for
+            # in cell_regex, so double-click still resolves the artifact name.
+            box = "☑ " if "\x04" in line else "☐ "
+            tag = ""
+            if is_merged and len(line) > 1 and line[0] == "\x01":
+                cbyte = ord(line[1])
+                if cbyte == ida_lines.SCOLOR_IMPNAME:
+                    tag = "imp "
+                elif cbyte == ida_lines.SCOLOR_DEMNAME:
+                    tag = "lib "
+            self.print_xref_item(f"{line_prefix}{box}{tag}{line}", self.state_machine.address_filter)
 
-    def draw_function_context_table_heading(self, func_ea: int, table_name: str, fmt: str = "[-] %s") -> None:
+    def _category_line(self, marker: str, key: str, count: int) -> str:
+        """Build a category header line: '<chevron> <category>  (N)'.
+
+        Starts with a color code (not raw spaces) so ``cell_regex`` never
+        mistakes it for a selectable row."""
+        return (
+            ida_lines.COLSTR(f"    {marker} ", ida_lines.SCOLOR_DATNAME)
+            + ida_lines.COLSTR(key, ida_lines.SCOLOR_DNAME)
+            + "  " + ida_lines.COLSTR(f"({count})", ida_lines.SCOLOR_VOIDOP)
+        )
+
+    def _indirect_via_funcs(self, e_index: int) -> List[int]:
+        """The current function's callees through which an *indirect* artifact
+        is reached — i.e. which of ``self.func_ea``'s direct callees begin a
+        call path that references entity ``e_index``. Empty for direct refs or
+        when unknown. Sorted for stable display.
+
+        Note: for INDIRECT xrefs the ``*_ea`` buckets map entity_index -> set
+        of callee function EAs (unlike DIRECT, where they map to call-site
+        addresses); ``process_rows_for_indirect_xrefs`` relies on the same
+        shape.
+        """
+        try:
+            entity = self.xrefer_obj.entities[e_index]
+            base = {1: "libs", 2: "imports", 3: "strings", 4: "capa", 5: "api_trace"}.get(entity[2])
+            if not base:
+                return []
+            bucket = self.xrefer_obj.entity_suffix_map.get(base, f"{base}_ea")
+            gx = self.xrefer_obj.global_xrefs.get(self.func_ea)
+            if not gx:
+                return []
+            indirect = gx.get(self.xrefer_obj.INDIRECT_XREFS, {})
+            return sorted(indirect.get(bucket, {}).get(e_index, ()))
+        except Exception:
+            return []
+
+    def _combine_tooltips(self, *tips) -> Optional[Tuple[int, str]]:
+        """Merge IDA hint tuples ``(num_important_lines, text)`` into one,
+        skipping ``None``/empty. ``OnHint`` must return this tuple shape for the
+        hint to DISPLAY (a bare string is accepted but silently not shown)."""
+        valid: List[Tuple[int, str]] = []
+        for t in tips:
+            if not t:
+                continue
+            if isinstance(t, tuple) and len(t) == 2:
+                n, text = t
+            else:  # defensive: coerce a bare string
+                text = str(t)
+                n = text.count("\n") + 1
+            if text:
+                valid.append((int(n), text))
+        if not valid:
+            return None
+        total = sum(n for n, _ in valid) + (len(valid) - 1)  # +blank separators
+        return total, "\n\n".join(text for _, text in valid)
+
+    def _indirect_via_tooltip(self, e_index: int) -> Optional[Tuple[int, str]]:
+        """Hover body for an indirect artifact: the callee functions it is
+        reached through (the indirection's 'through what').
+
+        Returns an IDA hint tuple ``(num_important_lines, text)`` — the shape
+        ``OnHint`` must return for the tip to actually DISPLAY — or ``None``
+        when the artifact isn't reached indirectly from the current function.
+
+        Deliberately does NOT gate on ``get_parent_table()`` — that reads the
+        mouse line (``GetLineNo(mouse=1)``), which returns -1 inside the OnHint
+        callback. ``_indirect_via_funcs`` is itself indirect-only (empty for a
+        purely direct ref), so it's a sufficient gate on its own.
+
+        The body is colorized to match the function-address tooltips: a keyword
+        header with an emphasized count, a dashed rule, then each callee in the
+        function-name colour (``SCOLOR_DEMNAME``) and a dimmed overflow line."""
+        callees = self._indirect_via_funcs(e_index)
+        if not callees:
+            return None
+        # SWIG's get_func_name wants a real ea_t; the callee values come from the
+        # backend and aren't always plain ints, so wrap as ida_idaapi.ea_t(int(…)).
+        func_trunc_length: int = 60
+        names: List[str] = []
+        for c in callees:
+            name = idc.get_func_name(ida_idaapi.ea_t(int(c))) or f"0x{int(c):x}"
+            if len(name) > func_trunc_length:
+                name = f"{name[:func_trunc_length]}..."
+            names.append(name)
+        shown = names[:12]
+        overflow = len(names) - len(shown)
+
+        kw: int = ida_lines.SCOLOR_KEYWORD   # header label
+        num: int = ida_lines.SCOLOR_VOIDOP   # the count
+        fn: int = ida_lines.SCOLOR_DEMNAME   # callee names (matches addr tooltips)
+        dim: int = ida_lines.SCOLOR_AUTOCMT  # "+N more"
+
+        # Size the rule to the widest *visible* line (color codes excluded).
+        plain = [f"Reached through {len(names)} function(s):"] + [f"  {n}" for n in shown]
+        if overflow > 0:
+            plain.append(f"  … (+{overflow} more)")
+        sep_len = max(len(p) for p in plain)
+
+        header = (
+            f"\x01{kw}Reached through \x02{kw}"
+            f"\x01{num}{len(names)}\x02{num}"
+            f"\x01{kw} function(s):\x02{kw}"
+        )
+        lines = [header, f"\x01{fn}{'-' * sep_len}\x02{fn}"]
+        lines += [f"  \x01{fn}{n}\x02{fn}" for n in shown]
+        if overflow > 0:
+            lines.append(f"  \x01{dim}… (+{overflow} more)\x02{dim}")
+        return len(lines), "\n".join(lines)
+
+    def draw_function_context_table_heading(self, func_ea: int, table_name: str, fmt: str = "▾ %s") -> None:
         """
         Print formatted table heading.
 
@@ -4819,6 +5302,11 @@ class XReferView(idaapi.simplecustviewer_t):
 
         heading_line: str = self.xrefer_obj.table_data[func_ea][table_name]["heading"][0]
         hline: str = ida_lines.COLSTR(fmt % heading_line, ida_lines.SCOLOR_DATNAME)
+        # Append the artifact count so the magnitude of each table is legible
+        # at a glance — including when the table is collapsed.
+        total = sum(len(v) for v in self.xrefer_obj.table_data[func_ea][table_name].get("rows", {}).values() if v)
+        if total:
+            hline += "  " + ida_lines.COLSTR(f"({total})", ida_lines.SCOLOR_VOIDOP)
         self.AddLine(hline)
         heading_line = self.xrefer_obj.table_data[func_ea][table_name]["heading"][1]
         # Non-direct tables get a "----" continuation marker that visually
@@ -5136,6 +5624,117 @@ class XReferView(idaapi.simplecustviewer_t):
         line_count = len(tooltip)
         return line_count, "\n".join(tooltip)
 
+    # Per-artifact width clamp for "node detail" mode (keeps boxes from going
+    # absurdly wide on a single long string). No *line-count* cap — the
+    # experiment shows every direct artifact; tall nodes are expected.
+    _NODE_ARTIFACT_TRUNC = 26
+
+    def _graph_artifact_cap(self) -> Optional[int]:
+        """Effective per-type artifact cap for graph node-detail mode, or
+        ``None`` when capping is disabled (show all — the default).
+
+        Driven by the ``display_options`` settings ``cap_graph_node_artifacts``
+        (bool) and ``graph_node_artifact_cap`` (int). A non-positive / malformed
+        value reads as "no cap" so a bad setting never hides everything."""
+        opts = self.xrefer_obj.settings.get("display_options", {})
+        if not opts.get("cap_graph_node_artifacts", False):
+            return None
+        try:
+            n = int(opts.get("graph_node_artifact_cap", 6))
+        except (TypeError, ValueError):
+            return None
+        return n if n > 0 else None
+
+    def _node_artifact_entries(self, ea: int) -> List[Tuple[str, int]]:
+        """``(display_text, SCOLOR)`` for each of a function's *direct* xrefs —
+        the data the hover tooltip shows, but for in-node rendering. One entry
+        per artifact (imports → strings → capa → libs), truncated to
+        ``_NODE_ARTIFACT_TRUNC``; the colour is the entity's per-type tag
+        (``color_tags`` — IMPORT→IMPNAME, STRING→DSTR, CAPA→CODNAME,
+        LIBRARY→DEMNAME), so the node matches the tooltip's palette. No type
+        tag: colour carries the type. Returns ``[]`` for functions with no
+        direct artifacts (node stays as small as today).
+
+        When the ``cap_graph_node_artifacts`` setting is on, each type is capped
+        to ``_graph_artifact_cap()`` entries with a dim ``(+N more)`` overflow
+        line per truncated type (the cap is folded into ``draw_paths_graph``'s
+        cache key so a changed cap re-renders rather than returning a stale box).
+
+        The text is laid out plain (the ASCII layout is colour-blind and sizes
+        boxes by raw width); the colour is applied post-layout by
+        ``draw_paths_graph`` via the per-key ``_graph_artifact_colors`` map."""
+        try:
+            direct = self.xrefer_obj.global_xrefs[ea][self.xrefer_obj.DIRECT_XREFS]
+        except Exception:
+            return []
+
+        per_type: List[Tuple[str, List[Tuple[str, int]]]] = []
+        for key in ("imports", "strings", "capa", "libs"):
+            items: List[Tuple[str, int]] = []
+            for e_index in sorted(direct.get(key, ())):
+                try:
+                    entity = self.xrefer_obj.entities[e_index]
+                    name = entity[1]
+                    color = self.xrefer_obj.color_tags[self.xrefer_obj.table_names[entity[2]]]
+                except Exception:
+                    continue
+                # Strip IDA colour-control bytes too: an artifact carrying a
+                # stray \x01/\x02 would desync the post-layout colour scan.
+                name = name.replace("\x01", "").replace("\x02", "")
+                name = name.replace("\n", " ").replace("\r", " ").strip()
+                if not name:
+                    continue
+                if len(name) > self._NODE_ARTIFACT_TRUNC:
+                    name = name[: self._NODE_ARTIFACT_TRUNC - 2] + ".."
+                items.append((name, color))
+            per_type.append((key, items))
+
+        return cap_artifact_entries(per_type, self._graph_artifact_cap(), ida_lines.SCOLOR_AUTOCMT)
+
+    def _colorize_node_artifacts(self, line: str, artifact_items: List[Tuple[str, int]]) -> str:
+        """Colour EVERY occurrence of each node artifact in a rendered graph line.
+
+        The ASCII layout packs nodes side-by-side, so the same artifact name
+        recurs across boxes on a single output line. ``wrap_substring_with_string``
+        only wraps the *first* occurrence, which left every box but the leftmost
+        uncoloured (and, with vertical box offsets, coloured some artifacts in a
+        node and not others). This does a single left-to-right scan instead:
+
+        * existing IDA colour-code pairs (``\\x01X`` / ``\\x02X``) are copied
+          verbatim as opaque 2-char skips, so the blanket DEMNAME wrap and the
+          func_ea / entity highlights already applied survive untouched;
+        * at each plain position the LONGEST artifact starting there wins, so a
+          prefix artifact never bleeds into a longer one (CreateFile vs
+          CreateFileW);
+        * a match is emitted wrapped and the cursor advances past it, so an
+          already-coloured span is never re-entered.
+
+        Case-sensitive (matches the rest of the graph colouring). ``artifact_items``
+        must be pre-sorted longest-first; empty keys are skipped (an empty match
+        would loop / emit unbalanced codes)."""
+        out: List[str] = []
+        i = 0
+        n = len(line)
+        while i < n:
+            ch = line[i]
+            if ch in ("\x01", "\x02") and i + 1 < n:
+                out.append(line[i:i + 2])
+                i += 2
+                continue
+            match = None
+            for text, color in artifact_items:
+                if text and line.startswith(text, i):
+                    match = (text, color)
+                    break
+            if match is not None:
+                text, color = match
+                out.append(f"\x01{color}{text}\x02{color}")
+                i += len(text)
+            else:
+                out.append(ch)
+                i += 1
+        return "".join(out)
+
     def draw_paths_graph(self) -> None:
         """
         Draw ASCII graph of paths to selected cross-reference.
@@ -5166,10 +5765,35 @@ class XReferView(idaapi.simplecustviewer_t):
         _graph: Optional[List[bytes]] = None
 
         # Use different cache keys for normal and simplified graphs
-        cache_key = f"simplified_{e_index}" if is_simplified else e_index
+        # Cache key carries every dimension that changes the rendered ASCII:
+        # the simplified axis and the node-detail (artifacts) axis.
+        _ck_parts = []
+        if is_simplified:
+            _ck_parts.append("simplified")
+        if self.graph_node_artifacts:
+            _ck_parts.append("artifacts")
+            # Fold the per-type cap into the key so toggling the cap (or changing
+            # its value) renders fresh instead of returning a stale cached box.
+            _cap = self._graph_artifact_cap()
+            if _cap is not None:
+                _ck_parts.append(f"cap{_cap}")
+        cache_key = "_".join([*_ck_parts, str(e_index)]) if _ck_parts else e_index
 
-        if cache_key in self.xrefer_obj.graph_cache:
+        # display_text -> SCOLOR for post-layout per-type artifact colouring.
+        node_artifact_colors: Dict[str, int] = {}
+
+        # graph_cache is serialized into the .xrefer DB, but the parallel
+        # per-key colour map (_graph_artifact_colors) is view-local and is NOT
+        # persisted. After a DB reload a node-detail key can therefore be present
+        # in graph_cache with no colour map — which would render every artifact
+        # in the fallback colour. Treat that as a miss so the node re-renders
+        # (rebuilding both the box and its colour map). Membership (not truthiness)
+        # is the test: a graph legitimately free of artifacts has the key present
+        # with an empty map and still counts as a valid hit.
+        _have_colors = (not self.graph_node_artifacts) or (cache_key in self._graph_artifact_colors)
+        if cache_key in self.xrefer_obj.graph_cache and _have_colors:
             _graph, num_original_nodes, num_simplified_nodes = self.xrefer_obj.graph_cache[cache_key]
+            node_artifact_colors = self._graph_artifact_colors.get(cache_key, {})
         else:
             # Collect paths and track unique nodes
             original_nodes = set()
@@ -5253,9 +5877,16 @@ class XReferView(idaapi.simplecustviewer_t):
                         func_name = idc.get_func_name(ea)
                         if not func_name:
                             func_name = "<no_name>"
-                        # Truncate function name at 16 chars
-                        if len(func_name) > 12:
-                            func_name = func_name[:12] + ".."
+                        # The node title shouldn't be the most-truncated line.
+                        if self.graph_node_artifacts:
+                            # Node-detail: give the name the same budget as the
+                            # artifacts (same cap → box no wider than they make it).
+                            if len(func_name) > self._NODE_ARTIFACT_TRUNC:
+                                func_name = func_name[: self._NODE_ARTIFACT_TRUNC - 2] + ".."
+                        else:
+                            # Normal mode: keep names tight so plain graphs stay narrow.
+                            if len(func_name) > 12:
+                                func_name = func_name[:12] + ".."
 
                         addr_str = f"0x{ea:x}"
 
@@ -5266,12 +5897,25 @@ class XReferView(idaapi.simplecustviewer_t):
                             # Two lines: addr, func_name
                             lines = [addr_str, func_name]
 
+                        # "Node detail" mode: append the function's direct
+                        # artifacts under the header (plain text; per-type
+                        # colour recorded for the post-layout pass below).
+                        header_count = len(lines)
+                        if self.graph_node_artifacts:
+                            for art_text, art_color in self._node_artifact_entries(ea):
+                                lines.append(art_text)
+                                node_artifact_colors[art_text] = art_color
+
                         # Determine this node's max line length
                         node_max_len = max(len(line) for line in lines)
 
-                        # Center each line individually for this node
-                        centered_lines = [f"{line:^{node_max_len}}" for line in lines]
-                        new_label = "\n".join(centered_lines)
+                        # Header lines (addr / name) are centred; the artifact
+                        # list reads better left-aligned within the box.
+                        rendered_lines = [
+                            f"{line:^{node_max_len}}" if i < header_count else f"{line:<{node_max_len}}"
+                            for i, line in enumerate(lines)
+                        ]
+                        new_label = "\n".join(rendered_lines)
 
                         func_nodes.append((node, new_label))
 
@@ -5281,6 +5925,7 @@ class XReferView(idaapi.simplecustviewer_t):
 
                 _graph = ascii_graphs.graph_to_ascii(graph).splitlines()
                 self.xrefer_obj.graph_cache[cache_key] = (_graph, num_original_nodes, num_simplified_nodes)
+                self._graph_artifact_colors[cache_key] = node_artifact_colors
             except:
                 self.state_machine.go_back()
                 self.update(True)
@@ -5301,6 +5946,8 @@ class XReferView(idaapi.simplecustviewer_t):
         paths_view_label = "artifact path graph"
         if is_simplified:
             paths_view_label = "simplified " + paths_view_label
+        if self.graph_node_artifacts:
+            paths_view_label += " (detailed nodes)"
         if is_pinned:
             paths_view_label += " (pinned)"
         for line in self._build_cluster_context_banner(
@@ -5311,6 +5958,12 @@ class XReferView(idaapi.simplecustviewer_t):
             self.AddLine(line)
         self.AddLine("")
 
+        # Node-detail status (mirrors the simplified reduction note below) so
+        # the mode + its toggle key stay discoverable while it's on.
+        if self.graph_node_artifacts:
+            detail_str = f"    \x01{ida_lines.SCOLOR_AUTOCMT}Nodes show their direct artifacts — D to toggle\x02{ida_lines.SCOLOR_AUTOCMT}"
+            self.AddLine(detail_str)
+
         # Add node reduction info if in simplified mode
         if is_simplified and num_original_nodes > num_simplified_nodes:
             reduction = (num_original_nodes - num_simplified_nodes) / num_original_nodes * 100
@@ -5320,11 +5973,23 @@ class XReferView(idaapi.simplecustviewer_t):
         self.AddLine("")
         func_ea: str = f"0x{self.func_ea:x}"
 
+        # Pre-sort artifacts longest-first so the per-position greedy match
+        # prefers the longer of two that share a prefix (CreateFileW over
+        # CreateFile). Built once; the per-line colourer reuses it.
+        artifact_items = sorted(node_artifact_colors.items(), key=lambda kv: len(kv[0]), reverse=True)
+
         for line in _graph:
             line: str = line
             line = ida_lines.COLSTR(line, ida_lines.SCOLOR_DEMNAME)
             line = wrap_substring_with_string(line, func_ea, "\x01\x12", "\x02\x12", case=True)
             line = wrap_substring_with_string(line, entity_content, entity_wrap_start, entity_wrap_end, True)
+            # "Node detail": recolour EVERY occurrence of each artifact by its
+            # type (post-layout, since the ASCII layout is colour-blind). Must
+            # colour all occurrences, not just the first — the layout packs
+            # nodes side-by-side, so the same artifact name recurs across boxes
+            # on one rendered line.
+            if artifact_items:
+                line = self._colorize_node_artifacts(line, artifact_items)
             self.AddLine(f"        {line}")
 
         self.Refresh()
@@ -5587,6 +6252,12 @@ class XReferView(idaapi.simplecustviewer_t):
 
         return word
 
+    def _strip_count_suffix(self, text: str) -> str:
+        """Strip a trailing '  (N)' artifact-count badge from a heading or
+        category label so it matches the table_states / subtable_states keys.
+        (Counts were added to those lines for at-a-glance magnitude.)"""
+        return re.sub(r"\s*\(\d+\)\s*$", "", text).rstrip()
+
     def get_parent_table(self) -> Optional[str]:
         """
         Get name of table containing current line.
@@ -5605,8 +6276,12 @@ class XReferView(idaapi.simplecustviewer_t):
             if not result or result[0] is None:
                 return None
             line = result[0]
-            candidate = line[6:-2].strip()
-            if candidate in self.table_names or candidate in self.orphan_table_names:
-                return candidate
+            # Heading lines look like "▾ NAME" / "▸ NAME" (optionally with a
+            # trailing "  (N)" count). Parse robustly rather than by offset.
+            clean = strip_color_codes(line).strip()
+            if clean[:1] in ("▸", "▾"):
+                candidate = self._strip_count_suffix(clean[1:].strip())
+                if candidate in self.table_names or candidate in self.orphan_table_names:
+                    return candidate
             lineno -= 1
         return None

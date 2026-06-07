@@ -18,7 +18,7 @@ DSPy-native LLM processor with Pydantic validation.
 
 import re
 import secrets
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -37,6 +37,13 @@ from xrefer.llm.dspy_modules import BinarySynthesisResponse, BinarySynthesizerMo
 # code paths that touch this module don't accidentally activate a
 # live LLM logging side-effect.
 _LLM_IO_CALLBACK_REGISTERED: bool = False
+
+# Request timeout (seconds) for local Ollama calls. litellm's default is 600s
+# (10 min), which a laptop-local model blows past on a large cluster prompt —
+# the server then logs a 500 at ~10m0s and the run fails. Local generations are
+# inherently slow, so give them a generous ceiling. (Hosted models keep
+# litellm's default; their latency is bounded.)
+_OLLAMA_REQUEST_TIMEOUT_S = 1800
 
 
 def _log_llm_io(kwargs, completion_response, start_time, end_time) -> None:
@@ -176,6 +183,10 @@ class LLMProcessor:
         # so uncached_lm() can rebuild a parallel LM with cache disabled
         # for force-analyze runs without affecting the main LM.
         self._lm_kwargs: Dict[str, Any] = {}
+        # The DSPy adapter chosen for this model (JSONAdapter for Ollama,
+        # ChatAdapter for hosted). Stored so each call can re-assert THIS
+        # processor's lm+adapter via dspy.context() — see _process_single.
+        self.adapter: Optional[Any] = None
 
     def _build_lm_kwargs(self, config: ModelConfig) -> Dict[str, Any]:
         """Compute the dspy.LM kwargs dict from a ModelConfig.
@@ -195,9 +206,43 @@ class LLMProcessor:
         """
         lm_kwargs: Dict[str, Any] = {
             "model": config.model_id,
-            "api_key": config.api_key,
             "cache_seed": 0x72616e64306d,
         }
+        # Pass the key explicitly only when we actually have one. Leaving it
+        # unset lets litellm resolve the provider key from the environment
+        # (e.g. GEMINI_API_KEY / OPENAI_API_KEY), which is how zero-config /
+        # env-based auth works for headless runs.
+        if config.api_key:
+            lm_kwargs["api_key"] = config.api_key
+
+        # ── Local models via Ollama ──────────────────────────────────
+        # ollama_chat/<model> + api_base. Crucially, set num_ctx to the model's
+        # real context length (from /api/show) — Ollama defaults num_ctx to
+        # 2048, far too small for cluster prompts, and silently truncates
+        # beyond it. The hosted-model branches below (OpenAI reasoning,
+        # Anthropic 1M, catalog output cap) don't apply to local models.
+        from xrefer.llm.ollama import is_ollama_model, model_context_length
+        if is_ollama_model(config.model_id):
+            # Ollama doesn't understand litellm's cache_seed and logs
+            # "invalid option provided"; drop it for local models.
+            lm_kwargs.pop("cache_seed", None)
+            if config.api_base:
+                lm_kwargs["api_base"] = config.api_base
+            num_ctx = model_context_length(config.api_base, config.model_id)
+            if num_ctx:
+                lm_kwargs["num_ctx"] = num_ctx
+            # Local generations are slow; raise the request timeout well above
+            # litellm's 600s default so a long cluster call isn't killed at
+            # ~10m0s (see _OLLAMA_REQUEST_TIMEOUT_S).
+            lm_kwargs["timeout"] = _OLLAMA_REQUEST_TIMEOUT_S
+            # Disable chain-of-thought. Thinking models (e.g. Gemma) spend the
+            # bulk of each call emitting reasoning tokens before the JSON, which
+            # makes cluster analysis unusably slow locally — a 1-cluster call
+            # measured ~134s with thinking vs ~54s without. The structured
+            # cluster output doesn't need visible CoT. (Ignored by models that
+            # don't support thinking.)
+            lm_kwargs["think"] = False
+            return lm_kwargs
 
         # ── Hard-constrained branch: OpenAI reasoning models ─────────
         # These models require temperature=1.0 and max_tokens >= 16000;
@@ -264,7 +309,25 @@ class LLMProcessor:
         self.config = config
         self._lm_kwargs = self._build_lm_kwargs(config)
         self.lm = dspy.LM(**self._lm_kwargs)
-        dspy.settings.configure(lm=self.lm)
+        # Adapter choice. Local (Ollama) models emit raw JSON, NOT DSPy's
+        # ChatAdapter "[[ ## field ## ]]" marker format — so ChatAdapter fails
+        # to parse and DSPy silently retries with a fallback adapter, DOUBLING
+        # every call (measured: 2 model calls per cluster). JSONAdapter parses
+        # their native JSON on the first attempt (and drives Ollama's
+        # constrained `format` output, which is more reliable). Hosted models
+        # keep the default ChatAdapter they're tuned and tested against. Setting
+        # it explicitly each time also resets correctly when the user switches
+        # between a local and a hosted model mid-session.
+        from xrefer.llm.ollama import is_ollama_model
+        try:
+            adapter = dspy.JSONAdapter() if is_ollama_model(config.model_id) else dspy.ChatAdapter()
+            self.adapter = adapter
+            dspy.settings.configure(lm=self.lm, adapter=adapter)
+        except Exception:
+            # If the adapter classes ever move/rename, don't break LLM setup —
+            # fall back to DSPy's default adapter.
+            self.adapter = None
+            dspy.settings.configure(lm=self.lm)
         # Lazy registration of the LiteLLM success callback so every
         # subsequent LLM call (categorizer, cluster_analyzer,
         # binary_synthesizer, the API-key validation call, anything
@@ -316,6 +379,42 @@ class LLMProcessor:
             self.lm = prior_lm
             dspy.settings.configure(lm=prior_lm)
 
+    @contextmanager
+    def override_lm(self, **extra_kwargs) -> Iterator[None]:
+        """Temporarily rebuild the active LM with ``extra_kwargs`` merged
+        over the configured kwargs, for the duration of the ``with`` block.
+
+        Generalises ``uncached_lm``: the hierarchical stage-1 path uses it to
+        pin a smaller ``num_ctx`` (so Ollama allocates a bounded KV cache on a
+        laptop instead of the model's full advertised window) and, when the
+        force-re-analyze flow is active, to also disable the response cache —
+        both in a single rebuilt LM so they compose. No-op when no model is
+        configured or ``extra_kwargs`` is empty.
+        """
+        if self.config is None or self.lm is None or not extra_kwargs:
+            yield
+            return
+
+        prior_lm = self.lm
+        kwargs = dict(self._lm_kwargs)
+        kwargs.update(extra_kwargs)
+        try:
+            new_lm = dspy.LM(**kwargs)
+        except TypeError:
+            # Older dspy.LM may reject some kwargs (e.g. cache=); drop the
+            # cache flag and retry — a randomized cache_seed (if supplied)
+            # still bypasses the cache.
+            kwargs.pop("cache", None)
+            new_lm = dspy.LM(**kwargs)
+
+        self.lm = new_lm
+        dspy.settings.configure(lm=new_lm)
+        try:
+            yield
+        finally:
+            self.lm = prior_lm
+            dspy.settings.configure(lm=prior_lm)
+
     def validate_api_key(self) -> bool:
         """Validate API key with a test call."""
         if not self.lm:
@@ -327,22 +426,86 @@ class LLMProcessor:
             log(f"API validation failed: {e}")
             return False
 
+    def render_request_messages(self, prompt_type: PromptType, item: str, model_id: Optional[str] = None) -> List[Dict[str, str]]:
+        """Render the exact chat messages DSPy would send for a single
+        ``item`` under ``prompt_type`` — WITHOUT calling the LLM.
+
+        Uses the same Predict signature and adapter DSPy uses at call
+        time (``ChatAdapter`` unless an adapter is configured on
+        ``dspy.settings``). The rendered messages therefore include the
+        signature instructions AND the Pydantic output-model JSON schema
+        — the prompt scaffolding that a raw count of ``item`` alone
+        misses, and usually the larger share of a small request. Returned
+        as ``[{"role", "content"}, ...]`` ready for
+        ``litellm.token_counter(messages=...)``.
+
+        Side-effect free: constructing the module builds a ``dspy.Predict``
+        but never invokes it, so no API key or network access is needed.
+        Raises ``ValueError`` for prompt types without a single string
+        input field; callers wanting a soft fallback should catch and
+        count the raw ``item`` text instead.
+        """
+        import dspy
+        from dspy.adapters import ChatAdapter
+        from xrefer.llm.dspy_modules import BinarySynthesizerModule, ClusterAnalyzerModule
+
+        # Use THIS processor's adapter (set in set_model_config), NOT the global
+        # dspy.settings.adapter — in a dual-model setup the global reflects
+        # whichever model was configured last (e.g. the light Ollama model's
+        # JSONAdapter), which would mis-render the heavy model's estimate. When
+        # this processor is unconfigured (the fresh-LLMProcessor estimate path),
+        # derive the adapter from the model_id being estimated, else ChatAdapter.
+        adapter = self.adapter
+        if adapter is None:
+            _mid = model_id or (self.config.model_id if self.config else None)
+            if _mid:
+                from xrefer.llm.ollama import is_ollama_model
+                adapter = dspy.JSONAdapter() if is_ollama_model(_mid) else ChatAdapter()
+        if adapter is None:
+            adapter = ChatAdapter()
+        if prompt_type == PromptType.CLUSTER_ANALYZER:
+            signature = ClusterAnalyzerModule().predictor.signature
+            inputs = {"cluster_data": item}
+        elif prompt_type == PromptType.BINARY_SYNTHESIZER:
+            signature = BinarySynthesizerModule().predictor.signature
+            inputs = {"synthesis_input": item}
+        else:
+            raise ValueError(f"render_request_messages: unsupported prompt type {prompt_type!r}")
+        # ChatAdapter.format(signature, demos, inputs); no few-shot demos
+        # are configured for these modules, matching the live call path.
+        return adapter.format(signature, [], inputs)
+
     def _process_single(self, items: List[Any], prompt_type: PromptType, config: Optional[ProcessConfig]=None) -> Dict[str, Any]:
         """
         Process items using DSPy module.
+
+        Dual-model routing: each role (cluster analysis vs categorization) runs
+        on its OWN ``LLMProcessor`` instance with its own ``self.lm``/``adapter``.
+        Because ``dspy.settings`` is GLOBAL (last ``configure`` wins) and these
+        run as separate phases that can interleave / re-run, we re-assert THIS
+        processor's lm+adapter per call via ``dspy.context`` (thread-local, so
+        it is also safe under ``_process_parallel`` workers). ``override_lm`` /
+        ``uncached_lm`` mutate ``self.lm``, so the context picks those up too.
         """
         try:
-            if prompt_type == PromptType.CATEGORIZER:
-                response: "CategorizationResponse" = CategorizerModule()(items=items, categories=config.categories, item_type=config.item_type)
-                return response.model_dump()
-            elif prompt_type == PromptType.CLUSTER_ANALYZER:
-                response: "ClusterAnalysisResponse" = ClusterAnalyzerModule()(cluster_data=items[0])
-                return response.model_dump()
-            elif prompt_type == PromptType.BINARY_SYNTHESIZER:
-                response: "BinarySynthesisResponse" = BinarySynthesizerModule()(synthesis_input=items[0])
-                return response.model_dump()
-            else:
-                raise ValueError(f"Unsupported prompt type: {prompt_type}")
+            ctx_kwargs: Dict[str, Any] = {}
+            if self.lm is not None:
+                ctx_kwargs["lm"] = self.lm
+            if self.adapter is not None:
+                ctx_kwargs["adapter"] = self.adapter
+            ctx = dspy.context(**ctx_kwargs) if ctx_kwargs else nullcontext()
+            with ctx:
+                if prompt_type == PromptType.CATEGORIZER:
+                    response: "CategorizationResponse" = CategorizerModule()(items=items, categories=config.categories, item_type=config.item_type)
+                    return response.model_dump()
+                elif prompt_type == PromptType.CLUSTER_ANALYZER:
+                    response: "ClusterAnalysisResponse" = ClusterAnalyzerModule()(cluster_data=items[0])
+                    return response.model_dump()
+                elif prompt_type == PromptType.BINARY_SYNTHESIZER:
+                    response: "BinarySynthesisResponse" = BinarySynthesizerModule()(synthesis_input=items[0])
+                    return response.model_dump()
+                else:
+                    raise ValueError(f"Unsupported prompt type: {prompt_type}")
         except (litellm.exceptions.RateLimitError, httpx.HTTPStatusError) as e:
             log(f'''{e.__class__.__name__} was raised during LLM processing:
 

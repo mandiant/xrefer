@@ -2,11 +2,20 @@
 base classes for backend abstraction.
 """
 
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Optional, Tuple
+
+# Common disassembler-generated function-name prefixes (IDA sub_/nullsub_/loc_,
+# Ghidra FUN_, Binary Ninja sub_). Used by Function.has_default_name's portable
+# fallback; backends with a precise API override the property.
+_DEFAULT_NAME_RE = re.compile(
+    r"^(sub|nullsub|funcsub|fun|loc|locret|unknown_libname|j_nullsub)_[0-9A-Fa-f]+",
+    re.IGNORECASE,
+)
 
 
 class BackendError(Exception):
@@ -211,6 +220,20 @@ class Function(ABC):
     @abstractmethod
     def is_thunk(self) -> bool:
         """Check if function is a thunk (jump stub)."""
+
+    @property
+    def has_default_name(self) -> bool:
+        """True when the function still carries a disassembler-generated
+        placeholder name (``sub_4012a0``, ``FUN_004012a0``, …) rather than a
+        FLIRT / import / user-assigned name.
+
+        Concrete default: a name-prefix heuristic covering the common
+        auto-name schemes (IDA ``sub_``/``nullsub_``/``loc_``, Ghidra
+        ``FUN_``, Binary Ninja ``sub_``). Backends with a precise API
+        (e.g. IDA's ``has_dummy_name``) should override this. Used by the
+        cluster renamer so it never clobbers a meaningful name.
+        """
+        return bool(_DEFAULT_NAME_RE.match(self.name or ""))
 
     @property
     @abstractmethod
