@@ -18,7 +18,7 @@ import re
 import traceback
 import weakref
 from collections import OrderedDict, defaultdict
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple, Union
 
 import ida_bytes
 import ida_funcs
