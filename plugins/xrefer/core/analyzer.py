@@ -3440,7 +3440,7 @@ class XRefer:
         """Write report data JSON only (no HTML)."""
         report_data = self.generate_report_data()
         report_json_suffix = "_report_data.json"
-        json_path = Path(f"{self._backend.path}{report_json_suffix}")
+        json_path = Path(f"{self._backend.output_base}{report_json_suffix}")
         json_payload = json.dumps(report_data, indent=2, default=str)
         json_path.write_text(json_payload, encoding="utf-8")
         log(f"Report data saved to: {json_path}")
@@ -3458,7 +3458,7 @@ class XRefer:
         json_data = json.dumps(report_data, indent=2, default=str)
         report_html_suffix = "_report.html"
 
-        save_path = f"{self._backend.path}{report_html_suffix}"
+        save_path = f"{self._backend.output_base}{report_html_suffix}"
 
         data_url_value = json.dumps("")
         embedded_payload = json_data.replace("</", "<\\/")

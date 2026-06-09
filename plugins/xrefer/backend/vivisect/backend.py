@@ -1233,6 +1233,13 @@ class VivisectBackend(BackEnd):
     def _path_impl(self) -> str:
         return self._binary_path
 
+    @property
+    def output_base(self) -> str:
+        """Backend-qualified output base so vivisect artifacts
+        (``<binary>_vivisect.xrefer`` / ``<binary>_vivisect_report.html``) do not
+        clobber a ghidra run's ``<binary>_ghidra.*`` outputs in the same dir."""
+        return f"{self._binary_path}_vivisect"
+
     def _get_disassembly_impl(self, address: Address) -> Instruction:
         va = int(address)
         if va in self._insn_cache:

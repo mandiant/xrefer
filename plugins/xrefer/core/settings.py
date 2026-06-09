@@ -108,8 +108,19 @@ class XReferSettingsManager:
         if not default_trace_path:
             default_trace_path = f"{idb_path}_trace.zip"
 
+        # Analysis output (.xrefer cache) is qualified by the backend's
+        # output_base so e.g. vivisect writes <binary>_vivisect.xrefer and does
+        # not clobber a ghidra run's output. INPUT artifacts (capa/trace/xrefs)
+        # stay on the plain binary path so shared inputs are still found.
+        analysis_base = idb_path
+        try:
+            from ..backend import get_current_backend
+            analysis_base = get_current_backend().output_base
+        except Exception:
+            pass
+
         default_paths = {
-            "analysis": f"{idb_path}.xrefer",
+            "analysis": f"{analysis_base}.xrefer",
             "capa": f"{idb_path}_capa.json",
             "trace": default_trace_path,
             "xrefs": f"{idb_path}_user_xrefs.txt",

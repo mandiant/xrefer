@@ -401,6 +401,15 @@ class BackEnd(ABC):
         return self._path_cache
 
     @property
+    def output_base(self) -> str:
+        """Base path (without extension) for analysis output artifacts
+        (``.xrefer`` cache, ``_report.html``). Defaults to the binary path so
+        existing backends are unchanged; backends that share a directory with
+        another backend's outputs (e.g. vivisect alongside ghidra) override this
+        to add a backend-qualified suffix and avoid clobbering each other."""
+        return self.path
+
+    @property
     @abstractmethod
     def image_base(self) -> Address:
         """Get image base address where binary is loaded."""
