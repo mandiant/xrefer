@@ -1353,6 +1353,47 @@ class XRefer:
 
                 populate_library_flag(self.clusters)
 
+                # Coarsen over-split library subtrees (single-child chains and
+                # tiny library leaves). Only is_library clusters are merged, so
+                # behavior-carrying clusters that drive binary classification are
+                # never altered. Toggle via analysis_options.coarsen_library_clusters.
+                analysis_opts = self.settings.get("analysis_options", {})
+                if analysis_opts.get("coarsen_library_clusters", True):
+                    tiny_max = analysis_opts.get("coarsen_tiny_leaf_max_nodes", 4)
+                    ClusterManager.coarsen_library_clusters(
+                        self.clusters, tiny_leaf_max_nodes=tiny_max,
+                    )
+
+                # Rust-only: merge near-duplicate sibling subclusters. Rust std-heavy
+                # binaries fragment one body of user code into N heavily-overlapping
+                # same-size clusters (the over-split gap vs Ghidra). C/C++/Go already
+                # cluster at parity, so this is gated to Rust to avoid disturbing them.
+                # The redundancy test (high node-overlap + few distinct artifacts)
+                # preserves genuine behavior decompositions (e.g. the ransomware
+                # clusters in c6b727d7), which have low overlap and rich artifacts.
+                if (analysis_opts.get("coarsen_redundant_siblings", True)
+                        and self.lang is not None
+                        and getattr(self.lang, "id", None) == "lang_rust"):
+                    def _cluster_artifacts(cluster):
+                        arts = set()
+                        for ea in cluster.nodes:
+                            for a in self.get_apis_for_function(ea):
+                                arts.add(("a", a))
+                            for a in self.get_strings_for_function(ea):
+                                arts.add(("s", a))
+                            for a in self.get_libs_for_function(ea):
+                                arts.add(("l", a))
+                            for a in self.get_capa_for_function(ea):
+                                arts.add(("c", a))
+                        return arts
+                    ClusterManager.coarsen_redundant_siblings(
+                        self.clusters,
+                        artifact_fn=_cluster_artifacts,
+                        overlap_frac=analysis_opts.get("coarsen_sibling_overlap_frac", 0.75),
+                        max_private_nodes=analysis_opts.get("coarsen_sibling_max_private", 1),
+                        min_distinct_artifacts=analysis_opts.get("coarsen_sibling_min_distinct", 2),
+                    )
+
                 total_clusters = 0
                 non_library_clusters = 0
 

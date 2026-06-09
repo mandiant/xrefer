@@ -634,3 +634,246 @@ class ClusterManager:
         log("Establishing cluster relationships...")
         ClusterManager.establish_cluster_relationships(clusters)
         return clusters
+
+    @staticmethod
+    def coarsen_library_clusters(
+        clusters: List["FunctionalCluster"],
+        tiny_leaf_max_nodes: int = 4,
+    ) -> int:
+        """
+        Reduce over-split in the cluster tree by absorbing low-information
+        *library* subclusters into their parents. This trims structural noise
+        (deep single-child chains and tiny library leaves) while leaving the
+        identifying behavior untouched.
+
+        Safety invariant: only clusters with ``is_library is True`` are ever
+        merged, and a child is merged only when its parent is also a library
+        cluster. ``is_library is False`` clusters carry the behavior that drives
+        binary classification (e.g. ransomware ID), so they are never altered,
+        never absorbed, and never used as a merge sink for non-library children.
+
+        Two merge rules, decided on a snapshot of the original tree then applied
+        deepest-child-first so chains collapse correctly:
+          * single-child-chain: a library parent with exactly one (library)
+            subcluster -> absorb the child.
+          * tiny-lib-leaf: a library leaf (no subclusters) with
+            ``<= tiny_leaf_max_nodes`` nodes -> absorb into its (library) parent.
+
+        Args:
+            clusters: top-level clusters; mutated in place.
+            tiny_leaf_max_nodes: size threshold for the tiny-lib-leaf rule.
+
+        Returns:
+            Number of subclusters absorbed.
+        """
+        # Snapshot parent/depth so decisions don't shift as we mutate.
+        parent_of: Dict[int, "FunctionalCluster"] = {}
+        depth_of: Dict[int, int] = {}
+        by_id: Dict[int, "FunctionalCluster"] = {}
+
+        def index(cluster, parent, depth):
+            by_id[cluster.id] = cluster
+            parent_of[cluster.id] = parent
+            depth_of[cluster.id] = depth
+            for sub in cluster.subclusters:
+                index(sub, cluster, depth + 1)
+
+        for cluster in clusters:
+            index(cluster, None, 0)
+
+        # Decide merges on the snapshot. child_id -> parent (object).
+        decisions: Dict[int, "FunctionalCluster"] = {}
+        for cid, cluster in by_id.items():
+            parent = parent_of[cid]
+            if parent is None or not getattr(cluster, "is_library", False):
+                continue
+            if not getattr(parent, "is_library", False):
+                continue  # never absorb into a non-library (behavior) parent
+            single_child_chain = len(parent.subclusters) == 1
+            tiny_leaf = not cluster.subclusters and len(cluster.nodes) <= tiny_leaf_max_nodes
+            if single_child_chain or tiny_leaf:
+                decisions[cid] = parent
+
+        if not decisions:
+            log("Coarsening: no library subclusters eligible for merge")
+            return 0
+
+        # redirect[old_id] -> surviving id, so dangling cluster_refs can be fixed.
+        redirect: Dict[int, int] = {}
+
+        def absorb(child: "FunctionalCluster", parent: "FunctionalCluster") -> None:
+            parent.nodes.update(child.nodes)
+            parent.edges.extend(child.edges)
+            parent.cluster_refs.update(child.cluster_refs)
+            # re-parent grandchildren onto the surviving parent
+            for grandchild in child.subclusters:
+                grandchild.parent_cluster_id = parent.id
+                parent.subclusters.append(grandchild)
+            if child in parent.subclusters:
+                parent.subclusters.remove(child)
+            redirect[child.id] = parent.id
+
+        # Apply deepest-first so A->B->C chains collapse before B leaves the tree.
+        for cid in sorted(decisions, key=lambda c: depth_of[c], reverse=True):
+            absorb(by_id[cid], decisions[cid])
+
+        # Follow redirect chains to final surviving ids, then fix any cluster_ref
+        # that pointed at an absorbed cluster.
+        def resolve(ref_id: int) -> int:
+            seen = set()
+            while ref_id in redirect and ref_id not in seen:
+                seen.add(ref_id)
+                ref_id = redirect[ref_id]
+            return ref_id
+
+        def fix_refs(cluster: "FunctionalCluster") -> None:
+            if cluster.cluster_refs:
+                cluster.cluster_refs = {
+                    node: resolve(ref_id) for node, ref_id in cluster.cluster_refs.items()
+                }
+            for sub in cluster.subclusters:
+                fix_refs(sub)
+
+        for cluster in clusters:
+            fix_refs(cluster)
+
+        log(f"Coarsening: absorbed {len(decisions)} library subclusters "
+            f"(tiny_leaf_max_nodes={tiny_leaf_max_nodes})")
+        return len(decisions)
+
+    @staticmethod
+    def coarsen_redundant_siblings(
+        clusters: List["FunctionalCluster"],
+        artifact_fn=None,
+        overlap_frac: float = 0.6,
+        max_private_nodes: int = 2,
+        min_distinct_artifacts: int = 3,
+    ) -> int:
+        """
+        Reduce over-split by absorbing *redundant sibling* subclusters into their
+        parent. A subcluster is redundant when it is a near-duplicate fragment of
+        its siblings: it shares most of its nodes with them and contributes almost
+        no unique content.
+
+        This targets the Rust over-split case where one body of user code is
+        chopped into N heavily-overlapping same-size clusters (e.g. e3f6628c:
+        8 siblings sharing ~65-86% of nodes, 1 distinct artifact each). It is safe
+        for genuinely-distinct decompositions (e.g. c6b727d7's behavior clusters,
+        which overlap ~23% and carry many distinct artifacts) because those fail
+        the redundancy test. Merging into the parent also grows the root toward
+        Ghidra's consolidated-root shape.
+
+        A subcluster S (among its current siblings) is absorbed into its parent
+        when ALL of:
+          * node-overlap fraction |S.nodes ∩ siblings| / |S.nodes| >= overlap_frac
+          * private node count |S.nodes - siblings| <= max_private_nodes
+          * (if artifact_fn given) distinct artifacts (in S, in no sibling)
+            < min_distinct_artifacts
+
+        Args:
+            clusters: top-level clusters; mutated in place.
+            artifact_fn: optional callable(cluster) -> set, giving the artifacts
+                (apis/strings/libs/capa) of a cluster. When omitted, redundancy is
+                decided on node overlap alone (more aggressive).
+            overlap_frac: min shared-node fraction to consider redundant.
+            max_private_nodes: max unique nodes a redundant fragment may have.
+            min_distinct_artifacts: a sub with >= this many distinct artifacts is
+                kept regardless of node overlap (it carries real unique behavior).
+
+        Returns:
+            Number of subclusters absorbed.
+        """
+        redirect: Dict[int, int] = {}
+        total = 0
+
+        def absorb(child: "FunctionalCluster", parent: "FunctionalCluster") -> None:
+            parent.nodes.update(child.nodes)
+            parent.edges.extend(child.edges)
+            parent.cluster_refs.update(child.cluster_refs)
+            for grandchild in child.subclusters:
+                grandchild.parent_cluster_id = parent.id
+                parent.subclusters.append(grandchild)
+            if child in parent.subclusters:
+                parent.subclusters.remove(child)
+            redirect[child.id] = parent.id
+
+        def merges_for(parent: "FunctionalCluster"):
+            subs = list(parent.subclusters)
+            if len(subs) < 2:
+                return []
+            nodesets = {s.id: set(s.nodes) for s in subs}
+            artsets = {s.id: (artifact_fn(s) if artifact_fn else set()) for s in subs}
+            redundant = []
+            for s in subs:
+                others = [o for o in subs if o.id != s.id]
+                other_nodes = set().union(*(nodesets[o.id] for o in others))
+                mine = nodesets[s.id]
+                if not mine:
+                    continue
+                frac = len(mine & other_nodes) / len(mine)
+                private = len(mine - other_nodes)
+                if artifact_fn:
+                    other_arts = set().union(*(artsets[o.id] for o in others)) if others else set()
+                    distinct = len(artsets[s.id] - other_arts)
+                else:
+                    distinct = 0
+                if (frac >= overlap_frac and private <= max_private_nodes
+                        and (not artifact_fn or distinct < min_distinct_artifacts)):
+                    redundant.append(s)
+            # never collapse every sibling away: keep the largest as representative
+            if redundant and len(redundant) == len(subs):
+                keep = max(subs, key=lambda c: len(c.nodes))
+                redundant = [s for s in redundant if s is not keep]
+            return [(s, parent) for s in redundant]
+
+        # Single snapshot pass: decide all merges on the original tree, then
+        # apply. We deliberately do NOT iterate to a fixpoint — re-evaluating
+        # after re-parenting cascades and over-merges (collapses a whole Rust
+        # subtree). One pass removes the same-level near-duplicate fragments,
+        # which is the over-split we are targeting.
+        pending = []
+
+        def walk(cluster):
+            pending.extend(merges_for(cluster))
+            for sc in cluster.subclusters:
+                walk(sc)
+        for c in clusters:
+            walk(c)
+
+        # deepest-first so a parent that is itself absorbed still merges its
+        # own redundant children first
+        depth = {}
+
+        def setdepth(cluster, d):
+            depth[id(cluster)] = d
+            for sc in cluster.subclusters:
+                setdepth(sc, d + 1)
+        for c in clusters:
+            setdepth(c, 0)
+        pending.sort(key=lambda cp: depth.get(id(cp[0]), 0), reverse=True)
+
+        for child, parent in pending:
+            if child in parent.subclusters:
+                absorb(child, parent)
+                total += 1
+
+        def resolve(ref_id: int) -> int:
+            seen = set()
+            while ref_id in redirect and ref_id not in seen:
+                seen.add(ref_id)
+                ref_id = redirect[ref_id]
+            return ref_id
+
+        def fix_refs(cluster: "FunctionalCluster") -> None:
+            if cluster.cluster_refs:
+                cluster.cluster_refs = {
+                    node: resolve(ref_id) for node, ref_id in cluster.cluster_refs.items()
+                }
+            for sc in cluster.subclusters:
+                fix_refs(sc)
+        for c in clusters:
+            fix_refs(c)
+
+        log(f"Coarsening: absorbed {total} redundant sibling subclusters "
+            f"(overlap>={overlap_frac}, private<={max_private_nodes})")
+        return total
