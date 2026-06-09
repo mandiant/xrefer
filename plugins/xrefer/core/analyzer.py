@@ -1186,6 +1186,40 @@ class XRefer:
             # otherwise-separate clusters to merge into one (regression vs. main).
             # Reverting to main's semantics.
 
+            # Rust dominator anchor. Two-part Rust fix: (1) the backend recovers
+            # the real trait-dispatch edges it statically missed (recover_vtable_edges),
+            # which improves call-graph connectivity; (2) here we re-root at rust_main
+            # *only when it is provably the common ancestor (dominator) of the
+            # fragmented candidates*. This is NOT the blunt "force EP as candidate"
+            # hack the upstream note above rejects: that one fires unconditionally and
+            # collapses every binary to one cluster. We instead require rust_main to
+            # have been POSITIVELY identified (== EP) AND to reach >=2 of the artifact
+            # candidates in the call graph (self.paths[rust_main]). On a std-heavy Rust
+            # program the artifact-bearing functions are library functions (std::io,
+            # std::thread, ...) that main::main calls but that aren't main::main itself;
+            # without rooting at their common ancestor they fragment into N overlapping
+            # runtime clusters. Rooting at rust_main — the genuine user entry that
+            # dominates them — consolidates them into the single user cluster that
+            # matches Ghidra's PRIMARY cluster. Dynamic: if rust_main does NOT dominate
+            # >=2 candidates (e.g. a binary with genuinely independent user clusters),
+            # the anchor does not fire and natural clustering stands. Gated to Rust with
+            # a named rust_main, so Ghidra/other backends (no rust_main) are untouched.
+            if (self.lang is not None
+                    and getattr(self.lang, "id", None) == "lang_rust"
+                    and self.current_analysis_ep):
+                try:
+                    rm = self._backend.get_address_for_name("rust_main")
+                    rm = int(rm) if rm is not None else None
+                    if rm is not None and rm == int(self.current_analysis_ep):
+                        reached = set(self.paths.get(rm, {}).keys())
+                        dominated = all_candidate_funcs & reached
+                        if len(dominated) >= 2:
+                            all_candidate_funcs.add(rm)
+                            log(f"Rust dominator anchor: rust_main 0x{rm:x} dominates "
+                                f"{len(dominated)} candidate(s) → rooting clusters there")
+                except Exception as e:
+                    log(f"Rust dominator anchor skipped: {e}")
+
             def _fmt_func(ea: int) -> str:
                 fn = self._backend.get_function_at(ea)
                 if fn is None or not getattr(fn, "name", None):

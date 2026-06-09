@@ -822,6 +822,28 @@ class BackEnd(ABC):
         """
         return None
 
+    def recover_vtable_edges(self) -> list:
+        """Recover indirect call edges from Rust trait-object (vtable) dispatch.
+
+        Rust ``dyn Trait`` calls compile to ``call [reg + off]`` where ``reg``
+        holds a vtable pointer and ``off`` selects a method slot. These targets
+        are runtime-polymorphic, so a static backend leaves the call graph
+        under-connected and the clustering stage over-fragments user code.
+        Backends that can statically locate vtables in read-only data and tie a
+        dispatch offset to a concrete method may override this to return the
+        recovered edges; they are injected through the normal user-xref path
+        (see ``LangRust._process_if_rust`` / ``XRefer.add_user_xrefs``) so the
+        shared clustering algorithm reconnects naturally — no per-backend
+        special-casing in core.
+
+        Backends that don't implement it inherit this default and contribute no
+        edges, leaving their behaviour unchanged.
+
+        Returns:
+            List of ``(call_site_va, target_function_va)`` edges.
+        """
+        return []
+
     #
     # Backend-Specific Implementation Methods
     #

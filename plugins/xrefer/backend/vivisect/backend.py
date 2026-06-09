@@ -20,6 +20,7 @@ import bisect
 import hashlib
 import logging
 import os
+import struct
 from collections.abc import Iterator
 from typing import Optional, Tuple
 
@@ -909,6 +910,12 @@ class VivisectBackend(BackEnd):
 
         # ── Opcode cache ─────────────────────────────────────────────────
         self._insn_cache: dict = {}
+        # Indirect-call dispatch displacements: call-site VA -> displacement of a
+        # single-base memory deref (`call [reg + disp]`). Captured here because
+        # the structured operand (oper.disp) is only available while `vw` is
+        # alive; the cached Operand.text is not parseable for this. Used solely by
+        # recover_vtable_edges() (Rust trait dispatch); harmless/empty otherwise.
+        self._indirect_call_disp: dict = {}
         for fva in vw.getFunctions():
             for bva, bsize, _ in vw.getFunctionBlocks(fva):
                 offset = bva
@@ -918,6 +925,10 @@ class VivisectBackend(BackEnd):
                         op   = vw.parseOpcode(offset)
                         insn = self._opcode_to_instruction(op)
                         self._insn_cache[offset] = insn
+                        if op.mnem.lower().startswith('call'):
+                            disp = self._call_deref_disp(op)
+                            if disp is not None:
+                                self._indirect_call_disp[offset] = disp
                         offset += len(op)
                     except Exception:
                         offset += 1
@@ -990,6 +1001,29 @@ class VivisectBackend(BackEnd):
             operands = tuple(operands),
             text     = repr(op),
         )
+
+    @staticmethod
+    def _call_deref_disp(op) -> Optional[int]:
+        """Displacement of a `call [reg + disp]` single-base memory dereference.
+
+        Returns the (signed) displacement for an indirect call through a single
+        base register (envi ``i386RegMemOper``, or a ``i386SibOper`` with no
+        index register) — the shape Rust trait dispatch uses (``call [reg]`` is
+        disp 0). Returns None for direct calls, register-only indirect calls
+        (`call rax`), and scaled/indexed derefs (`call [base + idx*scale]`,
+        array-style) which don't map to a fixed vtable slot. Used to recover
+        trait-dispatch edges; see recover_vtable_edges().
+        """
+        opers = getattr(op, 'opers', None)
+        if not opers or len(opers) != 1:
+            return None
+        oper = opers[0]
+        cls = type(oper).__name__
+        if 'RegMemOper' in cls:
+            return int(getattr(oper, 'disp', 0))
+        if 'SibOper' in cls and getattr(oper, 'index', None) is None:
+            return int(getattr(oper, 'disp', 0))
+        return None
 
     # ════════════════════════════════════════════════════════════════════════
     #  BackEnd ABC — all 24 methods
@@ -1176,6 +1210,16 @@ class VivisectBackend(BackEnd):
                     continue                       # must leave the wrapper
                 if tgt not in self._func_start_index:
                     continue                       # must point at a function start
+                # Reject trivial trampolines (jmp rax, etc.) — rust_main must have
+                # at least 2 basic blocks OR a single block with ≥1 outgoing call.
+                cand_fn = self.get_function_at(Address(tgt))
+                if cand_fn is None:
+                    continue
+                cand_bbs = list(cand_fn.basic_blocks)
+                if len(cand_bbs) < 2:
+                    if not any(True for xr2 in self.get_xrefs_from(Address(tgt))
+                               if xr2.type == XrefType.CALL):
+                        continue
                 if self._has_following_bootstrap_call(addrs, i, 8):
                     return tgt
         return None
@@ -1215,6 +1259,196 @@ class VivisectBackend(BackEnd):
             self._va_to_name.setdefault(cand, "rust_main")
             return Address(cand)
         return None
+
+    # ── Rust trait-object (vtable) dispatch-edge recovery ─────────────────
+    # Vivisect's static analysis can't resolve `call [reg + off]` dyn-Trait
+    # dispatch (the target depends on the concrete type at runtime), so the
+    # call graph is under-connected and xrefer's clustering over-fragments
+    # user code vs Ghidra (whose decompiler does whole-program type prop).
+    # We recover the edges STATICALLY and conservatively: locate Rust vtables
+    # in read-only data by their fixed header shape, then connect each indirect
+    # call to a method ONLY when the calling function references exactly one
+    # vtable that has a method at that dispatch offset. The edges flow through
+    # the normal user-xref mechanism (see LangRust._process_if_rust), so the
+    # shared clustering algorithm reconnects naturally — no core changes.
+
+    def _detect_pointer_size(self) -> int:
+        """Pointer size from the file header (NOT a VA-range heuristic).
+
+        A VA-range guess misclassifies low-based 64-bit PIE ELF (image base
+        ~0x2000000, every VA < 4 GiB) as 32-bit, which would corrupt every
+        pointer read below. Reading the format header is exact.
+        """
+        try:
+            with open(self._binary_path, 'rb') as f:
+                head = f.read(0x40)
+        except Exception:
+            head = b''
+        if head[:4] == b'\x7fELF' and len(head) > 4:
+            return 8 if head[4] == 2 else 4          # EI_CLASS: 1=32, 2=64
+        if head[:2] == b'MZ':
+            try:
+                pe_off = int.from_bytes(head[0x3c:0x40], 'little')
+                with open(self._binary_path, 'rb') as f:
+                    f.seek(pe_off + 0x18)
+                    magic = int.from_bytes(f.read(2), 'little')
+                return 8 if magic == 0x20b else 4    # 0x20b=PE32+, 0x10b=PE32
+            except Exception:
+                pass
+        if head[:4] in (b'\xcf\xfa\xed\xfe', b'\xfe\xed\xfa\xcf'):
+            return 8                                  # Mach-O 64
+        if head[:4] in (b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xce'):
+            return 4                                  # Mach-O 32
+        # Last resort: any section ending above 4 GiB implies 64-bit.
+        try:
+            return 8 if max(int(s.end) for s in self.get_sections()) > 0xFFFFFFFF else 4
+        except Exception:
+            return 8
+
+    def _executable_ranges(self) -> list:
+        """[(start, end)] of executable sections, for code-pointer validation."""
+        ranges = []
+        for sec in self.get_sections():
+            try:
+                is_exec = ('x' in (sec.perm or '')) or sec.type == SectionType.CODE \
+                          or sec.name in ('.text', '.plt', '.init', '.fini')
+            except Exception:
+                is_exec = sec.name in ('.text', '.plt', '.init', '.fini')
+            if is_exec:
+                ranges.append((int(sec.start), int(sec.end)))
+        return ranges
+
+    def recover_vtable_edges(self) -> list:
+        ps = self._detect_pointer_size()
+        exec_ranges = self._executable_ranges()
+        if not exec_ranges:
+            return []
+
+        def in_exec(va: int) -> bool:
+            return any(s <= va < e for s, e in exec_ranges)
+
+        # Read each candidate section once; reused by both discovery passes.
+        sec_data: dict = {}                          # name -> (base_va, bytes)
+        for secname in ('.rodata', '.data.rel.ro', '.rdata',
+                        '.data', '.got', '.got.plt'):
+            sec = self.get_section_by_name(secname)
+            if sec is None:
+                continue
+            base = int(sec.start)
+            data = self.read_bytes(Address(base), int(sec.end) - base)
+            if data:
+                sec_data[secname] = (base, data)
+
+        # ── Phase A: discover vtables in read-only data ────────────────────
+        # A Rust vtable is: [0] drop_in_place (fn ptr), [1] size (usize),
+        # [2] align (power-of-two usize), [3..] method fn ptrs. We require the
+        # drop slot AND >=1 method slot to be real function starts — a strong
+        # filter that makes false positives on random data extremely unlikely.
+        SIZE_MAX = 1 << 28
+        vtables: dict = {}        # base_va -> {byte_offset: target_func_va}
+        for secname in ('.rodata', '.data.rel.ro', '.rdata'):
+            if secname not in sec_data:
+                continue
+            base, data = sec_data[secname]
+            n = len(data)
+            off = 0
+            while off + 4 * ps <= n:
+                p0 = int.from_bytes(data[off:off + ps], 'little')
+                if p0 not in self._func_start_index:
+                    off += ps
+                    continue
+                size_f = int.from_bytes(data[off + ps:off + 2 * ps], 'little')
+                align_f = int.from_bytes(data[off + 2 * ps:off + 3 * ps], 'little')
+                if size_f > SIZE_MAX or not (0 < align_f <= 4096 and (align_f & (align_f - 1)) == 0):
+                    off += ps
+                    continue
+                slots = {0: p0}
+                moff = 3 * ps
+                while off + moff + ps <= n:
+                    mp = int.from_bytes(data[off + moff:off + moff + ps], 'little')
+                    if not in_exec(mp):
+                        break
+                    if mp in self._func_start_index:
+                        slots[moff] = mp
+                    moff += ps
+                if any(k >= 3 * ps for k in slots):     # has >=1 real method
+                    vtables[base + off] = slots
+                    off += moff                         # skip past this vtable
+                else:
+                    off += ps
+        if not vtables:
+            return []
+        vtable_bases = set(vtables)
+
+        # Global index: dispatch offset -> vtable bases that have a method there.
+        # Used for the tier-2 fallback (offset globally unique => unambiguous even
+        # when the dispatching function never references the vtable directly, e.g.
+        # a trait object received as a parameter).
+        methods_by_offset: dict = {}
+        for vb, slots in vtables.items():
+            for o in slots:
+                methods_by_offset.setdefault(o, set()).add(vb)
+
+        # ── Phase A.5: pointer slots holding a vtable base ─────────────────
+        # PIE / relocated builds load the vtable via a data slot
+        # (`lea reg,[rip+slot]` where *slot* stores the vtable pointer) rather
+        # than referencing the vtable address directly. Map slot_va -> vtable so
+        # a function that references the slot counts as referencing the vtable.
+        ptr_slots: dict = {}
+        fmt = '<Q' if ps == 8 else '<I'
+        for base, data in {b: d for b, d in sec_data.values()}.items():
+            usable = len(data) - (len(data) % ps)
+            for i, (val,) in enumerate(struct.iter_unpack(fmt, data[:usable])):
+                if val in vtable_bases:
+                    ptr_slots[base + i * ps] = val
+
+        DATA_REF = (XrefType.DATA_OFFSET, XrefType.DATA_READ, XrefType.DATA_WRITE)
+
+        # ── Phase B: tie indirect call offsets to vtables ──────────────────
+        # Tier 1 (precise): the function references exactly one vtable (directly
+        #   or via a ptr slot) that has a method at the call's offset.
+        # Tier 2 (fallback): the function references none, but the offset belongs
+        #   to exactly one vtable binary-wide (globally unambiguous).
+        # Ambiguous cases are dropped, never guessed.
+        edges = []
+        seen = set()
+        for fva in self._func_start_index:
+            insn_addrs = self._func_insn_addrs(fva)
+            if not insn_addrs:
+                continue
+            calls = [(a, self._indirect_call_disp[a])
+                     for a in insn_addrs if a in self._indirect_call_disp]
+            if not calls:
+                continue
+            # vtables this function references (construction / load sites)
+            refd = set()
+            for a in insn_addrs:
+                for xr in self.get_xrefs_from(Address(a)):
+                    if xr.type not in DATA_REF:
+                        continue
+                    t = int(xr.target)
+                    if t in vtable_bases:
+                        refd.add(t)
+                    elif t in ptr_slots:
+                        refd.add(ptr_slots[t])
+            for a, disp in calls:
+                cands = [vt for vt in refd if disp in vtables[vt]]
+                if len(cands) == 1:                     # tier 1
+                    target = vtables[cands[0]][disp]
+                elif len(cands) == 0:                   # tier 2 (global unique)
+                    glob = methods_by_offset.get(disp)
+                    if not glob or len(glob) != 1:
+                        continue
+                    target = vtables[next(iter(glob))][disp]
+                else:                                   # ambiguous -> skip
+                    continue
+                if target == fva:                       # ignore trivial self-edge
+                    continue
+                key = (a, target)
+                if key not in seen:
+                    seen.add(key)
+                    edges.append(key)
+        return edges
 
     def _add_user_xref_impl(self, source: Address, target: Address) -> None:
         # User-added xrefs are treated as CALL by convention (matches Ghidra)

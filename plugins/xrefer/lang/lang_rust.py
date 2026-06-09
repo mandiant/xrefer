@@ -116,6 +116,20 @@ class RustStringParser:
         self.next_offset = 8 if self.is_64bit else 4
         self.ror_num = 32 if self.is_64bit else 16
 
+    def _get_ro_section(self):
+        """Return the primary read-only data section, format-agnostically.
+
+        Rust string literals live in the read-only data section, which is
+        named ``.rdata`` on PE and ``.rodata`` on ELF/Mach-O. The original
+        code hardcoded ``.rdata`` only, so the precise (ptr, len) string
+        slicers silently produced nothing on ELF binaries — collapsing the
+        packed Rust string blob into a single un-sliced entry and starving
+        cluster candidates of their string artifacts. Trying both names keeps
+        one code path working across formats.
+        """
+        return (self.backend.get_section_by_name(".rdata")
+                or self.backend.get_section_by_name(".rodata"))
+
     def get_data_rel_ro_strings(self) -> Dict[int, RustStringInfo]:
         """
         Extract Rust strings from .data.rel.ro section.
@@ -133,7 +147,7 @@ class RustStringParser:
         if not data_rel_ro:
             return strings
 
-        rdata = self.backend.get_section_by_name(".rdata")
+        rdata = self._get_ro_section()
         if not rdata:
             return strings
 
@@ -170,7 +184,7 @@ class RustStringParser:
         """
         strings = {}
 
-        rdata = self.backend.get_section_by_name(".rdata")
+        rdata = self._get_ro_section()
         if not rdata:
             return strings
 
@@ -211,7 +225,7 @@ class RustStringParser:
         """
         strings = {}
         text = self.backend.get_section_by_name(".text")
-        rdata = self.backend.get_section_by_name(".rdata")
+        rdata = self._get_ro_section()
         if not text or not rdata:
             return strings
 
@@ -376,6 +390,20 @@ class LangRust(LanguageBase):
         log("Rust compiled binary detected")
         self.user_xrefs = self.get_user_xrefs() or []
         log(f"Found {len(self.user_xrefs)} Rust thread xrefs")
+
+        # Recover trait-object (vtable) dispatch edges the backend's static
+        # analysis missed. Injecting them through user_xrefs reconnects the call
+        # graph so clustering converges to the decompiler's view instead of
+        # over-fragmenting. Backends that can't recover them return [] (default),
+        # so this is a no-op for them.
+        try:
+            vtable_edges = self.backend.recover_vtable_edges()
+        except Exception as e:
+            vtable_edges = []
+            log(f"Rust vtable edge recovery skipped: {e}")
+        if vtable_edges:
+            self.user_xrefs.extend(vtable_edges)
+            log(f"Recovered {len(vtable_edges)} Rust vtable/trait-dispatch edges")
         self._process_strings()
         log(f"Extracted {len(self.strings or {})} Rust strings")
         # self._ensure_rust_entry_alias()
@@ -703,7 +731,18 @@ class LangRust(LanguageBase):
         if not self.lang_match():
             return super().get_entry_point()
 
+        ep = self._select_entry_point()
+        # Guard against a disconnected entry point. On some binaries (observed on
+        # PE Rust) the CRT->main::main link is an indirect call the backend never
+        # resolved, so rust_main detection lands on a function that reaches almost
+        # nothing in the static call graph. Path generation then collapses and the
+        # whole program degenerates into one edgeless cluster. If the chosen EP is
+        # essentially dead, re-root at the dominant reachable function (the real
+        # user main). Strictly gated, so well-connected EPs are returned untouched.
+        return self._connectivity_guarded_ep(ep)
 
+    def _select_entry_point(self) -> Optional[int]:
+        """Run the rust_main detection cascade (no connectivity guard)."""
         # Try explicit rust_main first
         rust_main = self.backend.get_address_for_name("rust_main")
         if rust_main:
@@ -729,6 +768,77 @@ class LangRust(LanguageBase):
 
         # Last resort: nothing matched.
         return None
+
+    # Connectivity guard: the static call graph reachable from a function.
+    _GUARD_MIN_REACH = 16        # an EP reaching fewer than this is "dead"
+    _GUARD_MIN_ALT = 50          # a replacement must reach at least this many
+    _GUARD_TOPK = 40             # only probe the K highest out-degree functions
+
+    def _func_callees(self, fva: int, cache: dict) -> set:
+        """Callee function-starts of `fva` (CALL/indirect edges), memoized."""
+        if fva in cache:
+            return cache[fva]
+        out: set = set()
+        fn = self.backend.get_function_at(Address(fva))
+        if fn is not None:
+            for bb in fn.basic_blocks:
+                for ia in self.backend.instructions(bb.start, bb.end):
+                    for xr in self.backend.get_xrefs_from(ia):
+                        if xr.type in (XrefType.CALL, XrefType.UNKNOWN):
+                            cf = self.backend.get_function_at(xr.target)
+                            if cf is not None:
+                                out.add(int(cf.start))
+        cache[fva] = out
+        return out
+
+    def _reachable(self, start: int, cache: dict, cap: Optional[int] = None) -> set:
+        """Functions reachable from `start` via call edges (optional early stop)."""
+        seen = {int(start)}
+        stack = [int(start)]
+        while stack:
+            x = stack.pop()
+            for y in self._func_callees(x, cache):
+                if y not in seen:
+                    seen.add(y)
+                    if cap is not None and len(seen) >= cap:
+                        return seen
+                    stack.append(y)
+        return seen
+
+    def _connectivity_guarded_ep(self, ep: Optional[int]) -> Optional[int]:
+        if ep is None:
+            return ep
+        ep = int(ep)
+        cache: dict = {}
+        # Cheap path: stop as soon as we confirm the EP is well-connected.
+        if len(self._reachable(ep, cache, cap=self._GUARD_MIN_REACH)) >= self._GUARD_MIN_REACH:
+            return ep
+        # EP is essentially dead — search for the dominant reachable root among
+        # the highest out-degree functions (the real main::main reaches the bulk
+        # of user code). Only runs in this pathological case.
+        try:
+            degree = []
+            for fn in self.backend.functions():
+                cs = self._func_callees(int(fn.start), cache)
+                if cs:
+                    degree.append((len(cs), int(fn.start)))
+            degree.sort(reverse=True)
+            ep_reach = len(self._reachable(ep, cache))
+            best, best_reach = None, 0
+            for _, f in degree[:self._GUARD_TOPK]:
+                r = len(self._reachable(f, cache))
+                if r > best_reach:
+                    best, best_reach = f, r
+            if (best is not None and best != ep
+                    and best_reach >= self._GUARD_MIN_ALT
+                    and best_reach >= 10 * max(1, ep_reach)):
+                log(f"Rust EP connectivity guard: EP 0x{ep:x} reaches only {ep_reach} "
+                    f"function(s); re-rooting at dominant function 0x{best:x} "
+                    f"(reaches {best_reach}).")
+                return best
+        except Exception as e:
+            log(f"Rust EP connectivity guard skipped: {e}")
+        return ep
 
     def _find_rust_main(self, main_addr: Address) -> Optional[int]:
         """Delegate rust_main detection to the active backend.
