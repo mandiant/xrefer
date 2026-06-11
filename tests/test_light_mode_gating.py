@@ -54,7 +54,6 @@ def _make_recording_xrefer(mode):
     o.fix_thunk_xrefs = lambda: calls.append("fix_thunk_xrefs")
     o.populate_xref_addrs = lambda: calls.append("populate_xref_addrs")
     o.cluster_all_non_excluded = lambda: calls.append("cluster_all_non_excluded")
-    o._populate_function_context_tables = lambda: calls.append("context_tables")
     return o, calls
 
 
@@ -71,11 +70,11 @@ def test_light_mode_runs_report_relevant_steps():
 def test_light_mode_skips_interactive_only_steps():
     o, calls = _make_recording_xrefer("light")
     o.run_secondary_analysis()
-    # Indirect-xref propagation, the indirect/combined address population, and
-    # the context-table cache are interactive-only — skipped in light mode.
+    # Indirect-xref propagation and the indirect/combined address population
+    # are interactive-only — skipped in light mode. (Context tables are no
+    # longer eagerly built in ANY mode; the viewer builds them lazily.)
     assert "propagate_xref_nodes" not in calls
     assert "populate_xref_addrs" not in calls
-    assert "context_tables" not in calls
 
 
 def test_full_mode_runs_every_step():
@@ -87,7 +86,6 @@ def test_full_mode_runs_every_step():
         "fix_thunk_xrefs",
         "populate_xref_addrs",
         "cluster_all_non_excluded",
-        "context_tables",
     ):
         assert step in calls, f"full mode must run {step}"
 

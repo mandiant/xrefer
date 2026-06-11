@@ -1939,7 +1939,9 @@ class XRefer:
             self.string_index_cache = master_struct["string_index_cache"]
             self.caller_xrefs_cache = master_struct["caller_xrefs_cache"]
             self.paths = master_struct["paths"]
-            self.table_data = master_struct["table_data"]
+            # New-format DBs no longer persist table_data (the viewer
+            # builds tables lazily); old DBs still load theirs.
+            self.table_data = master_struct.get("table_data", {})
             self.entities = master_struct["entities"]
             self.reverse_entity_lookup_index = master_struct["reverse_entity_lookup_index"]
             self.entity_xrefs = master_struct["entity_xrefs"]
@@ -2019,7 +2021,6 @@ class XRefer:
             - string_index_cache: String lookup cache
             - caller_xrefs_cache: Cross-reference cache
             - paths: All analyzed paths
-            - table_data: Function context tables
             - entities: All identified entities
             - reverse_entity_lookup_index: Entity lookup cache
             - entity_xrefs: Entity cross-references
@@ -2039,7 +2040,6 @@ class XRefer:
                 "string_index_cache": self.string_index_cache,
                 "caller_xrefs_cache": self.caller_xrefs_cache,
                 "paths": self.paths,
-                "table_data": self.table_data,
                 "entities": self.entities,
                 "reverse_entity_lookup_index": self.reverse_entity_lookup_index,
                 "entity_xrefs": self.entity_xrefs,
@@ -2253,9 +2253,9 @@ class XRefer:
         self.sync_image_base_cs(delta)
         self.lang.entry_point += delta
 
-        log("Image-base synced, re-populating context tables for all functions...")
+        # Addresses shifted: wipe cached context tables; the viewer
+        # rebuilds them lazily on first visit.
         self.table_data = {}
-        self._populate_function_context_tables()
         hide_wait_box()
         self.save_analysis()
 
@@ -2883,13 +2883,6 @@ class XRefer:
 
         log(f"Cleared cache for {len(affected_funcs)} function tables")
 
-    def _populate_function_context_tables(self) -> None:
-        """
-        Populate the function context tables with data.
-        """
-        for func_ea in self.global_xrefs:
-            self.table_data[func_ea] = self.create_sorted_table(func_ea)
-
     def create_sorted_table(self, func_ea: int) -> Dict[str, Dict[str, Union[List[str], OrderedDict]]]:
         """
         Create a sorted table of cross-references for a function.
@@ -3068,8 +3061,10 @@ class XRefer:
         """
         Perform the full analysis, loading configuration and categories, sifting references, and generating context tables.
         """
-        if self.table_data:
-            return self.table_data
+        if self.global_xrefs:
+            # Analysis already ran in this session. (The old sentinel keyed
+            # on the eagerly-built table_data, which is now lazy-only.)
+            return
 
         log("Starting analysis...")
         self.load_categories()
@@ -3162,9 +3157,6 @@ class XRefer:
             # per-call-path walk.
             self.populate_xref_addrs()
         self.cluster_all_non_excluded()
-        if self.mode == 'full':
-            log("Populating function context tables...")
-            self._populate_function_context_tables()
 
     def run_standalone_secondary_analysis(self) -> None:
         """
