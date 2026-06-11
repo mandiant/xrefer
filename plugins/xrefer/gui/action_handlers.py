@@ -89,6 +89,9 @@ class ClusterEverythingHandler(idaapi.action_handler_t):
             xrefer_obj = plugin_instance.xrefer_view.xrefer_obj
             plugin_instance.xrefer_view.state_machine.clear_cluster_history()
             xrefer_obj.cluster_all_non_excluded(force_no_cache=True)
+            # Cluster membership and labels may have changed wholesale; drop
+            # the view's cached cluster layouts and func->cluster map.
+            plugin_instance.xrefer_view._invalidate_cluster_render_caches()
 
             # Update view if in cluster-related view
             current_state = plugin_instance.xrefer_view.state_machine.current_state

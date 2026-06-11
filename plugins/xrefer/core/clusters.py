@@ -169,7 +169,18 @@ class FunctionalCluster:
 
             return f"{centered_addr}\n{centered_name}"
 
-        def format_node_label(node: int) -> str:
+        # Resolve "real intermediate" membership once: every node on any
+        # intermediate path that is not a member, a cluster reference or the
+        # root. is_real_intermediate answers per node with a full scan over
+        # intermediate_paths; this graph build asks per edge endpoint, so the
+        # per-call scans dominated large-cluster rendering.
+        path_nodes: Set[int] = set()
+        for paths in self.intermediate_paths.values():
+            for path in paths:
+                path_nodes.update(path)
+        real_intermediates = path_nodes - self.nodes - set(self.cluster_refs) - {self.root_node}
+
+        def _format_node_label_uncached(node: int) -> str:
             """
             Format label for a node, handling cluster references and function nodes.
             """
@@ -199,12 +210,23 @@ class FunctionalCluster:
             label = format_function_label(node)
 
             # Add intermediate marker only for true intermediates
-            if self.is_real_intermediate(node):
+            if node in real_intermediates:
                 lines = label.split("\n")
                 width = max(len(line) for line in lines)
                 marker = center_text("(i)", width)
                 label = f"{label}\n{marker}"
 
+            return label
+
+        # Labels are requested once per edge endpoint; memoize so each node
+        # pays its backend name lookup / analysis scan only once per build.
+        label_cache: Dict[int, str] = {}
+
+        def format_node_label(node: int) -> str:
+            label = label_cache.get(node)
+            if label is None:
+                label = _format_node_label_uncached(node)
+                label_cache[node] = label
             return label
 
         g = nx.DiGraph()
@@ -233,7 +255,7 @@ class FunctionalCluster:
                         # If intermediate nodes are not included, skip edges that introduce real intermediates
                         if not include_intermediate:
                             # If either node is a real intermediate node, skip this edge
-                            if self.is_real_intermediate(curr) or self.is_real_intermediate(next_node):
+                            if curr in real_intermediates or next_node in real_intermediates:
                                 continue
 
                         # Skip if we've already processed this edge
@@ -252,7 +274,7 @@ class FunctionalCluster:
         candidate_nodes.update(self.cluster_refs.keys())
 
         for node in candidate_nodes:
-            if not include_intermediate and self.is_real_intermediate(node):
+            if not include_intermediate and node in real_intermediates:
                 # Skip intermediate nodes if not including them
                 continue
             node_label = format_node_label(node)

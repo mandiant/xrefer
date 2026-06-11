@@ -218,6 +218,12 @@ class XReferView(idaapi.simplecustviewer_t):
         # parallel to graph_cache (not inside it) because graph_cache is
         # serialized to the .xrefer DB and must keep its existing tuple shape.
         self._graph_artifact_colors: Dict[Any, Dict[str, int]] = {}
+        # Cursor-independent ASCII layouts of the cluster graphs (see
+        # _cluster_ascii_lines). View-local on purpose: unlike graph_cache it
+        # is never serialized into the .xrefer DB, so a reload can't
+        # resurrect layouts with stale function names.
+        self._cluster_ascii_cache: Dict[Any, List[str]] = {}
+        self._cluster_ascii_token: Any = None
 
         if self.xrefer_obj.lang:
             self.create()
@@ -472,7 +478,25 @@ class XReferView(idaapi.simplecustviewer_t):
 
             def allsegs_moved(self, info) -> int:
                 self.xrefer_view.xrefer_obj.sync_image_base(False)
+                # Cached cluster layouts and the func->cluster map embed
+                # pre-rebase addresses.
+                self.xrefer_view._invalidate_cluster_render_caches()
                 self.xrefer_view.update(True)
+                return 0
+
+            def renamed(self, *args) -> int:
+                # Cached cluster-graph layouts embed function names; drop
+                # them when a cluster member is renamed so the next render
+                # picks up the new name. Non-cluster renames are ignored
+                # (they never appear in those layouts).
+                try:
+                    ea = int(args[0])
+                except (IndexError, TypeError, ValueError):
+                    return 0
+                view = self.xrefer_view
+                if view.xrefer_obj.clusters and ea in view._func_to_cluster_ids():
+                    view._cluster_ascii_cache = {}
+                    view._cluster_ascii_token = None
                 return 0
 
         # Setup hooks if they don't exist
@@ -2988,15 +3012,26 @@ class XReferView(idaapi.simplecustviewer_t):
         self._emit_binary_summary_body(binary_desc, showing_report, INDENT, LINE_WIDTH)
         self.AddLine("")
 
-        try:
+        def build_layout() -> Optional[List[str]]:
             graph = create_cluster_relationship_graph(
                 self.xrefer_obj.clusters,
                 self.xrefer_obj.cluster_analysis,
                 paths=self.xrefer_obj.paths,
                 hide_library=self.state_machine.hide_library_clusters,
             )
-
             if not graph:
+                return None
+            # For single node case, add some padding to make it visible
+            if len(graph.nodes()) == 1:
+                return ["", "", *ascii_graphs.graph_to_ascii(graph).splitlines(), "", ""]
+            return ascii_graphs.graph_to_ascii(graph).splitlines()
+
+        try:
+            # Layout is cursor-independent and cached per library-visibility
+            # toggle; only the colorization below runs per redraw.
+            graph_lines = self._cluster_ascii_lines(("overview", self.state_machine.hide_library_clusters), build_layout)
+
+            if graph_lines is None:
                 self.AddLine(f"{INDENT}FAILED TO CREATE CLUSTER GRAPH")
                 return
 
@@ -3005,12 +3040,6 @@ class XReferView(idaapi.simplecustviewer_t):
             self.AddLine("")
 
             try:
-                # For single node case, add some padding to make it visible
-                if len(graph.nodes()) == 1:
-                    graph_lines = ["", "", *ascii_graphs.graph_to_ascii(graph).splitlines(), "", ""]
-                else:
-                    graph_lines = ascii_graphs.graph_to_ascii(graph).splitlines()
-
                 for line in graph_lines:
                     colored_line = self._format_cluster_graph_line(line)
                     self.AddLine(f"{INDENT}    {colored_line}")
@@ -3105,6 +3134,59 @@ class XReferView(idaapi.simplecustviewer_t):
         analysis = self.xrefer_obj.cluster_analysis or {}
         data = find_cluster_analysis(analysis, cluster_id) or {}
         return (data.get("label") or "").strip()
+
+    def _invalidate_cluster_render_caches(self) -> None:
+        """Drop every view-side cache derived from cluster data: the ASCII
+        layouts of the cluster graphs and the func→cluster-ids map. Called
+        when cluster data or the addresses/names baked into it change
+        (cluster re-analysis, image rebase, cluster-function rename)."""
+        self._cluster_ascii_cache = {}
+        self._cluster_ascii_token = None
+        self._func_to_cluster_ids_cache = None
+
+    def _cluster_ascii_lines(self, key: Any, build: Callable[[], Optional[List[str]]]) -> Optional[List[str]]:
+        """Return the (cached) cursor-independent ASCII layout for a cluster
+        graph view.
+
+        The Sugiyama layout is the expensive part of cluster-graph rendering
+        — hundreds of milliseconds and superlinear in node count — and it
+        does not depend on the cursor: the per-cursor highlight is applied
+        line by line afterwards. Caching the raw ASCII lines per view key
+        means cluster sync pays only the colorization pass on each cursor
+        landing instead of a full relayout.
+
+        Cache entries are additionally guarded by the identity of the
+        clusters / cluster_analysis objects: any re-analysis or DB reload
+        reassigns those, which flushes the cache even if an explicit
+        invalidation site is ever missed. The wait box is shown only while
+        actually building (cache misses); hits render instantly.
+
+        ``build`` returns the layout lines, or None on failure — failures
+        are reported by the caller and never cached.
+        """
+        token = (
+            id(self.xrefer_obj.clusters),
+            len(self.xrefer_obj.clusters or []),
+            id(self.xrefer_obj.cluster_analysis),
+            # paths is mutated in place by secondary-EP analysis and feeds
+            # the overview graph; the EP set tracks that mutation.
+            tuple(sorted(self.xrefer_obj.paths or {})),
+        )
+        if token != self._cluster_ascii_token:
+            self._cluster_ascii_cache = {}
+            self._cluster_ascii_token = token
+        lines = self._cluster_ascii_cache.get(key)
+        if lines is None:
+            # Synchronous main-thread work; IDA nests show/hide pairs.
+            idaapi.show_wait_box("HIDECANCEL\nGenerating graph...")
+            try:
+                lines = build()
+            finally:
+                idaapi.hide_wait_box()
+            if lines is None:
+                return None
+            self._cluster_ascii_cache[key] = lines
+        return lines
 
     def _func_to_cluster_ids(self) -> Dict[int, Set[int]]:
         """Build (lazily) a mapping ``func_ea → {cluster_ids}`` covering
@@ -4045,22 +4127,6 @@ class XReferView(idaapi.simplecustviewer_t):
 
             cluster_data = find_cluster_analysis(self.xrefer_obj.cluster_analysis, cluster_id)
 
-            # Gather all nodes (including subclusters)
-            def gather_all_cluster_nodes(c, node_set):
-                node_set.update(c.nodes)
-                node_set.add(c.root_node)
-                node_set.update(c.cluster_refs.keys())
-                for sc in c.subclusters:
-                    gather_all_cluster_nodes(sc, node_set)
-
-            all_nodes = set()
-            gather_all_cluster_nodes(cluster, all_nodes)
-
-            # Also gather global nodes from all top-level clusters
-            global_all_nodes = set()
-            for top_c in self.xrefer_obj.clusters:
-                gather_all_cluster_nodes(top_c, global_all_nodes)
-
             # If the user has explicitly entered the intermediate-paths
             # sub-view (M key), render that instead of the cluster's
             # node graph. Replaces the previous auto-trigger that fired
@@ -4349,23 +4415,7 @@ class XReferView(idaapi.simplecustviewer_t):
             func_ea: Optional function EA to highlight in the graph
         """
 
-        # Get view mode from cluster manager
-        current = self.state_machine.cluster_manager.get_current_cluster()
         simplified = True
-
-        # Create graph based on view mode
-        graph = cluster.to_graph(cluster_analysis=self.xrefer_obj.cluster_analysis, include_intermediate=not simplified)
-
-        # Add xrefs node before root node
-        xref_addrs = set()
-        for xref in idautils.XrefsTo(ida_idaapi.ea_t(cluster.root_node)):
-            # Only include code references
-            if ida_bytes.is_code(ida_bytes.get_full_flags(xref.frm)):
-                xref_addrs.add(xref.frm)
-
-        # # Show current view mode
-        # mode_str = "SIMPLIFIED" if simplified else "FULL"
-        # self.AddLine(f'{self.INDENT}\x01{ida_lines.SCOLOR_DNAME}{mode_str} VIEW MODE - Press S to toggle\x02{ida_lines.SCOLOR_DNAME}')
 
         # Show node counts
         interesting_count = len(cluster.nodes)
@@ -4376,9 +4426,14 @@ class XReferView(idaapi.simplecustviewer_t):
         # Calculate header offset by counting actual header lines
         analysis_data = find_cluster_analysis(self.xrefer_obj.cluster_analysis, cluster.id)
 
+        def build_layout() -> List[str]:
+            graph = cluster.to_graph(cluster_analysis=self.xrefer_obj.cluster_analysis, include_intermediate=not simplified)
+            return ascii_graphs.graph_to_ascii(graph).splitlines()
+
         try:
-            # Convert to ASCII and display
-            graph_lines = ascii_graphs.graph_to_ascii(graph).splitlines()
+            # Layout is cursor-independent and cached; only the per-line
+            # highlight colorization below runs on every cursor landing.
+            graph_lines = self._cluster_ascii_lines(("cluster", cluster.id), build_layout)
             highlighted_position = None
 
             for i, line in enumerate(graph_lines):
@@ -4839,20 +4894,21 @@ class XReferView(idaapi.simplecustviewer_t):
         # Get appropriate handler or use default table context
         state_handler = state_actions.get(self.state_machine.current_state, self.handle_table_context)
 
-        # Graph rendering (artifact path graphs via G, cluster graphs,
-        # neighborhood graphs) can be slow for large/complex graphs —
-        # the ASCII layout especially. Put up IDA's wait box so the user
-        # gets "Generating graph..." feedback instead of a seemingly
-        # frozen UI. Simple graphs render instantly and the box just
-        # flashes. This is all synchronous on the main thread, so the
-        # show/hide pair is safe (unlike background-thread wait-box use).
+        # Graph rendering (artifact path graphs via G, neighborhood graphs)
+        # can be slow for large/complex graphs — the ASCII layout
+        # especially. Put up IDA's wait box so the user gets "Generating
+        # graph..." feedback instead of a seemingly frozen UI. Simple
+        # graphs render instantly and the box just flashes. This is all
+        # synchronous on the main thread, so the show/hide pair is safe
+        # (unlike background-thread wait-box use). Cluster graph states are
+        # absent on purpose: their layouts are cached (_cluster_ascii_lines)
+        # and the box is shown there only on an actual rebuild, so cluster
+        # sync doesn't flash a wait box on every cursor landing.
         graph_states = {
             self.state_machine.graph,
             self.state_machine.simplified_graph,
             self.state_machine.pinned_graph,
             self.state_machine.pinned_simplified_graph,
-            self.state_machine.cluster_graphs,
-            self.state_machine.pinned_cluster_graphs,
             self.state_machine.neighborhood_graph,
             self.state_machine.pinned_neighborhood_graph,
         }
