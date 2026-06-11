@@ -394,7 +394,15 @@ class XRefer:
 
         if self.llm_lookups and self.mode == 'full':
             lib_list = [x[1] for x in self.lang.lib_refs]
-            _, self.categories["lib_categories"] = Categorizer.categorize(lib_list, self.categories["libs"], type="lib")
+            # Categorization is a nice-to-have on top of the default
+            # grouping; an LLM failure (auth, connectivity, timeout — the
+            # processor itself only absorbs rate limits) must not abort the
+            # whole analysis before it is saved. The per-item fallback below
+            # already handles anything left uncategorized.
+            try:
+                _, self.categories["lib_categories"] = Categorizer.categorize(lib_list, self.categories["libs"], type="lib")
+            except Exception as err:
+                log(f"Library categorization failed ({err}) — keeping default grouping for this run")
 
         for lib_ref in self.lang.lib_refs:
             try:
@@ -688,7 +696,13 @@ class XRefer:
         categorize_apis = self.llm_lookups and self.mode == "full"
         if categorize_apis:
             api_list = [x[1] for x in entries]
-            _, self.categories["api_categories"] = Categorizer.categorize(api_list, self.categories["apis"])
+            # Same degrade-not-abort contract as sift_libs: the per-item
+            # except below falls back to the module name for anything the
+            # LLM did not categorize.
+            try:
+                _, self.categories["api_categories"] = Categorizer.categorize(api_list, self.categories["apis"])
+            except Exception as err:
+                log(f"Import categorization failed ({err}) — keeping module-name grouping for this run")
         for ea, name, module_name in entries:
             if categorize_apis:
                 try:

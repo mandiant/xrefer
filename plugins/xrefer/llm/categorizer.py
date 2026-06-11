@@ -91,13 +91,19 @@ class Categorizer:
 
         # Process uncategorized items
         index_results = processor.process_items(items=uncategorized, prompt_type=PromptType.CATEGORIZER, categories=categories, type=type)
-        index_results = index_results["category_assignments"]
+        # A failed call (rate limit, transient API error) yields an empty
+        # result rather than category_assignments; degrade to the default
+        # grouping instead of KeyError-aborting the whole analysis.
+        assignments = index_results.get("category_assignments", {})
+        if not assignments:
+            log("Categorization unavailable (rate limit / API error) — items keep their default grouping this run; re-run analysis later to fill in")
+            return categorized_items, categories
 
         # Convert index-based results back to item mappings
         named_results = {}
         for i, item in enumerate(uncategorized):
-            if str(i) in index_results:
-                named_results[item] = index_results[str(i)]
+            if str(i) in assignments:
+                named_results[item] = assignments[str(i)]
 
         # Merge results with existing categorized items
         categorized_items.update(named_results)
