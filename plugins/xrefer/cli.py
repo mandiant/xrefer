@@ -480,7 +480,12 @@ def cli():
     parser.add_argument("file", type=Path, help="Path to the file to analyze")
     parser.add_argument("--backend", choices=available_backends, required=True, help=f"Analysis backend to use (available: {', '.join(available_backends)})")
     parser.add_argument("--save", action="store_true", help="Save changes to database/project")
-    parser.add_argument("--auto-analysis", action="store_true", help="Run auto analysis (default: True)", default=True)
+    parser.add_argument(
+        "--auto-analysis",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run the disassembler's auto-analysis when opening the file (default: on)",
+    )
     parser.add_argument(
         "--mode",
         choices=["light", "full"],
