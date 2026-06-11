@@ -3140,9 +3140,13 @@ class XRefer:
 
         log(f"Cleared {len(affected_entities)} affected graph cache entries")
 
-    def generate_simple_call_paths(self, initial: int, final: int, preds: Dict[int, Set[int]], max_limit: int = 10000) -> List[List[int]]:
+    def generate_simple_call_paths(self, initial: int, final: int, preds: Dict[int, Set[int]], max_limit: int = 10000, allowed: Optional[Set[int]] = None) -> List[List[int]]:
         """
         Generate call paths between two functions.
+
+        Paths are simple (node-distinct, via the ``ref in current_path``
+        cycle check), so path length is bounded by the graph size and the
+        enumeration always terminates without a depth cap.
 
         Args:
             initial (int): The starting function address.
@@ -3151,7 +3155,15 @@ class XRefer:
                 set of function starts that reference it. Built once per run
                 by inverting caller_xrefs_cache (see
                 generate_all_simple_call_paths_for_ep).
-            max_limit (int): The maximum number of paths to generate. Defaults to 10000.
+            max_limit (int): Cap on both the number of completed paths and
+                the working-buffer size. Defaults to 10000.
+            allowed (Optional[Set[int]]): When given, expansion is restricted
+                to these nodes. The caller passes the intersection of
+                backward-reachable-from-``final`` and forward-reachable-from-
+                ``initial``; every node on any initial->final path lies in
+                that set, so the pruning never drops a valid simple path but
+                stops the BFS from wandering into branches that cannot
+                complete (which previously burned the whole buffer).
 
         Returns:
             List[List[int]]: A list of call paths between the initial and final functions.
@@ -3179,27 +3191,20 @@ class XRefer:
             steps += 1
             if steps & 0x3FF == 0 and check_cancelled():
                 raise AnalysisCancelled("path building cancelled")
-            refs: Set[int] = set()
-            target = path_buffer[0][-1]
 
-            if len(path_buffer[0]) < max_limit:
-                # The shared set from preds is only iterated, never mutated.
-                refs = preds.get(target, set())
-            if refs:
-                current_path = path_buffer.popleft()
-                for ref in refs:
-                    if ref in current_path:
-                        continue
-                    if ref == initial:
-                        record_path((current_path + [ref])[::-1])
-                    else:
-                        path_buffer.append(current_path + [ref])
-
-            elif initial not in path_buffer[0]:
-                path_buffer.popleft()
-
-            elif initial in path_buffer[0]:
-                record_path(path_buffer.popleft()[::-1])
+            current_path = path_buffer.popleft()
+            target = current_path[-1]
+            # The shared set from preds is only iterated, never mutated.
+            for ref in preds.get(target, ()):
+                if ref in current_path:
+                    continue
+                if ref == initial:
+                    # Completion is checked before the pruning filter so the
+                    # allowed set can only ever skip dead expansion, never a
+                    # finished path.
+                    record_path((current_path + [ref])[::-1])
+                elif allowed is None or ref in allowed:
+                    path_buffer.append(current_path + [ref])
 
         return all_paths
 
@@ -3228,6 +3233,19 @@ class XRefer:
             for tgt in targets:
                 preds.setdefault(tgt, set()).add(caller)
 
+        # Forward reachability from the EP over the same cache, once per run.
+        # A leaf outside this set provably has no path, so its enumeration is
+        # skipped outright — dead leaves (e.g. unexported-entry DLL exports)
+        # used to burn the entire path buffer producing nothing.
+        forward: Set[int] = {self.current_analysis_ep}
+        frontier = deque([self.current_analysis_ep])
+        while frontier:
+            node = frontier.popleft()
+            for nxt in self.caller_xrefs_cache.get(node, ()):
+                if nxt not in forward:
+                    forward.add(nxt)
+                    frontier.append(nxt)
+
         with cancellable_phase():
             for idx, func_ea in enumerate(self.leaf_funcs, 1):
                 if check_cancelled():
@@ -3235,10 +3253,25 @@ class XRefer:
                 if self.current_analysis_ep != func_ea:
                     # Check if the paths from current_analysis_ep to func_ea are already stored
                     if func_ea not in self.paths[self.current_analysis_ep]:
+                        if func_ea not in forward:
+                            continue
                         leaf_fn = self._backend.get_function_at(Address(func_ea))
                         leaf_name = leaf_fn.name if leaf_fn else f"{func_ea:#x}"
                         log(f"Building call paths [{idx}/{total}] :: {ep_name} -> {leaf_name}")
-                        _paths = self.generate_simple_call_paths(self.current_analysis_ep, func_ea, preds)
+                        # Backward reachability from this leaf; expansion is
+                        # restricted to nodes that both reach the leaf and
+                        # are reachable from the EP — every such node lies on
+                        # some EP->leaf path, so pruning is lossless and the
+                        # BFS never wanders into branches that cannot finish.
+                        backward: Set[int] = {func_ea}
+                        bfrontier = deque([func_ea])
+                        while bfrontier:
+                            node = bfrontier.popleft()
+                            for caller in preds.get(node, ()):
+                                if caller not in backward:
+                                    backward.add(caller)
+                                    bfrontier.append(caller)
+                        _paths = self.generate_simple_call_paths(self.current_analysis_ep, func_ea, preds, allowed=backward & forward)
                         if len(_paths):
                             self.paths[self.current_analysis_ep][func_ea] = _paths
 

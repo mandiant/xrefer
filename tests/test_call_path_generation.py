@@ -180,3 +180,81 @@ def test_ep_loop_builds_predecessor_map_from_cache():
     assert _as_path_set(xr.paths[EP][LEAF]) == {(EP, A, LEAF), (EP, B, LEAF)}
     # Unreachable leaves get no entry at all (len()==0 paths are not stored).
     assert D not in xr.paths[EP]
+
+
+def test_unreachable_leaf_skips_enumeration_entirely(monkeypatch):
+    # Forward reachability from the EP is computed once; a leaf outside it
+    # must never even invoke the BFS (dead leaves used to burn the whole
+    # path buffer).
+    xr = _bare_xrefer()
+    xr._backend = _FakeBackend()
+    xr.current_analysis_ep = EP
+    xr.paths = {}
+    xr.leaf_funcs = {D}  # D exists but nothing reachable from EP calls it
+    xr.caller_xrefs_cache = _cache_from_graph({EP: [A], A: [LEAF], C: [D]})
+
+    calls = []
+    original = XRefer.generate_simple_call_paths
+
+    def _counting(self, *a, **k):
+        calls.append(1)
+        return original(self, *a, **k)
+
+    monkeypatch.setattr(XRefer, "generate_simple_call_paths", _counting)
+    xr.generate_all_simple_call_paths_for_ep()
+    assert calls == []  # skipped outright
+    assert D not in xr.paths[EP]
+
+
+def _allowed_for(graph, initial, final):
+    """The ep-loop's pruning set: backward-from-final ∩ forward-from-initial."""
+    preds = _preds_from_graph(graph)
+    succs = {src: set(dsts) for src, dsts in graph.items()}
+    forward = {initial}
+    frontier = [initial]
+    while frontier:
+        node = frontier.pop()
+        for nxt in succs.get(node, ()):
+            if nxt not in forward:
+                forward.add(nxt)
+                frontier.append(nxt)
+    backward = {final}
+    frontier = [final]
+    while frontier:
+        node = frontier.pop()
+        for caller in preds.get(node, ()):
+            if caller not in backward:
+                backward.add(caller)
+                frontier.append(caller)
+    return backward & forward
+
+
+def test_pruning_is_lossless_on_random_graphs():
+    rng = random.Random(0xBEEF)
+    for _ in range(25):
+        n_nodes = rng.randint(4, 14)
+        nodes = [0x1000 * (i + 1) for i in range(n_nodes)]
+        graph = {}
+        for src in nodes:
+            fanout = rng.randint(0, min(4, n_nodes - 1))
+            graph[src] = rng.sample([n for n in nodes if n != src], fanout)
+        initial, final = nodes[0], nodes[-1]
+        xr = _bare_xrefer()
+        preds = _preds_from_graph(graph)
+        unpruned = xr.generate_simple_call_paths(initial, final, preds)
+        pruned = xr.generate_simple_call_paths(initial, final, preds, allowed=_allowed_for(graph, initial, final))
+        assert _as_path_set(pruned) == _as_path_set(unpruned)
+
+
+def test_pruning_ignores_dead_side_branches():
+    # A bushy dead side-branch off the live path: pruned expansion must
+    # never enqueue any of its nodes.
+    dead = [0xD000 + i * 0x10 for i in range(50)]
+    graph = {EP: [A], A: [LEAF] + dead}
+    graph.update({d: [] for d in dead})
+    xr = _bare_xrefer()
+    preds = _preds_from_graph(graph)
+    allowed = _allowed_for(graph, EP, LEAF)
+    assert not (set(dead) & allowed)
+    paths = xr.generate_simple_call_paths(EP, LEAF, preds, allowed=allowed)
+    assert _as_path_set(paths) == {(EP, A, LEAF)}
