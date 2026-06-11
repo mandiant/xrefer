@@ -978,9 +978,12 @@ class XReferView(idaapi.simplecustviewer_t):
 
         # Typing surfaces: keys not claimed by a handler above feed the
         # filter (search narrows the home table; artifact search scans
-        # the whole binary).
+        # the whole binary). "Claimed" includes same-state handling —
+        # X/G on a zero-xref row logs and stays put, and that keystroke
+        # must not ALSO leak into the filter text (live-IDA finding:
+        # 'socket' became 'socketx' on a guarded pivot attempt).
         if state_after_handling_key in (self.state_machine.search, self.state_machine.artifact_search):
-            if state_before_handling_key == state_after_handling_key:
+            if state_before_handling_key == state_after_handling_key and not should_update:
                 self.handle_search_input(vkey, shift)
                 should_update = True
 
