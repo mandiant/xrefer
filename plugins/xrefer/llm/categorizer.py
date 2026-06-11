@@ -12,11 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict, List, Tuple
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Dict, List, Tuple
 
 from xrefer.core.helpers import log
 from xrefer.llm.base import ModelConfig, PromptType
-from xrefer.llm.processor import LLMProcessor
+
+if TYPE_CHECKING:
+    from xrefer.llm.processor import LLMProcessor
 
 CATEGORIES = [
     "File and Path I/O",
@@ -47,6 +51,9 @@ class Categorizer:
         if not cls._processor:
             if not cls.current_config:
                 raise ValueError("Model configuration not set. Use set_model_config() first.")
+            # Lazy: LLMProcessor's module pulls dspy/litellm (~4s import),
+            # deferred from plugin load to first LLM use.
+            from xrefer.llm.processor import LLMProcessor
             cls._processor = LLMProcessor()
             cls._processor.set_model_config(cls.current_config)
         return cls._processor

@@ -12,13 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import base, processor
+# NOTE: `processor` is deliberately NOT imported eagerly — its module pulls
+# dspy/litellm, a measured ~4s import chain that would otherwise run at IDA
+# plugin load (core/analyzer imports this package at plugin scan time). It
+# loads on first LLM use via the lazy accessors in cluster_analyzer /
+# categorizer; `import xrefer.llm.processor` still works directly.
+from . import base
 from .cluster_analyzer import ClusterAnalyzer
 from .categorizer import Categorizer, CATEGORIES
 
 __all__ = [
     "base",
-    "processor",
     "ClusterAnalyzer",
     "Categorizer",
     "CATEGORIES",

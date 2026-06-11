@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import re
 import secrets
 from contextlib import contextmanager
@@ -20,7 +22,15 @@ from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Set
 
 from xrefer.core.helpers import cancellable_phase, check_cancelled, log
 from xrefer.llm.base import ModelConfig, PromptType
-from xrefer.llm.processor import LLMProcessor
+
+
+def _llm_processor_cls():
+    """Lazy import of LLMProcessor. Its module pulls dspy/litellm — a
+    measured ~4s import chain that must not be paid at IDA plugin load
+    (xrefer.llm is imported by core/analyzer, which loads at plugin scan
+    time). First LLM use pays it once, behind a wait box."""
+    from xrefer.llm.processor import LLMProcessor
+    return LLMProcessor
 
 
 # Realistic upper bound on response tokens for ESTIMATE math. Some models
@@ -219,6 +229,7 @@ def _measure(text: str, model: Optional[str]) -> str:
 if TYPE_CHECKING:
     from xrefer.core.clusters import FunctionalCluster
     from xrefer.core.analyzer import XRefer
+    from xrefer.llm.processor import LLMProcessor
 
 
 class ClusterAnalyzer:
@@ -233,7 +244,7 @@ class ClusterAnalyzer:
         if not cls._processor:
             if not cls.current_config:
                 raise ValueError("Model configuration not set. Use set_model_config() first.")
-            cls._processor = LLMProcessor()
+            cls._processor = _llm_processor_cls()()
             cls._processor.set_model_config(cls.current_config)
         return cls._processor
 
@@ -838,7 +849,7 @@ class ClusterAnalyzer:
             # processor renders with the right adapter (JSONAdapter for Ollama,
             # ChatAdapter for hosted) — the estimate is for this model, not for
             # whatever model was configured globally last.
-            messages = LLMProcessor().render_request_messages(
+            messages = _llm_processor_cls()().render_request_messages(
                 PromptType.CLUSTER_ANALYZER, cluster_data,
                 model_id=xrefer_obj.settings.get("llm_model_id"))
             rendered = True
@@ -920,7 +931,7 @@ class ClusterAnalyzer:
             # processor renders with the right adapter (JSONAdapter for Ollama,
             # ChatAdapter for hosted) — the estimate is for this model, not for
             # whatever model was configured globally last.
-            messages = LLMProcessor().render_request_messages(
+            messages = _llm_processor_cls()().render_request_messages(
                 PromptType.CLUSTER_ANALYZER, cluster_data,
                 model_id=xrefer_obj.settings.get("llm_model_id"))
             rendered = True
@@ -1181,7 +1192,7 @@ class ClusterAnalyzer:
                 info = {}
             context_window = info.get("max_input_tokens") or info.get("max_tokens") or None
             try:
-                kwargs = LLMProcessor()._build_lm_kwargs(ModelConfig(model_id=model_id, api_key=""))
+                kwargs = _llm_processor_cls()()._build_lm_kwargs(ModelConfig(model_id=model_id, api_key=""))
                 max_response = kwargs.get("max_tokens")
             except Exception:
                 max_response = None
