@@ -125,15 +125,16 @@ class ContextHelp:
             # crowded cluster-graph view it yields its slot to the non-obvious
             # toggles (R/J), while still surfacing in roomier graph/trace/list views.
             Action("dbl-click", "select / deselect the artifact", MS, {"base"}, hint="select", weight=82),
-            Action("dbl-click", "jump to the address", MS, {*GRAPH, *CLUSTER_GRAPH, *NEIGHBORHOOD, *TRACE, *LISTS}, hint="jump", weight=64),
+            Action("dbl-click", "jump to the address", MS, {*GRAPH, *CLUSTER_GRAPH, *NEIGHBORHOOD, *TRACE, *LISTS, "artifact search"}, hint="jump", weight=64),
             Action("hover", "show a details tooltip", MS, {"orphans", *NEIGHBORHOOD, *LISTS}, hint="details", weight=20),
 
             # ----- Global keyboard ------------------------------------------------
             Action("ESC", "go back / return to IDA", KB),
             Action("ENTER", "return to the home view", KB),
-            # H is global EXCEPT in search, where the keystroke types into
-            # the filter (there is deliberately no search→help arm).
-            Action("H", "show / hide the full help", KB, hint="full help", exclude_states={"search"}),
+            # H is global EXCEPT in the typing surfaces (search, artifact
+            # search), where the keystroke types into the filter (there is
+            # deliberately no →help arm from either).
+            Action("H", "show / hide the full help", KB, hint="full help", exclude_states={"search", "artifact search"}),
             Action("N", "rename the function / reference under the cursor", KB),
             # ESC teased only where the view is otherwise sparse.
             Action("ESC", "exit search", KB, {"search"}, hint="exit", weight=40),
@@ -141,6 +142,7 @@ class ContextHelp:
 
             # ----- Home (base) keyboard ------------------------------------------
             Action("S", "search / filter the view", KB, {"base"}, hint="search", weight=50),
+            Action("Shift+S", "search artifacts across the whole binary", KB, {"base"}, hint="search all", weight=49),
             Action("S", "filter the rows (type to narrow, ESC clears)", KB, {"full trace", "orphans", "clusters"}, hint="filter", weight=60),
             Action("T", "trace API calls (cycle scopes)", KB, {"base"}, hint="trace", weight=64),
             Action("C", "cluster relationship graph", KB, {"base"}, hint="clusters", weight=80),
@@ -160,7 +162,7 @@ class ContextHelp:
             Action("E", "expand / collapse all table sections", KB, {"base", "orphans"}, hint="expand all", weight=78),
 
             # ----- G: context-dependent ------------------------------------------
-            Action("G", "artifact path graph", KB, {"base", "search"}, hint="paths", weight=76),
+            Action("G", "artifact path graph", KB, {"base", "search", "artifact search"}, hint="paths", weight=76),
             Action("G", "pin / unpin the graph", KB, set(GRAPH), hint="pin", weight=76),
             Action("G", "pin / unpin the cluster graph", KB, set(CLUSTER_GRAPH), hint="pin", weight=76),
             Action("G", "open the ATT&CK heat-grid popup", KB, {"attack matrix"}, hint="heat-grid", weight=80),
@@ -194,6 +196,11 @@ class ContextHelp:
             # ----- Search --------------------------------------------------------
             Action("type", "filter the current view", KB, {"search"}, hint="filter", weight=90),
             Action("X", "cross-references for the artifact", KB, {"search"}, hint="xrefs", weight=60),
+
+            # ----- Artifact search (binary-wide, Shift+S) -------------------------
+            Action("type", "filter artifacts binary-wide", KB, {"artifact search"}, hint="filter", weight=90),
+            Action("X", "cross-references for the artifact", KB, {"artifact search"}, hint="xrefs", weight=60),
+            Action("ESC", "exit to home", KB, {"artifact search"}, hint="exit", weight=40),
 
             # ----- Orphans -------------------------------------------------------
             Action("O", "exit the orphan artifacts view", KB, {"orphans"}, hint="exit", weight=60),

@@ -40,6 +40,7 @@ ENTER_EXCEPTIONS = {
 HELP_EXCEPTIONS = {
     "help",  # H toggles back out via the revert arms, not start_help
     "search",  # 'h' must stay typeable into the filter
+    "artifact_search",  # same typing surface as search
 }
 
 

@@ -157,6 +157,20 @@ class XReferView(idaapi.simplecustviewer_t):
             "ORPHAN STRINGS",
             "ORPHAN CAPA RULES",
         ]
+        # Artifact-search result tables (Shift+S), in display order. Same
+        # registration trick as the orphan tables: membership in
+        # table_states + get_parent_table is all the expand/collapse
+        # machinery needs. Keyed by EntityType id for building.
+        self.search_table_to_type: "OrderedDict[str, int]" = OrderedDict(
+            [
+                ("MATCHING IMPORTS", 2),
+                ("MATCHING LIBRARIES", 1),
+                ("MATCHING STRINGS", 3),
+                ("MATCHING CAPA RULES", 4),
+            ]
+        )
+        for _search_table in self.search_table_to_type:
+            self.table_states[_search_table] = 1
         # Maps orphan table name -> EntityType id (1=lib, 2=import,
         # 3=string, 4=capa) so the renderer can pick the right color
         # tag and source list. The merged imports+libraries table is
@@ -946,8 +960,11 @@ class XReferView(idaapi.simplecustviewer_t):
         elif is_graph_before and not is_graph_after:
             self.in_graph_view = False
 
-        if state_after_handling_key == self.state_machine.search:
-            if state_before_handling_key == self.state_machine.search:
+        # Typing surfaces: keys not claimed by a handler above feed the
+        # filter (search narrows the home table; artifact search scans
+        # the whole binary).
+        if state_after_handling_key in (self.state_machine.search, self.state_machine.artifact_search):
+            if state_before_handling_key == state_after_handling_key:
                 self.handle_search_input(vkey, shift)
                 should_update = True
 
@@ -1715,6 +1732,13 @@ class XReferView(idaapi.simplecustviewer_t):
         Returns:
             bool: True if handled, False if not
         """
+        # Shift+S from home: binary-wide artifact search. Falls through to
+        # the plain-S behaviors when the transition is not available.
+        if shift and self.state_machine.start_artifact_search():
+            self.state_machine.search_filter = ""
+            self.Jump(0, 0)
+            return True
+
         # Per-view filter for the long reading views (the search STATE is a
         # base-view mode; these get a lightweight filter layered onto the
         # current state instead).
@@ -2226,9 +2250,92 @@ class XReferView(idaapi.simplecustviewer_t):
         out["rows"] = rows
         return out
 
-    def _build_orphan_table(self, table_name: str, type_id: int, entity_indices: List[int]) -> Optional[Dict[str, Any]]:
+    # Caps for the artifact-search rendering: rows per result table and
+    # addresses per row. Both exist to keep per-keystroke redraws snappy
+    # and the table width sane on binaries with thousands of artifacts;
+    # overflow is stated, never silent.
+    SEARCH_MAX_ROWS = 300
+    SEARCH_MAX_ADDRS = 16
+
+    def draw_artifact_search(self) -> None:
+        """Draw the binary-wide artifact search view (Shift+S from home).
+
+        Substring-filters every entity in the binary — imports,
+        libraries, strings, capa matches — against the typed text
+        (name and category), grouped per type with the same colored
+        tables and chevron disclosure as the orphans view. Rows carry
+        the referencing addresses (strings with no resolvable code xref
+        fall back to their storage address); X / G / double-click pivot
+        into the xref listing / path graph / disassembly. Pure
+        in-memory scan — no IDA queries per keystroke.
+        """
+        self.ClearLines()
+        self.print_ribbon()
+
+        INDENT = "    "
+        flt = self.state_machine.search_filter.lower()
+
+        if not flt:
+            self.AddLine(f"{INDENT}{ida_lines.COLSTR('ARTIFACT SEARCH', ida_lines.SCOLOR_DATNAME)}")
+            self.AddLine("")
+            for text in (
+                "Type to search every import, library, string and capa match in the binary.",
+                "X: xref listing   G: path graph   double-click: navigate   ESC: home",
+            ):
+                self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_DSTR}{text}\x02{ida_lines.SCOLOR_DSTR}")
+            self.Refresh()
+            return
+
+        exclusions_on = self.xrefer_obj.settings.get("enable_exclusions", False)
+        excluded = self.xrefer_obj.excluded_entities if exclusions_on else set()
+        matches: Dict[int, List[int]] = {1: [], 2: [], 3: [], 4: []}
+        for idx, entity in enumerate(self.xrefer_obj.entities):
+            type_id = entity[2]
+            if type_id not in matches or idx in excluded:
+                continue
+            if flt in str(entity[1] or "").lower() or flt in str(entity[0] or "").lower():
+                matches[type_id].append(idx)
+
+        total = sum(len(v) for v in matches.values())
+        header = f"{ida_lines.COLSTR(str(total), ida_lines.SCOLOR_VOIDOP)} ARTIFACT(S) MATCH"
+        self.AddLine(f"{INDENT}{ida_lines.COLSTR(header, ida_lines.SCOLOR_DATNAME)}")
+        self.AddLine("")
+
+        if not total:
+            self.AddLine(f"{INDENT}No artifacts match '{flt}' — backspace edits, ESC exits")
+            self.Refresh()
+            return
+
+        for table_name, type_id in self.search_table_to_type.items():
+            indices = matches[type_id]
+            if not indices:
+                continue
+            indices.sort(key=lambda i: (self.xrefer_obj.entities[i][1] or "").lower())
+            built = self._build_orphan_table(table_name, type_id, indices[: self.SEARCH_MAX_ROWS], max_addrs=self.SEARCH_MAX_ADDRS)
+            if built is None:
+                continue
+            # Search results default-expanded: the analyst asked for these
+            # rows — collapsing them behind chevrons would hide the answer.
+            # Their toggles still work and persist for the session.
+            group_states = self.subtable_states.setdefault(table_name, {})
+            for group in built["rows"]:
+                group_states.setdefault(group, True)
+            self._draw_orphan_table(table_name, built)
+            if len(indices) > self.SEARCH_MAX_ROWS:
+                note = f"+{len(indices) - self.SEARCH_MAX_ROWS} more — refine the filter"
+                self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_VOIDOP}{note}\x02{ida_lines.SCOLOR_VOIDOP}")
+                self.AddLine("")
+
+        self.Refresh()
+
+    def _build_orphan_table(self, table_name: str, type_id: int, entity_indices: List[int], max_addrs: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """Group entities by ``entity[0]`` (namespace / category) and
         produce a colored table ready to render.
+
+        ``max_addrs`` caps the per-row address list (binary-wide search
+        rows can carry hundreds of use sites — a common import would blow
+        the table width); the overflow collapses into a ``(+N more)``
+        cell, with X / the xref listing as the complete view.
 
         Returns ``{"heading": [head_line, sep_line], "rows": OrderedDict[group: List[str]]}``
         in the same shape as ``self.xrefer_obj.table_data[func_ea][...]``,
@@ -2251,6 +2358,8 @@ class XReferView(idaapi.simplecustviewer_t):
             # navigate to where the string lives.
             if not addrs and type_id == 3:
                 addrs = sorted(string_storage.get(idx, set()))
+            if max_addrs is not None and len(addrs) > max_addrs:
+                addrs = addrs[:max_addrs] + [f"(+{len(addrs) - max_addrs} more)"]
             row.extend(addrs)
             groups.setdefault(category, []).append(row)
 
@@ -4977,6 +5086,8 @@ class XReferView(idaapi.simplecustviewer_t):
         elif current_state == self.state_machine.search:
             # Search shows current filter text
             content = f"[ search ]: {self.state_machine.search_filter}"
+        elif current_state == self.state_machine.artifact_search:
+            content = f"[ artifact search ]: {self.state_machine.search_filter}"
         elif current_state == self.state_machine.clusters:
             # Added handling for clusters state (cluster table view)
             content = f"[ clusters ]{esc_str}{h_str}"
@@ -5160,6 +5271,7 @@ class XReferView(idaapi.simplecustviewer_t):
             self.state_machine.xref_listing: self.draw_entity_xrefs,
             self.state_machine.attack_matrix: self.draw_attack_matrix,
             self.state_machine.help: self.draw_help,
+            self.state_machine.artifact_search: self.draw_artifact_search,
         }
 
         # Get appropriate handler or use default table context
@@ -6661,7 +6773,7 @@ class XReferView(idaapi.simplecustviewer_t):
             clean = strip_color_codes(line).strip()
             if clean[:1] in ("▸", "▾"):
                 candidate = self._strip_count_suffix(clean[1:].strip())
-                if candidate in self.table_names or candidate in self.orphan_table_names:
+                if candidate in self.table_names or candidate in self.orphan_table_names or candidate in self.search_table_to_type:
                     return candidate
             lineno -= 1
         return None

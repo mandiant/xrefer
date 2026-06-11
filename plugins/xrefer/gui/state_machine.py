@@ -50,13 +50,20 @@ class XReferStateMachine(StateMachine):
     xref_listing = State("xref listing")
     help = State("help")
     attack_matrix = State("attack matrix")
+    # Binary-wide artifact search (Shift+S from home): substring-filters
+    # every entity — imports, libraries, strings, capa matches — as the
+    # analyst types, with X / G / double-click pivots into the existing
+    # views. A real state (like search), not a per-view filter flag: it
+    # owns its own rendering rather than narrowing an underlying view.
+    artifact_search = State("artifact search")
 
     # primary transitions
     start_search = base.to(search)
+    start_artifact_search = base.to(artifact_search)
     start_call_focus = base.to(call_focus)
     start_trace = base.to(trace_scope_function)
-    start_graph = base.to(graph) | search.to(graph)
-    start_xref_listing = base.to(xref_listing) | search.to(xref_listing)
+    start_graph = base.to(graph) | search.to(graph) | artifact_search.to(graph)
+    start_xref_listing = base.to(xref_listing) | search.to(xref_listing) | artifact_search.to(xref_listing)
     start_boundary_results = base.to(boundary_results)
     start_last_boundary_results = base.to(last_boundary_results)
     start_orphans = base.to(orphans)
@@ -188,6 +195,11 @@ class XReferStateMachine(StateMachine):
     # search revert transitions
     revert_xref_listing_to_search = xref_listing.to(search)
     revert_graph_to_search = graph.to(search)
+    # … and the same pair for artifact search, so ESC from a pivoted
+    # xref listing / path graph returns to the result list (go_back
+    # needs an explicit arm targeting the previous state).
+    revert_xref_listing_to_artifact_search = xref_listing.to(artifact_search)
+    revert_graph_to_artifact_search = graph.to(artifact_search)
 
     # base transition
     to_base = (
@@ -211,6 +223,7 @@ class XReferStateMachine(StateMachine):
         | neighborhood_graph.to(base)
         | pinned_neighborhood_graph.to(base)
         | attack_matrix.to(base)
+        | artifact_search.to(base)
     )
 
     def __init__(self):
@@ -444,6 +457,7 @@ class XReferStateMachine(StateMachine):
             self.last_boundary_results,
             self.trace_scope_full,
             self.help,
+            self.artifact_search,
         )
 
     def push_cluster_graph(self, cluster_id: int, parent_cluster_id: Optional[int] = None) -> None:

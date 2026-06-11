@@ -35,11 +35,15 @@ The base/home view is where the context-aware navigation comes in. This view cha
 Click on `+` icons in the base view to expand/collapse tables and click on arrows `→` before API artifacts to expand their corresponding API calls (if ingested during analysis).
 
 ![expansions.png](../images/expansions.png)
-#### Global Search
+#### Search and Filtering
 
-You can quickly search through all the artifacts in one go by pressing `S` and typing the search term in the base view.
+You can quickly search through the current function's artifacts by pressing `S` and typing the search term in the base view.
 
 ![search 1.png](../images/search.png)
+
+To search across the *whole binary* instead, press `Shift+S` from the base view. This artifact search matches every import, library, string and capa rule as you type, grouped per type with each row listing its referencing addresses (strings with no resolvable code reference fall back to their storage address). From a result row, `X` opens the full cross-reference listing, `G` opens the artifact's path graph, and double-clicking an address jumps to it in the disassembly.
+
+The long reading views — the full API trace, the orphan artifacts view and the cluster table — also support a lightweight type-to-filter: press `S` inside them and type to narrow the rows (in the cluster table, whole cluster blocks are kept or dropped, with ancestors of a match retained). Backspace edits the filter, the first `ESC` clears it and the next one exits.
 
 As a rule of thumb, the `ESC` key will always act like a back button and return you to the previous state in your navigation history. In this instance pressing `ESC` will exit the search mode and bring you back to the base view.
 
