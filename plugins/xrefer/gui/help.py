@@ -141,7 +141,7 @@ class ContextHelp:
 
             # ----- Home (base) keyboard ------------------------------------------
             Action("S", "search / filter the view", KB, {"base"}, hint="search", weight=50),
-            Action("S", "filter the rows (type to narrow, ESC clears)", KB, {"full trace", "orphans"}, hint="filter", weight=60),
+            Action("S", "filter the rows (type to narrow, ESC clears)", KB, {"full trace", "orphans", "clusters"}, hint="filter", weight=60),
             Action("T", "trace API calls (cycle scopes)", KB, {"base"}, hint="trace", weight=64),
             Action("C", "cluster relationship graph", KB, {"base"}, hint="clusters", weight=80),
             Action("O", "orphan artifacts", KB, {"base"}, hint="orphans", weight=46),

@@ -304,6 +304,51 @@ def cluster_ids(clusters: List["FunctionalCluster"]) -> Set[int]:
     return ids
 
 
+def cluster_filter_match_ids(clusters: List["FunctionalCluster"], analysis: Optional[Dict], flt: str, name_resolver=None) -> Set[int]:
+    """IDs of clusters whose own table block matches ``flt`` (case-
+    insensitive substring).
+
+    The searchable text mirrors what the cluster table renders for a
+    block: the ``cluster.id.NNNN`` token, the label / description /
+    relationships from ``analysis``, and the member nodes as 0x-hex
+    addresses plus their function names when a ``name_resolver`` is
+    provided (the GUI passes one; headless callers may omit it).
+    """
+    matched: Set[int] = set()
+    flt = (flt or "").lower()
+    if not flt:
+        return matched
+
+    def _visit(cluster: "FunctionalCluster") -> None:
+        parts = [f"cluster.id.{cluster.id_str}"]
+        data = find_cluster_analysis(analysis or {}, cluster.id)
+        if data:
+            parts.extend(str(data.get(key) or "") for key in ("label", "description", "relationships"))
+        for node in cluster.nodes:
+            parts.append(f"0x{int(node):x}")
+            if name_resolver is not None:
+                parts.append(str(name_resolver(node) or ""))
+        if flt in " ".join(parts).lower():
+            matched.add(cluster.id)
+        for sub in cluster.subclusters:
+            _visit(sub)
+
+    for cluster in clusters or []:
+        _visit(cluster)
+    return matched
+
+
+def cluster_subtree_matches(cluster: "FunctionalCluster", match_ids: Set[int]) -> bool:
+    """True when the cluster or any descendant is in ``match_ids``.
+
+    The block filter keeps/drops whole cluster blocks; ancestors of a
+    match are kept so the match stays rooted in the rendered tree.
+    """
+    if cluster.id in match_ids:
+        return True
+    return any(cluster_subtree_matches(sub, match_ids) for sub in cluster.subclusters)
+
+
 def compute_closures(clusters: List["FunctionalCluster"]) -> List[List["FunctionalCluster"]]:
     """Partition top-level clusters into independent **closures** — maximal
     groups that are linked and therefore must be analyzed together.

@@ -71,4 +71,4 @@ def test_filter_hint_advertised_only_in_filterable_views():
         if a.key == "S" and a.hint == "filter"
         for a_state in a.states
     }
-    assert filter_states == {"full trace", "orphans"}
+    assert filter_states == {"full trace", "orphans", "clusters"}

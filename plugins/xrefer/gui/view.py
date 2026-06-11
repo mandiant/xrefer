@@ -35,6 +35,7 @@ from qtpy import QtCore, QtGui, QtWidgets
 
 from xrefer._vendor import ascii_graphs
 from xrefer.core.analyzer import ApiCall, XRefer
+from xrefer.core.clusters import cluster_filter_match_ids
 from xrefer.core.helpers import (cap_artifact_entries, find_cluster_analysis, get_addr_from_text, longest_line_length, parse_cluster_id, remove_non_displayable,
                                  strip_color_codes, word_wrap_text, wrap_substring_with_string)
 from xrefer.core.mitre import aggregate_mitre_matrix, mitre_attack_url
@@ -894,7 +895,7 @@ class XReferView(idaapi.simplecustviewer_t):
         # hijack mid-typing. ESC clears the text first (stay in view),
         # then deactivates and falls through to normal ESC handling.
         sm = self.state_machine
-        if sm.view_filter_active and sm.current_state in (sm.trace_scope_full, sm.orphans):
+        if sm.view_filter_active and sm.current_state in (sm.trace_scope_full, sm.orphans, sm.clusters):
             if vkey == 27:  # ESC
                 if sm.search_filter:
                     sm.search_filter = ""
@@ -1717,7 +1718,7 @@ class XReferView(idaapi.simplecustviewer_t):
         # Per-view filter for the long reading views (the search STATE is a
         # base-view mode; these get a lightweight filter layered onto the
         # current state instead).
-        if self.state_machine.current_state in (self.state_machine.trace_scope_full, self.state_machine.orphans):
+        if self.state_machine.current_state in (self.state_machine.trace_scope_full, self.state_machine.orphans, self.state_machine.clusters):
             self.state_machine.view_filter_active = True
             self.state_machine.search_filter = ""
             return True
@@ -2433,7 +2434,16 @@ class XReferView(idaapi.simplecustviewer_t):
         self.AddLine(f"{INDENT}{header}")
         self.AddLine("")
 
-        self.print_llm_disclaimer()
+        # Per-view filter (S): blocks are kept/dropped whole — a cluster
+        # block renders when it or any descendant matches, so wrapped
+        # descriptions don't get shredded line-by-line and matches stay
+        # rooted under their ancestors.
+        flt = ""
+        if self.state_machine.view_filter_active:
+            flt = self.state_machine.search_filter.lower()
+
+        if not flt:
+            self.print_llm_disclaimer()
 
         # Get cluster analysis data
         cluster_analysis = self.xrefer_obj.cluster_analysis
@@ -2443,21 +2453,34 @@ class XReferView(idaapi.simplecustviewer_t):
             self.Refresh()
             return
 
-        # Add binary information with proper alignment
-        binary_cat = cluster_analysis.get("binary_category", "Unknown")
-        if isinstance(binary_cat, enum.Enum):
-            binary_cat = binary_cat.name
+        match_ids = None
+        if flt:
+            match_ids = cluster_filter_match_ids(
+                self.xrefer_obj.clusters,
+                cluster_analysis,
+                flt,
+                name_resolver=lambda ea: idc.get_func_name(int(ea)) or "",
+            )
 
-        # Print category on one line
-        self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_DNAME}Binary Category: \x02{ida_lines.SCOLOR_DNAME}\x01{ida_lines.SCOLOR_VOIDOP}{binary_cat}\x02{ida_lines.SCOLOR_VOIDOP}")
+        # While the analyst is typing, the binary summary gives way to the
+        # table — every redraw jumps to the top, so matches must be visible
+        # without scrolling past a screenful of prose.
+        if not flt:
+            # Add binary information with proper alignment
+            binary_cat = cluster_analysis.get("binary_category", "Unknown")
+            if isinstance(binary_cat, enum.Enum):
+                binary_cat = binary_cat.name
 
-        # Report (markdown) or plain description, per the R toggle
-        showing_report = self.state_machine.cluster_manager.is_showing_report()
-        binary_desc = cluster_analysis.get(
-            "binary_report" if showing_report else "binary_description", "Not available"
-        )
-        self._emit_binary_summary_body(binary_desc, showing_report, INDENT, LINE_WIDTH)
-        self.AddLine("")
+            # Print category on one line
+            self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_DNAME}Binary Category: \x02{ida_lines.SCOLOR_DNAME}\x01{ida_lines.SCOLOR_VOIDOP}{binary_cat}\x02{ida_lines.SCOLOR_VOIDOP}")
+
+            # Report (markdown) or plain description, per the R toggle
+            showing_report = self.state_machine.cluster_manager.is_showing_report()
+            binary_desc = cluster_analysis.get(
+                "binary_report" if showing_report else "binary_description", "Not available"
+            )
+            self._emit_binary_summary_body(binary_desc, showing_report, INDENT, LINE_WIDTH)
+            self.AddLine("")
 
         # Get formatted lines from helper
         lines = draw_cluster_hierarchy(
@@ -2465,6 +2488,7 @@ class XReferView(idaapi.simplecustviewer_t):
             cluster_analysis,
             self.xrefer_obj.paths,
             hide_library=self.state_machine.hide_library_clusters,
+            match_ids=match_ids,
         )
 
         # Add lines to view
@@ -4962,7 +4986,7 @@ class XReferView(idaapi.simplecustviewer_t):
             sel_str = f"[ selected: {selected_n} ]" if selected_n else ""
             content = f"[ func_ea: 0x{self.func_ea:x} ][ func_name: {func_name} ]{exclusions_str}{sel_str}{h_str}"
 
-        if self.state_machine.view_filter_active and current_state in (self.state_machine.trace_scope_full, self.state_machine.orphans):
+        if self.state_machine.view_filter_active and current_state in (self.state_machine.trace_scope_full, self.state_machine.orphans, self.state_machine.clusters):
             content += f"[ filter ]: {self.state_machine.search_filter}"
         return f"{base_text}{content}"
 
