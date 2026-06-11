@@ -60,6 +60,22 @@ def _bare_name(model_id: str) -> str:
     return model_id.split("/", 1)[1] if "/" in model_id else model_id
 
 
+def server_reachable(api_base: Optional[str] = None, timeout: float = 3.0) -> bool:
+    """True if the Ollama server answers its version endpoint.
+
+    Used as the local-model preflight: a failure means "Ollama server
+    unreachable at <base>", a far more actionable diagnosis than a generic
+    internet-connectivity error — especially on air-gapped setups, where
+    the internet probe would be wrong about a perfectly healthy server.
+    """
+    base = _normalize_base(api_base)
+    try:
+        httpx.get(f"{base}/api/version", timeout=timeout).raise_for_status()
+        return True
+    except Exception:
+        return False
+
+
 def list_models(api_base: Optional[str] = None, timeout: float = 3.0) -> List[str]:
     """Return installed Ollama models as ``ollama_chat/<name>`` ids.
 

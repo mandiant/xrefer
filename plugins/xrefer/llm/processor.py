@@ -20,7 +20,8 @@ import re
 import secrets
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterator, List, Optional
+from time import monotonic
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import dspy
 import litellm
@@ -44,6 +45,24 @@ _LLM_IO_CALLBACK_REGISTERED: bool = False
 # inherently slow, so give them a generous ceiling. (Hosted models keep
 # litellm's default; their latency is bounded.)
 _OLLAMA_REQUEST_TIMEOUT_S = 1800
+
+# Memo for the hosted-model internet preflight. Batched runs call
+# process_items many times back-to-back, and every probe miss costs up to
+# two 3-second raw-IP timeouts. All LLM calls are main-thread synchronous,
+# so a plain module global needs no locking.
+_INTERNET_PROBE_TTL_S = 60.0
+_internet_probe: Optional[Tuple[float, bool]] = None
+
+
+def _internet_reachable() -> bool:
+    """check_internet_connectivity, memoized for a short TTL."""
+    global _internet_probe
+    now = monotonic()
+    if _internet_probe is not None and now - _internet_probe[0] < _INTERNET_PROBE_TTL_S:
+        return _internet_probe[1]
+    ok = check_internet_connectivity()
+    _internet_probe = (now, ok)
+    return ok
 
 
 def _log_llm_io(kwargs, completion_response, start_time, end_time) -> None:
@@ -578,6 +597,36 @@ You can:
 
         return results
 
+    def _preflight_connectivity(self) -> None:
+        """Fail fast with an actionable error before issuing LLM calls.
+
+        Local backends must not require internet: a fully-offline Ollama
+        setup (the headline air-gapped use case) would otherwise hard-fail,
+        and TLS-intercepting proxies false-fail a raw-IP probe even with
+        working API access. Routing:
+
+          * Ollama model -> probe the Ollama server itself, so failure says
+            "Ollama server unreachable at <base>" instead of a wrong
+            internet diagnosis.
+          * any other explicit api_base (vllm, llama.cpp, gateways) -> no
+            probe; the real call surfaces a specific error.
+          * hosted models -> the internet probe, memoized briefly so
+            back-to-back batch calls don't re-pay its timeouts.
+        """
+        from xrefer.llm.ollama import DEFAULT_API_BASE, is_ollama_model, server_reachable
+
+        model_id = self.config.model_id if self.config else None
+        api_base = (self.config.api_base if self.config else None) or None
+        if is_ollama_model(model_id):
+            if not server_reachable(api_base):
+                base = api_base or DEFAULT_API_BASE
+                raise ConnectionError(f"Ollama server unreachable at {base} — is `ollama serve` running?")
+            return
+        if api_base:
+            return
+        if not _internet_reachable():
+            raise ConnectionError("No internet connectivity")
+
     def process_items(
         self,
         items: List[Any],
@@ -605,8 +654,7 @@ You can:
             raise ValueError("Model not configured")
         if not items:
             raise ValueError("No items to process")
-        if not check_internet_connectivity():
-            raise ConnectionError("No internet connectivity")
+        self._preflight_connectivity()
 
         if prompt_type == PromptType.CLUSTER_ANALYZER:
             return self._process_single([items], prompt_type)
