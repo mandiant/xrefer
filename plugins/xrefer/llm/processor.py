@@ -434,16 +434,41 @@ class LLMProcessor:
             self.lm = prior_lm
             dspy.settings.configure(lm=prior_lm)
 
+    # Session memo for validate_api_key, keyed by exact credentials. The
+    # libs and imports categorization passes both probe back-to-back; one
+    # real probe per configuration is enough. Class-level so the dual-model
+    # processor instances share verdicts for identical configs.
+    _key_validation_memo: Dict[Tuple[str, str, str], bool] = {}
+
     def validate_api_key(self) -> bool:
-        """Validate API key with a test call."""
+        """Validate the configured credentials with one real test call.
+
+        Routed through uncached_lm() so the probe can never be answered
+        from the disk response cache — the fixed cache_seed used to replay
+        an old success for a since-revoked key (and the cached path made
+        the probe pointless as a check). The verdict is memoized per
+        (model_id, api_key, api_base) for the session.
+        """
         if not self.lm:
             raise ValueError("Model not configured")
+        cfg = self.config
+        memo_key = (
+            (getattr(cfg, "model_id", "") if cfg else "") or "",
+            (getattr(cfg, "api_key", "") if cfg else "") or "",
+            (getattr(cfg, "api_base", "") if cfg else "") or "",
+        )
+        cached = self._key_validation_memo.get(memo_key)
+        if cached is not None:
+            return cached
         try:
-            self.lm("Say 'valid'")
-            return True
+            with self.uncached_lm():
+                self.lm("Say 'valid'")
+            ok = True
         except Exception as e:
             log(f"API validation failed: {e}")
-            return False
+            ok = False
+        self._key_validation_memo[memo_key] = ok
+        return ok
 
     def render_request_messages(self, prompt_type: PromptType, item: str, model_id: Optional[str] = None) -> List[Dict[str, str]]:
         """Render the exact chat messages DSPy would send for a single

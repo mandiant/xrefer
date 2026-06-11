@@ -53,7 +53,8 @@ def _make_recording_xrefer(mode):
     o.propagate_xref_nodes = lambda: calls.append("propagate_xref_nodes")
     o.fix_thunk_xrefs = lambda: calls.append("fix_thunk_xrefs")
     o.populate_xref_addrs = lambda: calls.append("populate_xref_addrs")
-    o.cluster_all_non_excluded = lambda: calls.append("cluster_all_non_excluded")
+    o.cluster_kwargs = {}
+    o.cluster_all_non_excluded = lambda **kw: (calls.append("cluster_all_non_excluded"), o.cluster_kwargs.update(kw))
     return o, calls
 
 
@@ -109,3 +110,14 @@ def test_thunk_fix_fires_in_light_exactly_as_in_full():
     full_o.run_secondary_analysis()
     assert light_calls.count("fix_thunk_xrefs") == 1
     assert full_calls.count("fix_thunk_xrefs") == 1
+
+
+def test_pipeline_clustering_skips_its_mid_pipeline_save():
+    # Every run_secondary_analysis caller saves right after it returns, so
+    # the clustering step must not also save (it used to compress and write
+    # the multi-MB DB twice per run). The GUI re-cluster handler calls
+    # cluster_all_non_excluded directly and keeps the default save=True.
+    o, calls = _make_recording_xrefer("full")
+    o.run_secondary_analysis()
+    assert "cluster_all_non_excluded" in calls
+    assert o.cluster_kwargs.get("save") is False

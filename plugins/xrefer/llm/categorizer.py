@@ -80,21 +80,24 @@ class Categorizer:
             - Dictionary mapping items to category indices
             - List of category names
         """
+        # Filter out already categorized items, deduplicating while keeping
+        # first-encounter order (item lists arrive per reference SITE, so
+        # the same API/lib name can repeat thousands of times — duplicates
+        # inflate both the prompt and the response for nothing; results map
+        # back by name, so dedup is lossless). This runs FIRST: when the
+        # cache already covers everything (the common case after the first
+        # few binaries) there is nothing to do — no logs, no processor, and
+        # no key probe (which on Ollama forced a multi-second model load
+        # for zero work).
+        uncategorized = list(dict.fromkeys(item for item in item_list if item not in categorized_items))
+        if not uncategorized:
+            return categorized_items, categories
+
         log(f"Categorizing items using LLM... (type: {type})")
         log("Categorization results are cached to disk. First time is the slowest and gets faster as cache builds up.")
         processor = cls._get_processor()
 
         if not processor.validate_api_key():
-            return categorized_items, categories
-
-        # Filter out already categorized items, deduplicating while keeping
-        # first-encounter order (item lists arrive per reference SITE, so
-        # the same API/lib name can repeat thousands of times — duplicates
-        # inflate both the prompt and the response for nothing; results map
-        # back by name, so dedup is lossless).
-        uncategorized = list(dict.fromkeys(item for item in item_list if item not in categorized_items))
-
-        if not uncategorized:
             return categorized_items, categories
 
         # Process uncategorized items

@@ -413,7 +413,8 @@ class XReferView(idaapi.simplecustviewer_t):
 
             # Get current function EA and update view
             current_ea = idc.get_screen_ea()
-            func_ea = idc.get_name_ea_simple(idc.get_func_name(current_ea))
+            fn = ida_funcs.get_func(ida_idaapi.ea_t(int(current_ea)))
+            func_ea = fn.start_ea if fn else idaapi.BADADDR
             if func_ea is not None:
                 self.update(True)
 
@@ -1613,7 +1614,8 @@ class XReferView(idaapi.simplecustviewer_t):
                 if new_name:
                     if idaapi.set_name(xref_to_func_ea, new_name):
                         idaapi.refresh_idaview_anyway()
-                        func_ea: int = idc.get_name_ea_simple(idc.get_func_name(ida_idaapi.ea_t(addr)))
+                        _fn = ida_funcs.get_func(ida_idaapi.ea_t(int(addr)))
+                        func_ea: int = _fn.start_ea if _fn else idaapi.BADADDR
                         self.xref_coverage_dict[func_ea] = self.generate_xref_coverage_dict(func_ea)
                         return True
         except:
@@ -4669,14 +4671,20 @@ class XReferView(idaapi.simplecustviewer_t):
             return
 
         if ea:
-            func_ea: int = idc.get_name_ea_simple(idc.get_func_name(ea))
-            current_func = ida_funcs.get_func(ea)
+            # One get_func resolves both the function object and its start —
+            # the old prologue paid a name round-trip (get_func_name +
+            # get_name_ea_simple) plus a second get_func re-resolving the
+            # PREVIOUS position on every cursor move.
+            current_func = ida_funcs.get_func(ida_idaapi.ea_t(int(ea)))
+            func_ea: int = current_func.start_ea if current_func else idaapi.BADADDR
 
-            if self.func_ea:
-                prev_func = ida_funcs.get_func(self.func_ea)
-                if current_func is not None and prev_func is not None and current_func == prev_func:
-                    if not self.peek_flag:
-                        return
+            # Same-function move: nothing to do (unless peeking). The
+            # current_func guard keeps the both-outside-any-function case
+            # falling through exactly as before (BADADDR == BADADDR must
+            # not early-return).
+            if current_func is not None and self.func_ea is not None and func_ea == self.func_ea:
+                if not self.peek_flag:
+                    return
 
             # Handle cluster sync if enabled
             if self.state_machine.cluster_sync_enabled and self.state_machine.current_state in (self.state_machine.cluster_graphs, self.state_machine.pinned_cluster_graphs):
@@ -4755,7 +4763,7 @@ class XReferView(idaapi.simplecustviewer_t):
         else:
             func_ea = self.func_ea
 
-        if ea and func_ea != self.func_ea or force:
+        if (ea and func_ea != self.func_ea) or force:
             if not force and self.state_machine.current_state:
                 sm = self.state_machine
                 if sm.is_sticky_state():
