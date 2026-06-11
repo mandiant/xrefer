@@ -4319,38 +4319,6 @@ class XReferView(idaapi.simplecustviewer_t):
 
             self.AddLine("")
 
-    def _calculate_header_lines(self, analysis_data: Dict, cluster: "FunctionalCluster") -> int:
-        """
-        Calculate number of header lines before graph content for accurate scrolling.
-
-        Args:
-            analysis_data: Analysis data for the cluster
-            cluster: The cluster being displayed
-
-        Returns:
-            int: Number of header lines
-        """
-        header_offset = 4  # Base offset: mode line + node count + empty line + graph start
-
-        if analysis_data:
-            header_offset += 2  # Cluster ID and separator
-            if analysis_data.get("label"):
-                header_offset += 1
-            if analysis_data.get("description"):
-                # Count wrapped lines in description
-                desc_lines = len(analysis_data["description"].split("\n"))
-                header_offset += 1 + desc_lines  # Title + content
-            if analysis_data.get("relationships"):
-                # Count wrapped lines in relationships
-                rel_lines = len(analysis_data["relationships"].split("\n"))
-                header_offset += 1 + rel_lines  # Title + content
-
-        # Add spacing before graph
-        header_offset += 1
-
-        log(f"Calculated header offset: {header_offset} lines")
-        return header_offset
-
     def print_cluster_xrefs(self, cluster: "FunctionalCluster", indent: str = "    ") -> None:
         """Print xrefs to cluster root node with comprehensive membership information."""
         # Group xrefs by function
@@ -4478,9 +4446,6 @@ class XReferView(idaapi.simplecustviewer_t):
             self.AddLine(f"{self.INDENT}\x01{ida_lines.SCOLOR_NUMBER}Simplified graph showing {interesting_count} nodes\x02{ida_lines.SCOLOR_NUMBER}")
         self.AddLine("")
 
-        # Calculate header offset by counting actual header lines
-        analysis_data = find_cluster_analysis(self.xrefer_obj.cluster_analysis, cluster.id)
-
         def build_layout() -> List[str]:
             graph = cluster.to_graph(cluster_analysis=self.xrefer_obj.cluster_analysis, include_intermediate=not simplified)
             return ascii_graphs.graph_to_ascii(graph).splitlines()
@@ -4491,31 +4456,29 @@ class XReferView(idaapi.simplecustviewer_t):
             graph_lines = self._cluster_ascii_lines(("cluster", cluster.id), build_layout)
             highlighted_position = None
 
-            for i, line in enumerate(graph_lines):
+            for line in graph_lines:
                 # Format line with proper coloring
                 colored_line = self._format_cluster_graph_line(line, highlight_addr=func_ea)
 
-                # Track line with highlighted address for auto-scrolling
+                # Capture the highlight's display position as the line is
+                # added — self.Count() is the index this AddLine lands on,
+                # exact by construction. (The previous header-line ESTIMATE
+                # ignored word-wrap and whole sections and drifted tens of
+                # lines, leaving the synced node off-screen.)
                 if func_ea is not None:
                     func_addr = f"0x{func_ea:x}"
                     if func_addr in line and "\x01\x12" in colored_line:
                         # Find exact column position of the address
                         clean_line = strip_color_codes(line)
                         addr_column = clean_line.find(func_addr)
-                        highlighted_position = (i, addr_column)
+                        highlighted_position = (self.Count(), addr_column)
 
                 self.AddLine(f"{self.INDENT}    {colored_line}")
 
             # Auto-scroll to highlighted line and ensure address is visible
             if highlighted_position is not None and self.state_machine.cluster_sync_enabled and not self._from_double_click:  # Do not adjust view if we are coming from a double click navigation
-                try:
-                    line_num, column = highlighted_position
-                    total_line_offset = line_num + self._calculate_header_lines(analysis_data, cluster)
-                    scroll_column = column + 100
-                    self.Jump(total_line_offset, scroll_column)
-
-                except Exception as e:
-                    self.Jump(total_line_offset, 0)
+                line_num, column = highlighted_position
+                self.Jump(line_num, column + 100)
 
         except Exception as e:
             log(f"[-] Error drawing cluster nodes: {str(e)}")
