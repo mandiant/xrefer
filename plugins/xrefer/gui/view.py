@@ -3195,12 +3195,18 @@ class XReferView(idaapi.simplecustviewer_t):
 
     def _invalidate_cluster_render_caches(self) -> None:
         """Drop every view-side cache derived from cluster data: the ASCII
-        layouts of the cluster graphs and the func→cluster-ids map. Called
-        when cluster data or the addresses/names baked into it change
-        (cluster re-analysis, image rebase, cluster-function rename)."""
+        layouts of the cluster graphs, the func→cluster-ids map, the
+        intermediate-path role index, the callgraph indices and the
+        nearest-cluster memo. Called when cluster data or the
+        addresses/names baked into it change (cluster re-analysis, image
+        rebase, cluster-function rename)."""
         self._cluster_ascii_cache = {}
         self._cluster_ascii_token = None
         self._func_to_cluster_ids_cache = None
+        self._func_path_index_cache = None
+        self._callgraph_callees_cache = None
+        self._callgraph_callers_cache = None
+        self._nearest_clusters_memo = {}
 
     def _cluster_ascii_lines(self, key: Any, build: Callable[[], Optional[List[str]]]) -> Optional[List[str]]:
         """Return the (cached) cursor-independent ASCII layout for a cluster
@@ -3276,6 +3282,77 @@ class XReferView(idaapi.simplecustviewer_t):
             walk(top)
         self._func_to_cluster_ids_cache = cache
         return cache
+
+    def _func_path_index(self) -> Dict[int, Dict[int, Dict[str, Any]]]:
+        """Lazily build ``func_ea → {cluster_id: record}`` over every
+        cluster's intermediate paths in ONE pass, then answer all four
+        path-role questions with dict lookups. The four consumers
+        (cursor classification, gateway hints, the xrefs-section
+        memberships, the Roles section) used to each re-walk every
+        cluster's every path tuple per redraw — per cursor move in
+        cluster sync, per keystroke in search — recomputing facts that
+        are frozen for the life of the analysis.
+
+        Record fields (per func, per cluster — the three different
+        "intermediate" predicates the consumers rely on):
+
+        * ``any`` — appears at any position in any of the cluster's
+          paths (cursor classification's predicate for non-members).
+        * ``interior`` — appears at a non-endpoint position
+          (gateway hints, xrefs-section memberships).
+        * ``member_endpoints`` — interior on a path whose BOTH
+          endpoints are members of that cluster (the Roles section's
+          stricter predicate, which filters out paths copied up from
+          subclusters by ``extract_cluster``).
+        * ``best`` — closest endpoint over interior occurrences as
+          ``(gateway_ea, hops, direction)``, preserving the original
+          first-wins-on-equal-hops selection (same walk order).
+
+        Invalidated alongside the other cluster-derived caches in
+        ``_invalidate_cluster_render_caches``.
+        """
+        cache = getattr(self, "_func_path_index_cache", None)
+        if cache is not None:
+            return cache
+        index: Dict[int, Dict[int, Dict[str, Any]]] = {}
+
+        def rec_for(func_ea: int, cluster_id: int) -> Dict[str, Any]:
+            by_cluster = index.setdefault(func_ea, {})
+            rec = by_cluster.get(cluster_id)
+            if rec is None:
+                rec = {"any": False, "interior": False, "member_endpoints": False, "best": None}
+                by_cluster[cluster_id] = rec
+            return rec
+
+        def walk(cluster: "FunctionalCluster") -> None:
+            members = set(cluster.nodes)
+            members.add(cluster.root_node)
+            for (src, tgt), paths in (cluster.intermediate_paths or {}).items():
+                endpoints_are_members = src in members and tgt in members
+                for path in paths:
+                    last = len(path) - 1
+                    for idx, node in enumerate(path):
+                        rec = rec_for(node, cluster.id)
+                        rec["any"] = True
+                        if 0 < idx < last:
+                            rec["interior"] = True
+                            if endpoints_are_members:
+                                rec["member_endpoints"] = True
+                            src_hops = idx                  # node → … → path[0]
+                            tgt_hops = last - idx           # node → … → path[-1]
+                            if src_hops <= tgt_hops:
+                                cand = (path[0], src_hops, "caller")
+                            else:
+                                cand = (path[-1], tgt_hops, "callee")
+                            if rec["best"] is None or cand[1] < rec["best"][1]:
+                                rec["best"] = cand
+            for sub in cluster.subclusters or []:
+                walk(sub)
+
+        for top in self.xrefer_obj.clusters or []:
+            walk(top)
+        self._func_path_index_cache = index
+        return index
 
     def _ensure_callgraph_indices(self) -> None:
         """Lazily build forward / reverse function-call indices off
@@ -3399,6 +3476,16 @@ class XReferView(idaapi.simplecustviewer_t):
         """
         if not self.func_ea or max_depth < 1:
             return []
+        # The banner runs this BFS up to twice per render for unclustered
+        # cursors (V-hint applicability + the nearest-cluster hint itself);
+        # memoize per (cursor, args). Cleared with the cluster caches.
+        memo = getattr(self, "_nearest_clusters_memo", None)
+        if memo is None:
+            memo = self._nearest_clusters_memo = {}
+        memo_key = (self.func_ea, max_depth, max_results)
+        cached = memo.get(memo_key)
+        if cached is not None:
+            return list(cached)
         func_to_clusters = self._func_to_cluster_ids()
         found: Dict[int, Tuple[int, int, str]] = {}
 
@@ -3427,10 +3514,12 @@ class XReferView(idaapi.simplecustviewer_t):
 
         walk("caller")
         walk("callee")
-        return sorted(
+        result = sorted(
             ((cid, depth, gateway_ea, direction) for cid, (depth, gateway_ea, direction) in found.items()),
             key=lambda t: (t[1], t[0]),  # nearest first, then deterministic by cluster id
         )
+        memo[memo_key] = result
+        return list(result)
 
     def _adjacent_clusters_for_cursor(self, exclude_ids: Set[int]) -> List[Tuple[int, int, int, str]]:
         """Find clusters that contain a direct caller or callee of the
@@ -3498,39 +3587,15 @@ class XReferView(idaapi.simplecustviewer_t):
         if not self.func_ea:
             return []
 
-        # cluster_id → (gateway_ea, hops, direction) — keep the closest
-        # endpoint when the same cursor appears in multiple paths under
-        # the same cluster.
-        best: Dict[int, Tuple[int, int, str]] = {}
-
-        def consider(cluster_id: int, gateway_ea: int, hops: int, direction: str) -> None:
-            existing = best.get(cluster_id)
-            if existing is None or hops < existing[1]:
-                best[cluster_id] = (gateway_ea, hops, direction)
-
-        def walk(cluster: "FunctionalCluster") -> None:
-            for (_src, _tgt), paths in (cluster.intermediate_paths or {}).items():
-                for path in paths:
-                    try:
-                        idx = path.index(self.func_ea)
-                    except ValueError:
-                        continue
-                    if idx <= 0 or idx >= len(path) - 1:
-                        # Endpoint, not intermediate — skip.
-                        continue
-                    src_hops = idx                  # cursor → … → path[0]
-                    tgt_hops = len(path) - 1 - idx  # cursor → … → path[-1]
-                    if src_hops <= tgt_hops:
-                        consider(cluster.id, path[0], src_hops, "caller")
-                    else:
-                        consider(cluster.id, path[-1], tgt_hops, "callee")
-            for sub in cluster.subclusters or []:
-                walk(sub)
-
-        for top in self.xrefer_obj.clusters or []:
-            walk(top)
-
-        return [(cid, gw, hops, direction) for cid, (gw, hops, direction) in best.items()]
+        # All path scanning happened once in _func_path_index; this is a
+        # per-cursor dict read. ``best`` holds the closest endpoint when
+        # the cursor appears in multiple paths under the same cluster.
+        by_cluster = self._func_path_index().get(self.func_ea, {})
+        return [
+            (cid, *rec["best"])
+            for cid, rec in by_cluster.items()
+            if rec["interior"] and rec["best"] is not None
+        ]
 
     def _classify_cursor_relative_to_clusters(self, current_cluster_id: Optional[int]) -> Tuple[str, List[int]]:
         """Decide what status to show for ``self.func_ea`` relative to the
@@ -3558,32 +3623,27 @@ class XReferView(idaapi.simplecustviewer_t):
         if func is None:
             return ("no_function", [])
 
-        containing: List[int] = []
-
-        def walk(c: "FunctionalCluster") -> None:
-            if self.func_ea in c.nodes or self.func_ea == c.root_node:
-                containing.append(c.id)
-            for sc in c.subclusters:
-                walk(sc)
-
-        for top in self.xrefer_obj.clusters or []:
-            walk(top)
-
+        # Membership and path presence both come from the prebuilt maps —
+        # this runs on every banner render / cursor move.
+        containing = self._func_to_cluster_ids().get(self.func_ea, set())
         if containing:
-            unique_ids = sorted(set(containing))
+            unique_ids = sorted(containing)
             if current_cluster_id is not None and current_cluster_id in unique_ids:
                 return ("in_current", unique_ids)
             return ("in_other", unique_ids)
 
-        # Not in any cluster's nodes — check intermediate paths.
+        # Not in any cluster's nodes — check intermediate paths. The tree
+        # walk (O(#clusters), no path scans) preserves the original
+        # semantics: a cluster that matches claims the role and its
+        # subclusters are not separately reported.
+        path_index = self._func_path_index().get(self.func_ea, {})
         intermediate_owners: List[int] = []
 
         def walk_intermediate(c: "FunctionalCluster") -> None:
-            for (_src, _tgt), paths in c.intermediate_paths.items():
-                for path in paths:
-                    if self.func_ea in path:
-                        intermediate_owners.append(c.id)
-                        return
+            rec = path_index.get(c.id)
+            if rec is not None and rec["any"]:
+                intermediate_owners.append(c.id)
+                return
             for sc in c.subclusters:
                 walk_intermediate(sc)
 
@@ -3927,8 +3987,6 @@ class XReferView(idaapi.simplecustviewer_t):
         if not self.xrefer_obj or not self.xrefer_obj.clusters:
             return None
 
-        log(f"\nSearching for function 0x{func_ea:x}")
-
         def check_root_node(cluster) -> Optional[Tuple[int, bool]]:
             if func_ea == cluster.root_node:
                 return (cluster.id, False)
@@ -4037,24 +4095,26 @@ class XReferView(idaapi.simplecustviewer_t):
 
             return cluster_str
 
+        # Per-cluster path facts come from the prebuilt index (this method
+        # used to rescan every cluster's path tuples per render).
+        path_index = self._func_path_index().get(func_ea, {})
+
         # Check all clusters and subclusters
         def check_cluster(cluster, parent_id=None):
-            cluster_info = format_cluster_info(cluster.id)
-
             # First check if function is root node
             is_member_here = False
             if func_ea == cluster.root_node:
-                root_memberships.append((cluster_info, parent_id))
+                root_memberships.append((format_cluster_info(cluster.id), parent_id))
                 is_member_here = True
             # Check if function is regular node (but not root node)
             elif func_ea in cluster.nodes:  # Only add as regular node if not root
-                direct_memberships.append((cluster_info, parent_id))
+                direct_memberships.append((format_cluster_info(cluster.id), parent_id))
                 is_member_here = True
 
             # Only classify as "intermediary in this cluster" when the
             # function is *not* already a member of this cluster, AND
             # the path's endpoints are themselves direct members of
-            # this cluster.
+            # this cluster (the index's ``member_endpoints`` predicate).
             #
             # The endpoint-membership check filters out paths that
             # were copied up from subclusters by ``extract_cluster``
@@ -4064,19 +4124,9 @@ class XReferView(idaapi.simplecustviewer_t):
             # be misleading — the path doesn't actually connect any
             # of the parent's own member functions.
             if not is_member_here:
-                found_intermediate = False
-                for (src, tgt), paths in cluster.intermediate_paths.items():
-                    if found_intermediate:
-                        break
-                    src_is_member = (src == cluster.root_node) or (src in cluster.nodes)
-                    tgt_is_member = (tgt == cluster.root_node) or (tgt in cluster.nodes)
-                    if not (src_is_member and tgt_is_member):
-                        continue
-                    for path in paths:
-                        if func_ea in path and func_ea != path[0] and func_ea != path[-1]:
-                            intermediate_memberships.append((cluster_info, parent_id))
-                            found_intermediate = True
-                            break
+                rec = path_index.get(cluster.id)
+                if rec is not None and rec["member_endpoints"]:
+                    intermediate_memberships.append((format_cluster_info(cluster.id), parent_id))
 
             # Recursively check subclusters
             for subcluster in cluster.subclusters:
@@ -4366,16 +4416,14 @@ class XReferView(idaapi.simplecustviewer_t):
                 elif func_ea in cluster.nodes:
                     memberships.append((cluster.id, data.get("label", ""), "member"))
                     membership_found = True
-                # Check intermediate paths
+                # Check intermediate paths — interior positions, from the
+                # prebuilt index (this ran a full path rescan per xref-ing
+                # function per cluster-graph render).
                 else:
-                    for _, paths in cluster.intermediate_paths.items():
-                        for path in paths:
-                            if func_ea in path and func_ea != path[0] and func_ea != path[-1]:
-                                memberships.append((cluster.id, data.get("label", ""), "intermediate"))
-                                membership_found = True
-                                break
-                        if membership_found:
-                            break
+                    rec = self._func_path_index().get(func_ea, {}).get(cluster.id)
+                    if rec is not None and rec["interior"]:
+                        memberships.append((cluster.id, data.get("label", ""), "intermediate"))
+                        membership_found = True
 
                 # Check subclusters recursively
                 for subcluster in cluster.subclusters:
@@ -4600,9 +4648,11 @@ class XReferView(idaapi.simplecustviewer_t):
                     force = True
                     self.func_ea = func_ea
                 else:
+                    # Quiet: this fires on every sync cursor landing on an
+                    # unclustered function; the banner's Status row already
+                    # says it.
                     force = True
                     self.func_ea = func_ea
-                    log(f"Function 0x{self.func_ea:x} not found in any clusters")
 
             elif self.peek_flag and not self.state_machine.is_sticky_state() and not self.state_machine.is_pinned_graph():
                 # Peek hijacks the panel with a call-focus preview; while a
