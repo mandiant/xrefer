@@ -224,6 +224,11 @@ class XReferView(idaapi.simplecustviewer_t):
         # resurrect layouts with stale function names.
         self._cluster_ascii_cache: Dict[Any, List[str]] = {}
         self._cluster_ascii_token: Any = None
+        # Scroll target applied AFTER the next redraw (see
+        # _apply_post_redraw_jump). Key handlers that restore a position
+        # (ESC/K go_back) stash it here instead of Jumping pre-redraw,
+        # where the draw handlers' trailing Jump(0,0) wiped it.
+        self._pending_jump: Optional[Tuple[int, int, int]] = None
 
         if self.xrefer_obj.lang:
             self.create()
@@ -724,6 +729,13 @@ class XReferView(idaapi.simplecustviewer_t):
         if self.state_machine.current_state in (self.state_machine.cluster_graphs, self.state_machine.pinned_cluster_graphs, self.state_machine.clusters, self.state_machine.base, self.state_machine.attack_matrix):
             cluster_manager = self.state_machine.cluster_manager
 
+            # Leaving the clusters TABLE by mouse: remember the row so the
+            # ESC return path can land back on it (keyboard flows store it
+            # in OnKeydown; clicks bypass that).
+            if self.state_machine.current_state == self.state_machine.clusters:
+                lineno, x, y = self.GetPos()
+                self.state_machine.store_cursor_position(self.state_machine.clusters, lineno, x, y)
+
             # If in cluster graph states, store current position before switching
             if self.state_machine.current_state not in (self.state_machine.base, self.state_machine.clusters, self.state_machine.attack_matrix):
                 lineno, x, y = self.GetPos()
@@ -854,6 +866,7 @@ class XReferView(idaapi.simplecustviewer_t):
         lineno, x, y = self.GetPos()
         self.state_machine.store_cursor_position(self.state_machine.current_state, lineno, x, y)
 
+        self._pending_jump = None  # only this keypress's handlers may stash
         state_before_handling_key = self.state_machine.current_state
         should_update = self.handle_key_specific_actions(vkey, shift)
         state_after_handling_key = self.state_machine.current_state
@@ -892,8 +905,39 @@ class XReferView(idaapi.simplecustviewer_t):
 
         if should_update:
             self.update(True)
+            self._apply_post_redraw_jump(state_before_handling_key, state_after_handling_key)
 
         return True
+
+    def _apply_post_redraw_jump(self, state_before, state_after) -> None:
+        """Re-apply the intended scroll position AFTER a redraw.
+
+        The long reading views' draw handlers end in Jump(0,0) — right for
+        fresh entries (menu actions, double-click), which bypass OnKeydown
+        and must open at the top — but it wiped two kinds of position:
+        same-state toggles (L hide-library, R report) threw the analyst
+        back to row 0 of a long table/matrix, and ESC/K go_back restores
+        ran BEFORE the redraw and were clobbered. Handlers stash an
+        explicit target in _pending_jump; same-state toggles fall back to
+        the position stored at the top of OnKeydown. The allowlist is
+        deliberately tight — search-state typing and other same-state
+        redraws render filtered/shifting content where a stale position
+        would mislead. Restores clamp to the new line count (toggled
+        content can be shorter than where the cursor was).
+        """
+        sm = self.state_machine
+        target = self._pending_jump
+        self._pending_jump = None
+        if target is None:
+            if state_before is state_after and state_after in (sm.clusters, sm.attack_matrix):
+                target = sm.get_cursor_position(state_after)
+        if not target:
+            return
+        lineno, x, y = target
+        try:
+            self.Jump(min(int(lineno), max(self.Count() - 1, 0)), x, y)
+        except Exception:
+            pass
 
     def OnHint(self, lineno: int) -> Optional[str]:
         """
@@ -1216,7 +1260,9 @@ class XReferView(idaapi.simplecustviewer_t):
         if current == sm.attack_matrix:
             success, cursor_pos = sm.go_back()
             if cursor_pos:
-                self.Jump(*cursor_pos)
+                # Applied after the redraw — a pre-redraw Jump is wiped by
+                # the landing view's trailing Jump(0,0).
+                self._pending_jump = cursor_pos
             return True
 
         if current not in (sm.base, sm.clusters, sm.cluster_graphs, sm.pinned_cluster_graphs):
@@ -1768,8 +1814,16 @@ class XReferView(idaapi.simplecustviewer_t):
                         # Single cluster with no subclusters - go back in state machine
                         success, cursor_pos = self.state_machine.go_back()
                         if cursor_pos:
-                            self.Jump(*cursor_pos)
+                            self._pending_jump = cursor_pos
                         return success
+                    elif self.state_machine.return_to_clusters_table():
+                        # Entered from the clusters TABLE: the triage loop
+                        # (table -> click cluster -> ESC -> next cluster)
+                        # returns to the table at the stored row, not to
+                        # the relationship overview. OnKeydown redraws and
+                        # applies the stashed position afterwards.
+                        self._pending_jump = self.state_machine.get_cursor_position(self.state_machine.clusters)
+                        return True
                     else:
                         # Multiple clusters - restore relationship graph position
                         if pos := cluster_manager.get_relationship_pos():
@@ -1791,8 +1845,9 @@ class XReferView(idaapi.simplecustviewer_t):
             success, cursor_pos = self.state_machine.go_back()
 
             if cursor_pos:
-                lineno, x, y = cursor_pos
-                self.Jump(lineno, x, y)  # Restore cursor position
+                # Applied after the redraw — a pre-redraw Jump is wiped by
+                # the landing view's trailing Jump(0,0).
+                self._pending_jump = cursor_pos
             if success:
                 return True
             return False

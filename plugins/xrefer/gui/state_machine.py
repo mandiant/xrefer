@@ -299,8 +299,17 @@ class XReferStateMachine(StateMachine):
         for i in range(len(self._state_history) - 2, -1, -1):
             prev_state, event = self._state_history[i]
 
+            # toggle_ events are mode flips (pin, sync, library visibility)
+            # whose states must not be revisited — EXCEPT the cluster
+            # table <-> graph pair, a real view change that ESC / K / N
+            # should walk back through (the revert_*_to_clusters
+            # transitions exist but were never reachable past this filter,
+            # stranding the triage loop in the overview).
+            event_name = str(event)
+            is_mode_flip = event_name.startswith("toggle_") and event_name not in ("toggle_on_clusters", "toggle_on_cluster_graphs")
+
             # Check if this state meets our criteria
-            if prev_state != current_state and not event.startswith("toggle_"):
+            if prev_state != current_state and not is_mode_flip:
                 # Find the transition
                 for transition in current_state.transitions:
                     if transition.target == prev_state:
@@ -320,6 +329,32 @@ class XReferStateMachine(StateMachine):
 
         # log("No suitable previous state found")
         return False, None
+
+    def return_to_clusters_table(self) -> bool:
+        """ESC support for the table → cluster-graph → ESC triage loop.
+
+        When the active cluster graph was entered FROM the clusters table,
+        transition back to the table and truncate the history so a further
+        ESC keeps walking toward base. The table's history entry is
+        recorded with a toggle_ event, which ``go_back`` would need extra
+        context to pick (the graph may legitimately sit between two table
+        visits), so the raw history is scanned here: the nearest distinct
+        prior state decides. Returns False when the graph was entered any
+        other way (overview / base / chip click from elsewhere) — callers
+        keep the existing overview behavior.
+        """
+        if self.current_state != self.cluster_graphs:
+            return False
+        for i in range(len(self._state_history) - 2, -1, -1):
+            prev_state, _event = self._state_history[i]
+            if prev_state == self.current_state:
+                continue
+            if prev_state != self.clusters:
+                return False
+            self._state_history = self._state_history[: i + 1]
+            self.toggle_on_clusters()
+            return True
+        return False
 
     def reset_state(self) -> None:
         """Reset state machine to initial conditions."""
