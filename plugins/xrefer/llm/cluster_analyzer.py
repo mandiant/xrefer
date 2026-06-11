@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Set
 
-from xrefer.core.helpers import log
+from xrefer.core.helpers import cancellable_phase, check_cancelled, log
 from xrefer.llm.base import ModelConfig, PromptType
 from xrefer.llm.processor import LLMProcessor
 
@@ -341,55 +341,77 @@ class ClusterAnalyzer:
         log(f"Stage 1 context mode: {mode} (setting: {mode_setting})")
 
         stage1_clusters: Dict[str, Any] = {}
-        if mode == "hierarchical":
-            # ── Hierarchical bottom-up: leaves-first, children as summaries ──
-            stage1_clusters = cls._run_bottomup_stage1(
-                clusters, xrefer_obj, processor, batch_size, force_no_cache, model_id,
-            )
-        else:
-            # ── Full path: send the whole corpus, answer in batches ──────
-            # Each call sends the full cluster corpus (so cross-cluster context
-            # is always available) but asks the model to return analysis for only
-            # a batch_size-sized subset at a time, for per-cluster richness.
-            # Independent closures (groups) are the outer loop; for the common
-            # single-component binary there is just one. (Anything too big to fit
-            # the window is caught by the pre-flight gate before we get here.)
-            from xrefer.core.clusters import cluster_ids as _cluster_ids
-            from xrefer.core.clusters import compute_closures as _compute_closures
+        # Stage 1 is many independent calls — the one phase where Cancel can
+        # take effect between units of work (an in-flight synchronous LLM
+        # call itself cannot be interrupted).
+        with cancellable_phase():
+            if mode == "hierarchical":
+                # ── Hierarchical bottom-up: leaves-first, children as summaries ──
+                stage1_clusters = cls._run_bottomup_stage1(
+                    clusters, xrefer_obj, processor, batch_size, force_no_cache, model_id,
+                )
+            else:
+                # ── Full path: send the whole corpus, answer in batches ──────
+                # Each call sends the full cluster corpus (so cross-cluster context
+                # is always available) but asks the model to return analysis for only
+                # a batch_size-sized subset at a time, for per-cluster richness.
+                # Independent closures (groups) are the outer loop; for the common
+                # single-component binary there is just one. (Anything too big to fit
+                # the window is caught by the pre-flight gate before we get here.)
+                from xrefer.core.clusters import cluster_ids as _cluster_ids
+                from xrefer.core.clusters import compute_closures as _compute_closures
 
-            closures = _compute_closures(clusters)
-            total_batches = sum(
-                max(1, (len(_cluster_ids(cl)) + batch_size - 1) // batch_size) for cl in closures
-            )
-            log(f"Stage 1 (full): {cluster_count} clusters in {len(closures)} group(s); "
-                f"{total_batches} batch(es) of up to {batch_size}, full corpus sent each call")
+                closures = _compute_closures(clusters)
+                total_batches = sum(
+                    max(1, (len(_cluster_ids(cl)) + batch_size - 1) // batch_size) for cl in closures
+                )
+                log(f"Stage 1 (full): {cluster_count} clusters in {len(closures)} group(s); "
+                    f"{total_batches} batch(es) of up to {batch_size}, full corpus sent each call")
 
-            done = 0
-            batch_no = 0
-            for closure in closures:
-                closure_ids = sorted(_cluster_ids(closure))
-                for bstart in range(0, len(closure_ids), batch_size):
-                    respond_ids = set(closure_ids[bstart:bstart + batch_size])
-                    cluster_data = cls.format_cluster_data(closure, xrefer_obj, respond_for_ids=respond_ids)
-                    batch_no += 1
-                    done += len(respond_ids)
-                    log(
-                        f"Stage 1 (full): batch {batch_no}/{total_batches}, "
-                        f"{len(respond_ids)} cluster(s) [{done}/{cluster_count}] "
-                        f"(full corpus {_measure(cluster_data, model_id)})"
-                    )
-                    with cache_ctx():
-                        results = processor.process_items(
-                            cluster_data,
-                            prompt_type=PromptType.CLUSTER_ANALYZER,
-                            ignore_token_limit=True,
+                done = 0
+                batch_no = 0
+                cancelled = False
+                for closure in closures:
+                    if cancelled:
+                        break
+                    closure_ids = sorted(_cluster_ids(closure))
+                    for bstart in range(0, len(closure_ids), batch_size):
+                        if check_cancelled():
+                            cancelled = True
+                            break
+                        respond_ids = set(closure_ids[bstart:bstart + batch_size])
+                        cluster_data = cls.format_cluster_data(closure, xrefer_obj, respond_for_ids=respond_ids)
+                        batch_no += 1
+                        done += len(respond_ids)
+                        log(
+                            f"Stage 1 (full): batch {batch_no}/{total_batches}, "
+                            f"{len(respond_ids)} cluster(s) [{done}/{cluster_count}] "
+                            f"(full corpus {_measure(cluster_data, model_id)})"
                         )
-                    results = dict(results)
-                    stage1_clusters.update(results.get("clusters", {}))
+                        with cache_ctx():
+                            results = processor.process_items(
+                                cluster_data,
+                                prompt_type=PromptType.CLUSTER_ANALYZER,
+                                ignore_token_limit=True,
+                            )
+                        results = dict(results)
+                        stage1_clusters.update(results.get("clusters", {}))
 
         if not stage1_clusters:
             log("[-] Error: No cluster data received after stage 1")
             return {}
+
+        if check_cancelled():
+            # Cancel pressed mid-stage-1: whatever was gathered is real work.
+            # Mirror the stage-2-failure fall-through instead of discarding
+            # it — the analyst can re-run later to fill in the rest.
+            log("[!] Cluster analysis cancelled — saving the per-cluster analyses "
+                "gathered so far with placeholder binary fields.")
+            return {
+                "clusters": stage1_clusters,
+                "binary_description": "",
+                "binary_category": "Undetermined",
+            }
 
         # ── Stage 2: binary-level synthesis ──────────────────────────
         log("Stage 2: synthesising binary-level analysis from per-cluster results")
@@ -915,6 +937,9 @@ class ClusterAnalyzer:
         for wi, wave in enumerate(waves, 1):
             calls = cls._pack_waves([wave], cost_fn, call_budget_tokens, batch_size)
             for call in calls:
+                if check_cancelled():
+                    log("[!] Stage 1 cancelled — keeping the per-cluster results gathered so far.")
+                    return stage1_clusters
                 respond_ids = {c.id for c in call}
                 cluster_data = cls.format_cluster_data(
                     call, xrefer_obj, respond_for_ids=respond_ids, summaries=summaries,

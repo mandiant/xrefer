@@ -364,7 +364,7 @@ class CollapseIndicator(QtWidgets.QWidget):
         self.reposition()
 
 
-from xrefer.core.helpers import convert_int_to_hex, create_table_from_rows, enrich_string_data_core, find_cluster_analysis, get_visible_width, render_markdown_segments, sort_clusters, strip_cluster_citations, word_wrap_text, set_log_function
+from xrefer.core.helpers import convert_int_to_hex, create_table_from_rows, enrich_string_data_core, find_cluster_analysis, get_visible_width, in_cancellable_phase, render_markdown_segments, sort_clusters, strip_cluster_citations, word_wrap_text, set_log_function
 
 
 def render_markdown_report_lines(md: str, width: int = 85, indent: str = "") -> List[str]:
@@ -541,13 +541,18 @@ def log(string: str) -> None:
     """
     Log message to IDA's output window with XRefer prefix.
 
-    Also updates the wait box message if one is active.
+    Also updates the wait box message if one is active. During a
+    cancellable phase the update must not re-assert HIDECANCEL, or the
+    first progress line would strip the Cancel button the phase needs.
 
     Args:
         string (str): Message to log
     """
     print(f"[XRefer] {string}")
-    idaapi.replace_wait_box(f"HIDECANCEL\n{string}")
+    if in_cancellable_phase():
+        idaapi.replace_wait_box(string)
+    else:
+        idaapi.replace_wait_box(f"HIDECANCEL\n{string}")
 
     set_log_function(log)
 

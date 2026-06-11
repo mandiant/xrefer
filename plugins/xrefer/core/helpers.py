@@ -20,6 +20,7 @@ import re
 import threading
 import unicodedata
 from collections import defaultdict
+from contextlib import contextmanager
 from time import sleep, time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -1046,6 +1047,60 @@ def set_log_function(func) -> None:
     """
     global _log_func
     _log_func = func
+
+
+class AnalysisCancelled(Exception):
+    """Raised when the user cancels a long-running analysis phase."""
+
+
+_cancel_check = None
+_cancellable_depth = 0
+
+
+def set_cancel_check(func) -> None:
+    """Set the cancellation probe used by long-running core phases.
+
+    Mirrors ``set_log_function``: the GUI frontend registers a main-thread
+    callable (IDA's ``user_cancelled``) at plugin init; headless runs keep
+    the default never-cancelled probe. Keeps the core/llm layers free of
+    IDA imports while sharing one cancellation site.
+    """
+    global _cancel_check
+    _cancel_check = func
+
+
+def check_cancelled() -> bool:
+    """True when the user pressed Cancel on the active wait box."""
+    if _cancel_check is None:
+        return False
+    try:
+        return bool(_cancel_check())
+    except Exception:
+        return False
+
+
+@contextmanager
+def cancellable_phase():
+    """Mark a stretch of main-thread work as user-cancellable.
+
+    While active, the GUI ``log`` stops re-asserting HIDECANCEL on its
+    wait-box updates (see ``in_cancellable_phase``), so the Cancel button
+    appears with the phase's first progress line and stays up. The work
+    itself must poll ``check_cancelled`` between units — an in-flight
+    synchronous LLM call cannot be interrupted; cancellation takes effect
+    between calls.
+    """
+    global _cancellable_depth
+    _cancellable_depth += 1
+    try:
+        yield
+    finally:
+        _cancellable_depth -= 1
+
+
+def in_cancellable_phase() -> bool:
+    """Whether a cancellable phase is active (wait box keeps its Cancel)."""
+    return _cancellable_depth > 0
 
 def log(string: str) -> None:
     """

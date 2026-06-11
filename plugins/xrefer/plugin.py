@@ -14,15 +14,23 @@
 
 from typing import Optional
 
+import ida_kernwin
 import idaapi
 
 from xrefer import __version__
+from xrefer.core.helpers import set_cancel_check
 from xrefer.gui.action_handlers import *
 from xrefer.gui.helpers import *
 from xrefer.gui.view import XReferView
 
 initialized: bool = False
 plugin_instance = None
+
+# Route the core layer's cancellation probe to IDA's wait-box Cancel
+# button. Long-running phases poll check_cancelled() between units of
+# work (main-thread synchronous — the canonical IDA pattern). Headless
+# runs never register a probe and stay never-cancelled.
+set_cancel_check(ida_kernwin.user_cancelled)
 
 
 class XReferPlugin(idaapi.plugin_t):

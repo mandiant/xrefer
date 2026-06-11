@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union, 
 import xrefer
 from xrefer.backend import Address, BackEnd, FunctionType, XrefType, get_current_backend
 from xrefer.core.clusters import ClusterManager, FunctionalCluster
-from xrefer.core.helpers import enrich_string_data_core, find_cluster_analysis, log, log_elapsed_time, sanitize_dirtree_name
+from xrefer.core.helpers import AnalysisCancelled, cancellable_phase, check_cancelled, enrich_string_data_core, find_cluster_analysis, log, log_elapsed_time, sanitize_dirtree_name
 from xrefer.core.settings import XReferSettingsManager, deep_merge_settings
 from xrefer.lang import get_language_object
 from xrefer.llm import ClusterAnalyzer, CATEGORIES, Categorizer
@@ -1805,7 +1805,11 @@ class XRefer:
             if self.is_node_in_existing_paths(self.current_analysis_ep):
                 return
 
-            self.run_secondary_analysis()
+            try:
+                self.run_secondary_analysis()
+            except AnalysisCancelled:
+                self._abandon_cancelled_run()
+                return
             self.clear_affected_graph_cache()
             self.save_analysis()
         elif not self.check_required_files():
@@ -1815,6 +1819,9 @@ class XRefer:
             try:
                 self.analyze(self.mode)
                 self.save_analysis()
+            except AnalysisCancelled:
+                self._abandon_cancelled_run()
+                return
             except AssertionError as err:
                 hide_wait_box()
                 message = str(err)
@@ -3015,10 +3022,27 @@ class XRefer:
         show_wait_box("HIDECANCEL\nStarting Analysis...")
         start_time = time()
         self.process_exclusions()
-        self.run_secondary_analysis()
+        try:
+            self.run_secondary_analysis()
+        except AnalysisCancelled:
+            self._abandon_cancelled_run()
+            return
         self.clear_affected_graph_cache()
         self.save_analysis()
         log_elapsed_time("Analysis Time", start_time)
+
+    def _abandon_cancelled_run(self) -> None:
+        """Leave a consistent not-analyzed state after a user cancel.
+
+        Partial results are never persisted, and the in-progress entry
+        point is removed from ``paths`` — its (empty or partial) entry
+        would otherwise make every "already analyzed?" check answer yes
+        and silently serve an incomplete analysis.
+        """
+        hide_wait_box()
+        if self.current_analysis_ep is not None:
+            self.paths.pop(self.current_analysis_ep, None)
+        log("[!] Analysis cancelled by user — nothing was saved. Re-run the analysis when ready.")
 
     def check_required_files(self) -> bool:
         """
@@ -3107,6 +3131,7 @@ class XRefer:
         all_paths: List[List[int]] = []
         seen_paths: Set[Tuple[int, ...]] = set()
         path_buffer = deque([[final]])
+        steps = 0
 
         def record_path(path: List[int]) -> None:
             key = tuple(path)
@@ -3121,6 +3146,11 @@ class XRefer:
         # per leaf instead of flickering through Function() reprs + per-pair
         # "Found N / No path" noise (the latter is redundant with the footer).
         while path_buffer and len(all_paths) < max_limit and len(path_buffer) < max_limit:
+            # A single pathological leaf can grind for a long time; honor
+            # Cancel from inside the BFS too, not just between leaves.
+            steps += 1
+            if steps & 0x3FF == 0 and check_cancelled():
+                raise AnalysisCancelled("path building cancelled")
             refs: Set[int] = set()
             target = path_buffer[0][-1]
 
@@ -3170,16 +3200,19 @@ class XRefer:
             for tgt in targets:
                 preds.setdefault(tgt, set()).add(caller)
 
-        for idx, func_ea in enumerate(self.leaf_funcs, 1):
-            if self.current_analysis_ep != func_ea:
-                # Check if the paths from current_analysis_ep to func_ea are already stored
-                if func_ea not in self.paths[self.current_analysis_ep]:
-                    leaf_fn = self._backend.get_function_at(Address(func_ea))
-                    leaf_name = leaf_fn.name if leaf_fn else f"{func_ea:#x}"
-                    log(f"Building call paths [{idx}/{total}] :: {ep_name} -> {leaf_name}")
-                    _paths = self.generate_simple_call_paths(self.current_analysis_ep, func_ea, preds)
-                    if len(_paths):
-                        self.paths[self.current_analysis_ep][func_ea] = _paths
+        with cancellable_phase():
+            for idx, func_ea in enumerate(self.leaf_funcs, 1):
+                if check_cancelled():
+                    raise AnalysisCancelled("path building cancelled")
+                if self.current_analysis_ep != func_ea:
+                    # Check if the paths from current_analysis_ep to func_ea are already stored
+                    if func_ea not in self.paths[self.current_analysis_ep]:
+                        leaf_fn = self._backend.get_function_at(Address(func_ea))
+                        leaf_name = leaf_fn.name if leaf_fn else f"{func_ea:#x}"
+                        log(f"Building call paths [{idx}/{total}] :: {ep_name} -> {leaf_name}")
+                        _paths = self.generate_simple_call_paths(self.current_analysis_ep, func_ea, preds)
+                        if len(_paths):
+                            self.paths[self.current_analysis_ep][func_ea] = _paths
 
         total_paths_generated = len(self.paths[self.current_analysis_ep])
         log(f"Generated {total_paths_generated} call path groups from {ep_name}")
