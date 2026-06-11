@@ -494,8 +494,12 @@ class GhidraBackend(BackEnd):
             xref_type = self._convert_ref_type(ref.getReferenceType())
             yield GhidraXref(Address(ref.getFromAddress().getOffset()), Address(ref.getToAddress().getOffset()), xref_type)
 
-    def get_xrefs_from(self, address: Address) -> Iterator[Xref]:
-        """Get all references FROM the specified address."""
+    def get_xrefs_from(self, address: Address, far_only: bool = False) -> Iterator[Xref]:
+        """Get all references FROM the specified address.
+
+        ``far_only`` is accepted for interface parity and ignored: Ghidra's
+        reference manager does not produce ordinary fall-through refs.
+        """
         program = self._get_actual_program()
         ref_manager = program.getReferenceManager()
         addr_value = address.value if isinstance(address, Address) else int(address)

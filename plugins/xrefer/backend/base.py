@@ -241,6 +241,16 @@ class Function(ABC):
         """Iterate over basic blocks in the function."""
         ...
 
+    @property
+    def chunk_ranges(self) -> Optional[List[Tuple[int, int]]]:
+        """Half-open ``[start, end)`` address ranges composing the
+        function, tail chunks included, or None when the backend cannot
+        enumerate them. Callers that get None fall back to per-address
+        ``contains`` checks; backends with chunked functions (IDA)
+        override this so containment can be answered Python-side.
+        """
+        return None
+
     @abstractmethod
     def contains(self, address: Address) -> bool:
         """Check if address is within function boundaries."""
@@ -559,12 +569,17 @@ class BackEnd(ABC):
         ...
 
     @abstractmethod
-    def get_xrefs_from(self, address: Address) -> Iterator[Xref]:
+    def get_xrefs_from(self, address: Address, far_only: bool = False) -> Iterator[Xref]:
         """
         Get all references FROM the specified address.
 
         Args:
             address: Source address
+            far_only: When True, exclude ordinary fall-through flow refs
+                (IDA's XREF_ALL yields one per instruction — millions of
+                wrapper allocations on big binaries when only real
+                call/jump/data refs are wanted). Backends whose reference
+                model has no fall-through refs may ignore it.
 
         Yields:
             Cross-references originating from the address

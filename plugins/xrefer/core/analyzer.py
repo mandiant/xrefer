@@ -595,23 +595,47 @@ class XRefer:
 
         log("Generating xref mappings...")
         for func in self._backend.functions():
-            for block in func.basic_blocks:
-                # Iterate over the instructions in the basic block
-                for addr in self._backend.instructions(block.start, block.end):
-                    for ref in self._backend.get_xrefs_from(Address(addr)):
-                        # Check if the reference points within the same function
-                        if Address(ref.target) in func:
-                            continue
+            start = int(func.start)
+            ranges = func.chunk_ranges
+            if ranges is not None:
+                # far_only skips the per-instruction fall-through flow refs
+                # (the bulk of XREF_ALL's yield), and containment is one
+                # Python tuple scan over the function's chunk ranges — tail
+                # chunks included, matching func_contains — instead of one
+                # backend round-trip per xref. Walking the chunk ranges also
+                # covers refs originating at data embedded in the function
+                # (jump tables, literal pools), which the basic-block walk
+                # missed.
+                for range_start, range_end in ranges:
+                    for addr in self._backend.instructions(Address(range_start), Address(range_end)):
+                        for ref in self._backend.get_xrefs_from(Address(addr), far_only=True):
+                            target = int(ref.target)
+                            # Skip references pointing within the same function
+                            if any(cs <= target < ce for cs, ce in ranges):
+                                continue
+                            self._record_caller_xref(start, ref)
+            else:
+                # Backend can't enumerate chunks — original per-block walk
+                # with per-ref containment.
+                for block in func.basic_blocks:
+                    # Iterate over the instructions in the basic block
+                    for addr in self._backend.instructions(block.start, block.end):
+                        for ref in self._backend.get_xrefs_from(Address(addr), far_only=True):
+                            # Check if the reference points within the same function
+                            if Address(ref.target) in func:
+                                continue
+                            self._record_caller_xref(start, ref)
 
-                        start = int(func.start)
-                        if start not in self.caller_xrefs_cache:
-                            # function A -> function B call locations
-                            self.caller_xrefs_cache[start] = {ref.target: {ref.source}}
-                        else:
-                            try:
-                                self.caller_xrefs_cache[start][ref.target].add(ref.source)
-                            except KeyError:
-                                self.caller_xrefs_cache[start][ref.target] = {ref.source}
+    def _record_caller_xref(self, start: int, ref) -> None:
+        """Record one outgoing reference into caller_xrefs_cache."""
+        if start not in self.caller_xrefs_cache:
+            # function A -> function B call locations
+            self.caller_xrefs_cache[start] = {ref.target: {ref.source}}
+        else:
+            try:
+                self.caller_xrefs_cache[start][ref.target].add(ref.source)
+            except KeyError:
+                self.caller_xrefs_cache[start][ref.target] = {ref.source}
 
     def get_user_xrefs(self, user_xrefs_path: str) -> List[Tuple[int, int]]:
         _xrefs = []
