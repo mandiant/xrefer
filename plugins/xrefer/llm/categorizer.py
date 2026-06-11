@@ -80,11 +80,12 @@ class Categorizer:
         if not processor.validate_api_key():
             return categorized_items, categories
 
-        # Filter out already categorized items
-        uncategorized = []
-        for item in item_list:
-            if item not in categorized_items:
-                uncategorized.append(item)
+        # Filter out already categorized items, deduplicating while keeping
+        # first-encounter order (item lists arrive per reference SITE, so
+        # the same API/lib name can repeat thousands of times — duplicates
+        # inflate both the prompt and the response for nothing; results map
+        # back by name, so dedup is lossless).
+        uncategorized = list(dict.fromkeys(item for item in item_list if item not in categorized_items))
 
         if not uncategorized:
             return categorized_items, categories

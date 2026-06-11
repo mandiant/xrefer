@@ -502,9 +502,9 @@ class LLMProcessor:
         on its OWN ``LLMProcessor`` instance with its own ``self.lm``/``adapter``.
         Because ``dspy.settings`` is GLOBAL (last ``configure`` wins) and these
         run as separate phases that can interleave / re-run, we re-assert THIS
-        processor's lm+adapter per call via ``dspy.context`` (thread-local, so
-        it is also safe under ``_process_parallel`` workers). ``override_lm`` /
-        ``uncached_lm`` mutate ``self.lm``, so the context picks those up too.
+        processor's lm+adapter per call via ``dspy.context`` (thread-local).
+        ``override_lm`` / ``uncached_lm`` mutate ``self.lm``, so the context
+        picks those up too.
         """
         try:
             ctx_kwargs: Dict[str, Any] = {}
@@ -544,58 +544,56 @@ You can:
                 raise ValueError(f"Unsupported prompt type: {prompt_type}")
 
 
-    def _process_parallel(self, items: List[Any], prompt_type: PromptType, batch_size: int, config: Optional[ProcessConfig]=None) -> Dict[int, Any]:
-        """Process items in parallel batches."""
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+    # Items per categorizer call. Each assignment costs ~10-20 output
+    # tokens plus adapter scaffolding, so 150 stays comfortably inside even
+    # a 4-8k output cap; wider caps gain nothing from bigger chunks (per-
+    # call latency grows and a failed chunk loses more work).
+    _CATEGORIZER_CHUNK_SIZE = 150
 
-        import os
-        max_workers = min(os.cpu_count() * 4, 20, len(items) // batch_size + 1)
+    def _categorize_in_chunks(self, items: List[Any], config: ProcessConfig) -> Dict[str, Any]:
+        """Categorize sequentially in output-cap-safe chunks.
 
-        results = {}
+        One giant call used to send EVERY uncategorized item at once: a few
+        thousand first-run items (Rust/Go) overflow small output caps, the
+        parse error aborted the analysis before the category cache was
+        saved, and the failure repeated identically on every run of that
+        binary+model. Sequential chunks keep each response far under the
+        cap and respect the main-thread constraint — a parallel executor
+        here could reach log() -> replace_wait_box from worker threads,
+        the documented IDA deadlock vector.
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {}
+        Per-chunk semantics:
+          * items a SUCCESSFUL chunk omitted are filled as 'Others' (the
+            model saw them and skipped them);
+          * a FAILED chunk ({} — rate limit / transient error) contributes
+            nothing, so its items stay uncached and are retried on the
+            next run instead of being permanently cached as 'Others'.
 
-            for i in range(0, len(items), batch_size):
-                chunk = items[i:i + batch_size]
-                future = executor.submit(self._process_single, chunk, prompt_type, config)
-                futures[future] = i
-
-            for future in as_completed(futures):
-                chunk_result = future.result()
-                chunk_start = futures[future]
-
-                # Adjust indices for categorizer (use int consistently)
-                if prompt_type == PromptType.CATEGORIZER:
-                    for idx, cat_idx in chunk_result.items():
-                        original_idx = int(idx) + chunk_start
-                        results[original_idx] = cat_idx
-                else:
-                    results.update(chunk_result)
-
-        return results
-
-    def _process_sequential(self, items: List[Any], prompt_type: PromptType, batch_size: int, config: ProcessConfig) -> Dict[int, Any]:
-        """Process items sequentially in batches."""
-        results = {}
+        Returns the wrapped {"category_assignments": {str_idx: cat}} shape
+        with indices relative to the input list.
+        """
+        batch_size = self._CATEGORIZER_CHUNK_SIZE
         total_chunks = (len(items) + batch_size - 1) // batch_size
-
-        for i in range(0, len(items), batch_size):
-            chunk = items[i:i + batch_size]
-            chunk_num = i // batch_size + 1
-            log(f"[+]Processing chunk {chunk_num}/{total_chunks}")
-
-            chunk_result = self._process_single(chunk, prompt_type, config)
-
-            # Adjust indices for categorizer
-            if prompt_type == PromptType.CATEGORIZER:
-                for idx, cat_idx in chunk_result.items():
-                    original_idx = int(idx) + i
-                    results[original_idx] = cat_idx
-            else:
-                results.update(chunk_result)
-
-        return results
+        if total_chunks > 1:
+            log(f"[+] Categorizing {len(items)} items in {total_chunks} chunks of up to {batch_size}")
+        others_idx = config.categories.index("Others") if "Others" in config.categories else 0
+        assignments: Dict[str, Any] = {}
+        for start in range(0, len(items), batch_size):
+            chunk = items[start:start + batch_size]
+            if total_chunks > 1:
+                log(f"[+] Categorizer chunk {start // batch_size + 1}/{total_chunks} ({len(chunk)} items)")
+            result = self._process_single(chunk, PromptType.CATEGORIZER, config)
+            chunk_assignments = (result or {}).get("category_assignments")
+            if not chunk_assignments:
+                continue  # failed chunk: leave uncached for the next run
+            for idx_str, cat in chunk_assignments.items():
+                try:
+                    assignments[str(int(idx_str) + start)] = cat
+                except (TypeError, ValueError):
+                    continue
+            for offset in range(len(chunk)):
+                assignments.setdefault(str(offset + start), others_idx)
+        return {"category_assignments": assignments}
 
     def _preflight_connectivity(self) -> None:
         """Fail fast with an actionable error before issuing LLM calls.
@@ -660,47 +658,7 @@ You can:
             return self._process_single([items], prompt_type)
         if prompt_type == PromptType.BINARY_SYNTHESIZER:
             return self._process_single([items], prompt_type)
-        config = None
         if prompt_type == PromptType.CATEGORIZER:
             config = ProcessConfig(categories=categories or [], item_type=type)
-            return self._process_single(items, prompt_type, config)
-
-        if ignore_token_limit:
-            log(f"[+] Processing all {len(items)} items in single batch")
-            results = self._process_single(items, prompt_type, config)
-            # Convert to str keys for backward compatibility
-            if prompt_type == PromptType.CATEGORIZER:
-                return {str(k): v for k, v in results.items()}
-            return results
-
-        # Batched processing
-        # Simple heuristic: 50 items per batch (conservative, no token counting needed)
-        batch_size = 50
-        log(f"[+] Processing {len(items)} items in batches of {batch_size}")
-        # NOTE: In a perfect world, dspy would support **native** batch processing (/v1/batches)
-        # https://docs.litellm.ai/docs/batches
-        # unfortunately, we live in a imperfect world...
-
-        use_parallel = True
-
-        if use_parallel:
-            results = self._process_parallel(items, prompt_type, batch_size, config)
-        else:
-            results = self._process_sequential(items, prompt_type, batch_size, config)
-
-        # Fill in missed items for categorizer
-        if prompt_type == PromptType.CATEGORIZER:
-            all_indices = set(range(len(items)))
-            processed_indices = set(results.keys())
-            missed_indices = all_indices - processed_indices
-
-            if missed_indices:
-                log(f"[*] Found {len(missed_indices)} missed items, assigning to Others")
-                others_idx = config.categories.index("Others") if "Others" in config.categories else 0
-                for idx in missed_indices:
-                    results[idx] = others_idx
-
-            # Convert to str keys for backward compatibility
-            return {str(k): v for k, v in results.items()}
-
-        return results
+            return self._categorize_in_chunks(items, config)
+        raise ValueError(f"Unsupported prompt type: {prompt_type}")
