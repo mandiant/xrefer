@@ -1315,6 +1315,12 @@ class XReferView(idaapi.simplecustviewer_t):
         """
         if self.state_machine.toggle_hide_library_clusters():
             return True
+        # Gate BEFORE the transition: entering the view with nothing to show
+        # used to call a state-machine transition that was never defined
+        # (AttributeError on a fresh session's very first L press).
+        if not self.last_boundary_scan_results:
+            log("No boundary scan results yet — select artifacts and press B first")
+            return False
         return self.state_machine.start_last_boundary_results()
 
     def handle_key_o(self, shift: bool) -> bool:
@@ -2008,13 +2014,16 @@ class XReferView(idaapi.simplecustviewer_t):
         """
         Draw results from last boundary method scan.
 
-        Displays cached results from previous boundary scan or exits
-        if no previous results exist.
+        Displays cached results from a previous boundary scan; with none
+        (near-unreachable now that the L key gates on results existing),
+        renders a hint instead of transitioning — switching states from
+        inside the draw dispatcher would fire reset_state mid-flight.
+        ESC still exits via the state history.
         """
+        self.ClearLines()
         if not self.last_boundary_scan_results:
-            self.state_machine.end_last_boundary_results()
+            self.AddLine("    No boundary scan results yet — select artifacts and press B first (ESC to go back)")
         else:
-            self.ClearLines()
             for line in self.last_boundary_scan_results:
                 self.AddLine("    %s" % line)
 
