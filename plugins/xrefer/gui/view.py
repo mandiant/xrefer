@@ -927,12 +927,16 @@ class XReferView(idaapi.simplecustviewer_t):
         in_search_state = sm.current_state in (sm.search, sm.artifact_search)
         if in_view_filter:
             if vkey == 27:  # ESC
-                if sm.search_filter:
-                    sm.search_filter = ""
-                    self.update(True)
-                    return True
+                # One ESC leaves filter mode and lands on the normal view —
+                # full table, verbose ribbon, a real resting state; a SECOND
+                # ESC then walks back out of the view through the usual
+                # handler. (Previously ESC cleared the text but stayed in
+                # filter mode, so the next ESC both deactivated AND exited in
+                # one press — the "normal view" rest stop got skipped.)
                 sm.view_filter_active = False
-                # fall through: a second ESC walks back out of the view
+                sm.search_filter = ""
+                self.update(True)
+                return True
             else:
                 before = sm.search_filter
                 self.handle_search_input(vkey, shift)
@@ -2281,7 +2285,9 @@ class XReferView(idaapi.simplecustviewer_t):
             if built is None:
                 continue
             drawn += 1
-            self._draw_orphan_table(table_name, built)
+            # While filtering, open the matched groups so the results show
+            # without a manual expand — mirrors the home-view search.
+            self._draw_orphan_table(table_name, built, force_expand=bool(flt))
         if flt and not drawn:
             self.AddLine(f"{INDENT}No rows match '{flt}' — backspace edits, ESC clears")
 
@@ -2383,16 +2389,14 @@ class XReferView(idaapi.simplecustviewer_t):
                 (group, [self._highlight_filter_match(ln, flt) for ln in lines])
                 for group, lines in built["rows"].items()
             )}
-            # Search results default-expanded: the analyst asked for these
-            # rows — collapsing them behind chevrons would hide the answer.
-            # Their toggles still work and persist for the session.
-            group_states = self.subtable_states.setdefault(table_name, {})
-            for group in built["rows"]:
-                group_states.setdefault(group, True)
-            self._draw_orphan_table(table_name, built)
-            # The overflow note belongs to the rows — a collapsed table
-            # must not carry a dangling footer about rows it isn't showing.
-            if len(indices) > self.SEARCH_MAX_ROWS and bool(self.table_states.get(table_name, 1)):
+            # Search results render expanded — the analyst asked for these
+            # rows, so collapsing them behind chevrons would hide the answer.
+            # force_expand keeps it non-destructive (the orphans view's saved
+            # expand/collapse layout is untouched).
+            self._draw_orphan_table(table_name, built, force_expand=True)
+            # The overflow note belongs to the rows; force_expand always
+            # shows them, so the note always belongs here on overflow.
+            if len(indices) > self.SEARCH_MAX_ROWS:
                 note = f"+{len(indices) - self.SEARCH_MAX_ROWS} more — refine the filter"
                 self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_VOIDOP}{note}\x02{ida_lines.SCOLOR_VOIDOP}")
                 self.AddLine("")
@@ -2497,12 +2501,19 @@ class XReferView(idaapi.simplecustviewer_t):
         heading = (imp_built or lib_built)["heading"]
         return {"heading": heading, "rows": sorted_rows}
 
-    def _draw_orphan_table(self, table_name: str, built: Dict[str, Any]) -> None:
+    def _draw_orphan_table(self, table_name: str, built: Dict[str, Any], force_expand: bool = False) -> None:
         """Render a single orphan table honouring the top-level expand
         state in ``self.table_states[table_name]`` and the per-group
-        state in ``self.subtable_states[table_name]``."""
+        state in ``self.subtable_states[table_name]``.
+
+        ``force_expand`` (set while a filter is active) renders the table
+        and every group open without mutating the stored states, so the
+        matches are visible immediately — the home-view search does the
+        same — and the analyst's pre-filter expand/collapse layout is
+        restored intact once the filter clears.
+        """
         self.current_table = table_name
-        is_expanded = bool(self.table_states.get(table_name, 1))
+        is_expanded = force_expand or bool(self.table_states.get(table_name, 1))
         # Top-level heading: ▾/▸ chevron + artifact count — same idiom as the
         # function context tables (T1/T2). Markers/labels are parsed back via
         # strip_color_codes + chevron, so click-toggle and E work here too.
@@ -2525,7 +2536,8 @@ class XReferView(idaapi.simplecustviewer_t):
 
         subtable_states: Dict[str, bool] = self.subtable_states.setdefault(table_name, {})
         for group_key, group_rows in built["rows"].items():
-            sub_expanded = subtable_states.setdefault(group_key, False)
+            stored = subtable_states.setdefault(group_key, False)
+            sub_expanded = force_expand or stored
             if sub_expanded:
                 self.AddLine(self._category_line("▾", group_key, len(group_rows)))
                 # Rows are already colored via create_xrefs_table_colored;
