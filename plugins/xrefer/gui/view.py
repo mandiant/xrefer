@@ -6140,10 +6140,20 @@ class XReferView(idaapi.simplecustviewer_t):
                 _graph = ascii_graphs.graph_to_ascii(graph).splitlines()
                 self.xrefer_obj.graph_cache[cache_key] = (_graph, num_original_nodes, num_simplified_nodes)
                 self._graph_artifact_colors[cache_key] = node_artifact_colors
-            except:
+            except Exception as e:
+                # Bounce first, log after — so the diagnosis lands LAST in
+                # the Output window where the analyst will see it. The old
+                # bare except mapped every failure (KeyError, layout bug,
+                # anything) to a fixed "too large" lie with the real
+                # exception discarded — undiagnosable. Reserve the size
+                # wording for genuine resource exhaustion.
                 self.state_machine.go_back()
                 self.update(True)
-                log("Graph too large to draw")
+                if isinstance(e, (RecursionError, MemoryError)):
+                    log(f"Graph too large to draw ({type(e).__name__})")
+                else:
+                    traceback.print_exc()
+                    log(f"Graph rendering failed ({type(e).__name__}): {e}")
                 return
 
         self.ClearLines()
@@ -6392,9 +6402,13 @@ class XReferView(idaapi.simplecustviewer_t):
         try:
             graph_lines = ascii_graphs.graph_to_ascii(graph).splitlines()
         except Exception as e:
-            log(f"[-] Error rendering neighborhood graph: {e}")
+            log(f"[-] Error rendering neighborhood graph ({type(e).__name__}): {e}")
+            if isinstance(e, (RecursionError, MemoryError)):
+                reason = "Graph too large to draw."
+            else:
+                reason = f"Graph rendering failed ({type(e).__name__}) — see the Output window."
             self.AddLine(
-                f"    \x01{ida_lines.SCOLOR_DSTR}Graph too large to draw.\x02{ida_lines.SCOLOR_DSTR}"
+                f"    \x01{ida_lines.SCOLOR_DSTR}{reason}\x02{ida_lines.SCOLOR_DSTR}"
             )
             self.Refresh()
             return
