@@ -1344,6 +1344,18 @@ class ClusterAnalyzer:
             # but only fully respond for the given subset.
             ids_csv = ','.join(map(str, sorted(respond_for_ids)))
             ps_note = f"IMPORTANT: Enumerate and ensure you return results for all clusters with IDs {ids_csv}"
+            if respond_for_ids != all_ids:
+                # The subset directive lives here at the TAIL on purpose:
+                # the full stage-1 path sends a byte-identical corpus every
+                # batch, and keeping everything batch-varying after the
+                # corpus makes the shared prefix eligible for provider
+                # implicit prompt caching (OpenAI/Gemini/DeepSeek) — batches
+                # 2..N stop re-prefilling a multi-hundred-k corpus while the
+                # IDA main thread blocks on them.
+                ps_note += (
+                    ". For clusters outside this ID list, do NOT provide analysis — "
+                    "they appear above for cross-cluster context only."
+                )
             note = ""
             if summaries is not None:
                 # Bottom-up: children are pre-analysed summaries; only the focal
@@ -1364,12 +1376,16 @@ class ClusterAnalyzer:
                 # closure is shown for context, but only this subset is answered
                 # for. (Stage 2 produces the binary-level fields separately, so
                 # there is no binary-level instruction to thread through here.)
+                # STATIC text only — the batch-varying ID list lives in the
+                # tail ps_note so consecutive batches share a byte-identical
+                # prefix (see the prompt-caching note above).
                 note = (
                     "NOTE: All clusters below are provided for cross-cluster context. "
-                    "ONLY provide cluster-level analysis (label, description, relationships, "
-                    "function_prefix, library_or_runtime, mitre_attack) for clusters with IDs "
-                    f"{ids_csv}. For clusters outside this subset, do NOT provide analysis — "
-                    "they appear below for context only."
+                    "This call answers for only a subset of them; the answerable "
+                    "cluster IDs are listed after the cluster data. ONLY provide "
+                    "cluster-level analysis (label, description, relationships, "
+                    "function_prefix, library_or_runtime, mitre_attack) for that "
+                    "subset — other clusters appear below for context only."
                 )
 
             formatted = '''Structure is organized hierarchically with primary clusters and their subclusters.
