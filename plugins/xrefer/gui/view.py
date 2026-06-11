@@ -911,25 +911,40 @@ class XReferView(idaapi.simplecustviewer_t):
 
         self._pending_jump = None  # only this keypress's handlers may stash
 
-        # While the per-view filter is live, printable keys MUST feed the
-        # filter before the handler dispatch — G/X/K/T would otherwise
-        # hijack mid-typing. ESC clears the text first (stay in view),
-        # then deactivates and falls through to normal ESC handling.
+        # Filter typing is resolved BEFORE the key-dispatch table, so a
+        # globally-bound shortcut (N rename, etc.) can never hijack — or
+        # crash on — a keystroke that was meant as filter text. Two filter
+        # surfaces share this rule:
+        #   • the per-view filter (S over the full trace / orphans / cluster
+        #     table): every printable key is text; ESC is two-stage (clear,
+        #     then exit); X/G/K/T are text too, not actions.
+        #   • the search / artifact-search STATES: every printable key is
+        #     text EXCEPT ESC/ENTER (exit through their handlers) and X/G,
+        #     which stay context pivots — resolved after dispatch so they
+        #     fall back to text when the caret is not on a resolvable row.
         sm = self.state_machine
-        if sm.view_filter_active and sm.current_state in (sm.trace_scope_full, sm.orphans, sm.clusters):
+        in_view_filter = sm.view_filter_active and sm.current_state in (sm.trace_scope_full, sm.orphans, sm.clusters)
+        in_search_state = sm.current_state in (sm.search, sm.artifact_search)
+        if in_view_filter:
             if vkey == 27:  # ESC
                 if sm.search_filter:
                     sm.search_filter = ""
                     self.update(True)
                     return True
                 sm.view_filter_active = False
+                # fall through: a second ESC walks back out of the view
             else:
                 before = sm.search_filter
                 self.handle_search_input(vkey, shift)
                 if sm.search_filter != before:
                     self.update(True)
-                    return True
-                return True  # swallow non-text keys while typing (search-state parity)
+                return True  # always swallowed; never reaches a global handler
+        elif in_search_state and vkey not in (27, 13, ord("X"), ord("G")):
+            before = sm.search_filter
+            self.handle_search_input(vkey, shift)
+            if sm.search_filter != before:
+                self.update(True)
+            return True  # printable filter text; X/G/ESC/ENTER fall through
 
         state_before_handling_key = self.state_machine.current_state
         should_update = self.handle_key_specific_actions(vkey, shift)
@@ -976,12 +991,13 @@ class XReferView(idaapi.simplecustviewer_t):
         elif is_graph_before and not is_graph_after:
             self.in_graph_view = False
 
-        # Typing surfaces: keys not claimed by a handler above feed the
-        # filter (search narrows the home table; artifact search scans
-        # the whole binary). "Claimed" includes same-state handling —
-        # X/G on a zero-xref row logs and stays put, and that keystroke
-        # must not ALSO leak into the filter text (live-IDA finding:
-        # 'socket' became 'socketx' on a guarded pivot attempt).
+        # X/G are the only printable keys that reach dispatch in the
+        # search / artifact-search states (every other character was typed
+        # pre-dispatch). They pivot when the caret sits on a resolvable
+        # row; otherwise the key is filter text. "Claimed" includes
+        # same-state handling — X/G on a zero-xref row logs and stays put,
+        # and that keystroke must not ALSO leak into the filter text
+        # (live-IDA finding: 'socket' became 'socketx' on a guarded pivot).
         if state_after_handling_key in (self.state_machine.search, self.state_machine.artifact_search):
             if state_before_handling_key == state_after_handling_key and not should_update:
                 self.handle_search_input(vkey, shift)
@@ -2270,13 +2286,24 @@ class XReferView(idaapi.simplecustviewer_t):
             self.AddLine(f"{INDENT}No rows match '{flt}' — backspace edits, ESC clears")
 
     @staticmethod
-    def _filter_built_table(built: Dict[str, Any], flt: str) -> Optional[Dict[str, Any]]:
+    def _highlight_filter_match(line: str, flt: str) -> str:
+        """Wrap the matched filter substring with the highlight color, the
+        same visual the home-view search uses (print_xref_item). Operates on
+        the colored line; a match split by color codes simply isn't wrapped
+        (the row still shows), so this degrades gracefully."""
+        if not flt:
+            return line
+        return wrap_substring_with_string(line, flt, "\x04")
+
+    @classmethod
+    def _filter_built_table(cls, built: Dict[str, Any], flt: str) -> Optional[Dict[str, Any]]:
         """Row-level substring filter over a built table: group sub-headers
         survive only when their group still has matching rows; None when the
-        whole table is empty (the caller skips it, heading included)."""
+        whole table is empty (the caller skips it, heading included). Kept
+        rows get the match highlighted, matching the home-view search."""
         rows: "OrderedDict[str, List[str]]" = OrderedDict()
         for group, lines in built["rows"].items():
-            kept = [ln for ln in lines if flt in strip_color_codes(ln).lower()]
+            kept = [cls._highlight_filter_match(ln, flt) for ln in lines if flt in strip_color_codes(ln).lower()]
             if kept:
                 rows[group] = kept
         if not rows:
@@ -2349,6 +2376,13 @@ class XReferView(idaapi.simplecustviewer_t):
             built = self._build_orphan_table(table_name, type_id, indices[: self.SEARCH_MAX_ROWS], max_addrs=self.SEARCH_MAX_ADDRS)
             if built is None:
                 continue
+            # Highlight the matched substring in each row, matching the
+            # home-view search look (the rows already passed the name/
+            # category match, so every one has something to highlight).
+            built = {**built, "rows": OrderedDict(
+                (group, [self._highlight_filter_match(ln, flt) for ln in lines])
+                for group, lines in built["rows"].items()
+            )}
             # Search results default-expanded: the analyst asked for these
             # rows — collapsing them behind chevrons would hide the answer.
             # Their toggles still work and persist for the session.
@@ -5130,7 +5164,15 @@ class XReferView(idaapi.simplecustviewer_t):
             content = f"[ func_ea: 0x{self.func_ea:x} ][ func_name: {func_name} ]{exclusions_str}{sel_str}{h_str}"
 
         if self.state_machine.view_filter_active and current_state in (self.state_machine.trace_scope_full, self.state_machine.orphans, self.state_machine.clusters):
-            content += f"[ filter ]: {self.state_machine.search_filter}"
+            # Front-load the filter text like the home-view search ribbon —
+            # appending it to the full banner pushed it off the right edge
+            # of a narrow panel. ESC restores the verbose banner.
+            view_label = {
+                self.state_machine.trace_scope_full: "full trace",
+                self.state_machine.orphans: "orphans",
+                self.state_machine.clusters: "clusters",
+            }.get(current_state, "view")
+            content = f"[ {view_label} filter ]: {self.state_machine.search_filter}"
         return f"{base_text}{content}"
 
     def get_trace_ribbon_content(self) -> str:
@@ -5390,7 +5432,7 @@ class XReferView(idaapi.simplecustviewer_t):
             if flt and flt not in strip_color_codes(line).lower():
                 continue
             shown += 1
-            self.AddLine(line)
+            self.AddLine(self._highlight_filter_match(line, flt))
         if flt and not shown:
             self.AddLine(f"    No rows match '{flt}' — backspace edits, ESC clears")
 
@@ -6729,7 +6771,14 @@ class XReferView(idaapi.simplecustviewer_t):
         Returns:
             Optional[str]: Word under cursor, or None if no valid word found
         """
-        _, xpos, _ = self.GetPos(True)
+        # GetPos returns None when there is no valid cursor line (a splash
+        # / decorative line, an empty view) — unpacking that NoneType was
+        # the "cannot unpack non-iterable NoneType object" crash callers
+        # hit on such lines. Treat it as "no word".
+        pos = self.GetPos(True)
+        if not pos:
+            return None
+        _, xpos, _ = pos
         line = self.GetCurrentLine(True)
 
         if not line:
