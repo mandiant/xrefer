@@ -4601,7 +4601,9 @@ class XReferView(idaapi.simplecustviewer_t):
                     self.func_ea = func_ea
                     log(f"Function 0x{self.func_ea:x} not found in any clusters")
 
-            elif self.peek_flag:
+            elif self.peek_flag and not self.state_machine.is_sticky_state() and not self.state_machine.is_pinned_graph():
+                # Peek hijacks the panel with a call-focus preview; while a
+                # reading view or pinned graph is up, it must not.
                 # Get all operands of the current instruction
                 has_func_operand = False
                 # Check up to 6 operands (typical maximum in IDA)
@@ -4637,8 +4639,28 @@ class XReferView(idaapi.simplecustviewer_t):
 
         if ea and func_ea != self.func_ea or force:
             if not force and self.state_machine.current_state:
-                if self.state_machine.current_state != self.state_machine.pinned_cluster_graphs:
-                    self.state_machine.to_base()
+                sm = self.state_machine
+                if sm.is_sticky_state():
+                    # Binary-wide reading views (cluster table, ATT&CK
+                    # matrix, orphans, xref listing, boundary results,
+                    # full trace, help) survive disassembly navigation —
+                    # including double-clicking address links INSIDE them.
+                    # No re-render either: several end with Jump(0,0), so a
+                    # redraw per cursor move would swap state-loss for
+                    # scroll-loss. Track the cursor function for when the
+                    # user leaves, except for boundary results, which
+                    # render the selections of the function they were
+                    # invoked from.
+                    if sm.current_state not in (sm.boundary_results, sm.last_boundary_results):
+                        self.func_ea = func_ea
+                    return
+                # Pinned graphs persist across navigation and re-render
+                # below (highlight / recenter follows the cursor). This
+                # covers all four pinned states — previously only
+                # pinned_cluster_graphs was exempted and a pinned
+                # neighborhood graph was torn down.
+                if not sm.is_pinned_graph():
+                    sm.to_base()
                 self.func_ea = func_ea
 
             if func_ea not in self.xref_coverage_dict:

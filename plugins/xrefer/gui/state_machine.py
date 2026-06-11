@@ -355,6 +355,27 @@ class XReferStateMachine(StateMachine):
         """Check if current state is a pinned graph view."""
         return self.current_state in (self.pinned_graph, self.pinned_simplified_graph, self.pinned_cluster_graphs, self.pinned_neighborhood_graph)
 
+    def is_sticky_state(self) -> bool:
+        """Check if the current state is a binary-wide "reading" view.
+
+        These views' content does not depend on the cursor function, so
+        cross-function navigation in the disassembly must not tear them
+        down — ESC / their toggle keys are the explicit exits. Boundary
+        results are included because they render the selections of the
+        function they were invoked from; the view keeps their func_ea
+        frozen while sticky (see XReferView.update).
+        """
+        return self.current_state in (
+            self.clusters,
+            self.attack_matrix,
+            self.orphans,
+            self.xref_listing,
+            self.boundary_results,
+            self.last_boundary_results,
+            self.trace_scope_full,
+            self.help,
+        )
+
     def push_cluster_graph(self, cluster_id: int, parent_cluster_id: Optional[int] = None) -> None:
         """Delegate to cluster manager."""
         self.cluster_manager.push_cluster(cluster_id, parent_cluster_id)
