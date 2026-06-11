@@ -304,32 +304,52 @@ def cluster_ids(clusters: List["FunctionalCluster"]) -> Set[int]:
     return ids
 
 
-def cluster_filter_match_ids(clusters: List["FunctionalCluster"], analysis: Optional[Dict], flt: str, name_resolver=None) -> Set[int]:
+def cluster_filter_match_ids(clusters: List["FunctionalCluster"], analysis: Optional[Dict], flt: str, name_resolver=None, excluded_ids: Optional[Set[int]] = None) -> Set[int]:
     """IDs of clusters whose own table block matches ``flt`` (case-
     insensitive substring).
 
     The searchable text mirrors what the cluster table renders for a
-    block: the ``cluster.id.NNNN`` token, the label / description /
-    relationships from ``analysis``, and the member nodes as 0x-hex
-    addresses plus their function names when a ``name_resolver`` is
-    provided (the GUI passes one; headless callers may omit it).
+    block: the ``[NNNN]`` id (plus the canonical ``cluster.id.NNNN``
+    citation token), the label / description / relationships from
+    ``analysis``, and the member nodes as 0x-hex addresses plus their
+    function names — full and the 13-char rendered truncation — when a
+    ``name_resolver`` is provided (the GUI passes one; headless callers
+    may omit it).
+
+    ``excluded_ids`` are clusters the renderer is trimming (hidden
+    library / boot-prefix blocks): their own text must not match — a hit
+    inside an invisible block would keep ancestors that show no visible
+    match — but recursion continues through them, because lifted
+    descendants still render and must stay searchable.
     """
     matched: Set[int] = set()
     flt = (flt or "").lower()
     if not flt:
         return matched
+    excluded = excluded_ids or set()
 
     def _visit(cluster: "FunctionalCluster") -> None:
-        parts = [f"cluster.id.{cluster.id_str}"]
-        data = find_cluster_analysis(analysis or {}, cluster.id)
-        if data:
-            parts.extend(str(data.get(key) or "") for key in ("label", "description", "relationships"))
-        for node in cluster.nodes:
-            parts.append(f"0x{int(node):x}")
-            if name_resolver is not None:
-                parts.append(str(name_resolver(node) or ""))
-        if flt in " ".join(parts).lower():
-            matched.add(cluster.id)
+        if cluster.id not in excluded:
+            parts = [f"[{cluster.id_str}]"]
+            # The citation token stays searchable, but substrings of its
+            # constant prefix ("cluster", "id.") would match every block
+            # — include it only when the filter discriminates.
+            if flt not in "cluster.id.":
+                parts.append(f"cluster.id.{cluster.id_str}")
+            data = find_cluster_analysis(analysis or {}, cluster.id)
+            if data:
+                parts.extend(str(data.get(key) or "") for key in ("label", "description", "relationships"))
+            for node in cluster.nodes:
+                parts.append(f"0x{int(node):x}")
+                if name_resolver is not None:
+                    name = str(name_resolver(node) or "")
+                    parts.append(name)
+                    if len(name) > 13:
+                        # The table renders long names as name[:11] + ".."
+                        # — typing the on-screen form must match too.
+                        parts.append(f"{name[:11]}..")
+            if flt in " ".join(parts).lower():
+                matched.add(cluster.id)
         for sub in cluster.subclusters:
             _visit(sub)
 

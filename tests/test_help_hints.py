@@ -156,6 +156,14 @@ def test_every_state_has_a_hint(ch):
         assert keys[-1] == "H", f"state {state!r} hint must end with H: full help"
 
 
+def test_clusters_hint_keeps_library_toggle(ch):
+    """L (show/hide library clusters) is a primary control of the cluster
+    table — ON by default, silently pruning the view — so it must keep its
+    compact-hint slot: lower-weight additions (the S filter) shed first."""
+    keys = [k for k, _ in _tokens(ch.format_compact_hint("clusters"))]
+    assert "L" in keys, f"clusters hint dropped the library toggle: {keys}"
+
+
 def test_unknown_state_degrades_to_help(ch):
     """A state nobody registered still renders something pointing at H."""
     assert _tokens(ch.format_compact_hint("does not exist")) == [("H", "full help")]

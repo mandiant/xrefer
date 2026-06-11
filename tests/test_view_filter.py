@@ -56,6 +56,26 @@ def test_view_filter_flag_lifecycle():
     assert sm.search_filter == ""
 
 
+def test_clusters_filter_survives_graph_round_trip():
+    """The triage loop: filter the table, click into a cluster graph,
+    ESC back — the filter (and its text) must survive the round trip so
+    the re-render matches the row stored at click time. Only entering
+    base retires it."""
+    sm = _load_sm().XReferStateMachine()
+    sm.start_cluster_graphs()
+    sm.toggle_on_clusters()  # the clusters TABLE
+    sm.view_filter_active = True
+    sm.search_filter = "net"
+    sm.toggle_on_cluster_graphs()  # click-pivot into a cluster graph
+    assert sm.view_filter_active and sm.search_filter == "net"
+    assert sm.return_to_clusters_table()  # ESC return
+    assert sm.current_state == sm.clusters
+    assert sm.view_filter_active and sm.search_filter == "net"
+    sm.to_base()
+    assert sm.view_filter_active is False
+    assert sm.search_filter == ""
+
+
 def test_filter_hint_advertised_only_in_filterable_views():
     # Reuse the help-hints loader so the registry renders without IDA.
     sys.path.insert(0, str(_REPO / "tests"))

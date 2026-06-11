@@ -107,3 +107,37 @@ def test_parent_match_does_not_keep_children_blocks():
     # a parent-only match renders the parent block alone.
     assert not cluster_subtree_matches(child, match_ids)
     assert not cluster_subtree_matches(sib, match_ids)
+
+
+def test_excluded_ids_suppress_own_text_but_keep_descendants_searchable():
+    clusters = _tree()
+    # 'crypto' lives in cluster 2's analysis text. When the renderer is
+    # trimming cluster 2 (hidden library block), a hit in its invisible
+    # text must not keep its ancestors …
+    assert cluster_filter_match_ids(clusters, _ANALYSIS, "crypto", excluded_ids={2}) == set()
+    # … but its descendants still render (lifted), so they stay matchable.
+    assert cluster_filter_match_ids(clusters, _ANALYSIS, "registry run", excluded_ids={2}) == {3}
+
+
+def test_rendered_bracket_id_form_matches():
+    clusters = _tree()
+    assert cluster_filter_match_ids(clusters, _ANALYSIS, "[0004]") == {4}
+
+
+def test_constant_token_prefix_does_not_match_every_block():
+    clusters = _tree()
+    # Substrings of the invisible 'cluster.id.' constant must not match
+    # all blocks — only text the table actually renders counts (here,
+    # cluster 2's relationships cite 'cluster.id.0001').
+    assert cluster_filter_match_ids(clusters, _ANALYSIS, "cluster") == {2}
+    # The full discriminating token still works.
+    assert cluster_filter_match_ids(clusters, _ANALYSIS, "cluster.id.0004") == {4}
+
+
+def test_truncated_rendered_function_name_matches():
+    clusters = _tree()
+    resolver = {GRAND_EA: "decrypt_strings_inplace"}.get
+    # The table renders long names as name[:11] + '..' — typing the
+    # on-screen form must match the same cluster as the full name.
+    assert cluster_filter_match_ids(clusters, _ANALYSIS, "decrypt_str..", name_resolver=resolver) == {3}
+    assert cluster_filter_match_ids(clusters, _ANALYSIS, "decrypt_strings_inplace", name_resolver=resolver) == {3}

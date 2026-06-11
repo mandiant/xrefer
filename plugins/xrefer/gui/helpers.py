@@ -364,7 +364,7 @@ class CollapseIndicator(QtWidgets.QWidget):
         self.reposition()
 
 
-from xrefer.core.clusters import cluster_subtree_matches
+from xrefer.core.clusters import cluster_filter_match_ids, cluster_subtree_matches
 from xrefer.core.helpers import convert_int_to_hex, create_table_from_rows, enrich_string_data_core, find_cluster_analysis, get_visible_width, in_cancellable_phase, render_markdown_segments, set_progress_function, sort_clusters, strip_cluster_citations, word_wrap_text, set_log_function
 
 
@@ -1271,7 +1271,7 @@ def create_cluster_rows(cluster, analysis, column_width, paths, library_ids: Opt
     return rows
 
 
-def draw_cluster_hierarchy(clusters, analysis, paths, hide_library: bool = False, match_ids: Optional[Set[int]] = None):
+def draw_cluster_hierarchy(clusters, analysis, paths, hide_library: bool = False, flt: str = "", name_resolver=None):
     """
     Draw all clusters in a hierarchical table format with proper sorting.
 
@@ -1283,9 +1283,13 @@ def draw_cluster_hierarchy(clusters, analysis, paths, hide_library: bool = False
             recursively) marked ``is_library`` is omitted. When False,
             only the leading boot/CRT prefix at each EP is omitted —
             middle/tail library clusters are kept.
-        match_ids: When not None, the per-view filter is live: only
-            cluster blocks whose subtree contains a matched id render
-            (ancestors of matches stay so the tree remains rooted).
+        flt: Per-view filter text. When non-empty, only cluster blocks
+            whose subtree contains a match render (ancestors of matches
+            stay so the tree remains rooted). Matching is computed HERE,
+            against the same trim set the renderer uses — text inside a
+            hidden library block must neither match nor resurrect it.
+        name_resolver: Optional address→function-name callable for the
+            filter (the view passes idc.get_func_name).
 
     Returns:
         List[str]: Formatted lines ready for display
@@ -1308,7 +1312,9 @@ def draw_cluster_hierarchy(clusters, analysis, paths, hide_library: bool = False
     # Sort clusters
     sorted_clusters = sort_clusters(visible_clusters, paths)
 
-    if match_ids is not None:
+    match_ids = None
+    if flt:
+        match_ids = cluster_filter_match_ids(clusters, analysis, flt, name_resolver=name_resolver, excluded_ids=library_ids)
         sorted_clusters = [c for c in sorted_clusters if cluster_subtree_matches(c, match_ids)]
         if not sorted_clusters:
             return ["    NO CLUSTERS MATCH — backspace edits, ESC clears the filter"]
@@ -1496,6 +1502,7 @@ def help_text() -> List[str]:
 
  HOME VIEW (initial state — per-function cross-reference tables):
  [S]    Search / filter the current view (then type to filter)
+ [Shift+S] Search artifacts across the WHOLE binary (imports, libs, strings, capa)
  [T]    Trace API calls; press again to cycle function -> path -> full scope
  [C]    Cluster relationship graph
  [K]    ATT&CK matrix (kill-chain coverage of the clusters)
@@ -1522,11 +1529,22 @@ def help_text() -> List[str]:
 
  ----------------------------------------
 
+ ARTIFACT SEARCH ([Shift+S] from home — binary-wide):
+ Type to filter every import, library, string and capa rule in the
+ binary; rows list each artifact's referencing addresses
+ [X]    Cross-references for the artifact under the cursor
+ [G]    Artifact path graph for the artifact under the cursor
+ (MOUSE) Double-click an address to jump to it; click ▸/▾ to fold a table
+ [ESC/ENTER] Exit to the home view
+
+ ----------------------------------------
+
  TRACE SCOPES (after pressing [T] in home view):
  [T]    Cycle scope: function -> path -> full -> function
           - function: API calls in the current function
           - path:     calls along paths reaching this function
           - full:     all recorded calls in the trace
+ [S]    Filter the rows (full trace; type to narrow, ESC clears)
  [U]    Toggle exclusions on / off
  [ESC/ENTER] Return to home view
 
@@ -1534,6 +1552,8 @@ def help_text() -> List[str]:
 
  CLUSTERS & CLUSTER GRAPHS (after pressing [C] in home view):
  [C]    Toggle between cluster table and cluster relationship graph
+ [S]    Filter cluster blocks in the table (type to narrow; ancestors of
+        matches stay; ESC clears)
  [L]    Show / hide library clusters
  [R]    Toggle cluster description / full report view
  [J]    Toggle cluster sync (follow the IDA cursor across clusters)
@@ -1578,6 +1598,7 @@ def help_text() -> List[str]:
  ----------------------------------------
 
  ORPHAN ARTIFACTS (after pressing [O] in home view):
+ [S]    Filter the rows (type to narrow, ESC clears)
  [E]    Expand / collapse table sections
  [O]    Exit the orphans view
  [ESC/ENTER] Return to home view

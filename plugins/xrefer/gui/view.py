@@ -35,7 +35,6 @@ from qtpy import QtCore, QtGui, QtWidgets
 
 from xrefer._vendor import ascii_graphs
 from xrefer.core.analyzer import ApiCall, XRefer
-from xrefer.core.clusters import cluster_filter_match_ids
 from xrefer.core.helpers import (cap_artifact_entries, find_cluster_analysis, get_addr_from_text, longest_line_length, parse_cluster_id, remove_non_displayable,
                                  strip_color_codes, word_wrap_text, wrap_substring_with_string)
 from xrefer.core.mitre import aggregate_mitre_matrix, mitre_attack_url
@@ -854,6 +853,14 @@ class XReferView(idaapi.simplecustviewer_t):
             self._from_double_click = False
 
         except Exception as err:
+            # Selection toggling only applies where the cursor function's
+            # own selectable table is rendered (base/search). Elsewhere —
+            # the binary-wide artifact search especially, whose only
+            # advertised double-click is navigation — a non-address
+            # double-click must not silently toggle a persisted selection
+            # on whatever function the view was opened from.
+            if self.state_machine.current_state not in (self.state_machine.base, self.state_machine.search):
+                return True
             line: str = self.GetCurrentLine()
             xref_cell, xref_item = self.extract_cell_item(line)
 
@@ -928,8 +935,17 @@ class XReferView(idaapi.simplecustviewer_t):
         should_update = self.handle_key_specific_actions(vkey, shift)
         state_after_handling_key = self.state_machine.current_state
 
-        # Leaving the filtered view by any key/transition retires the filter.
-        if sm.view_filter_active and state_after_handling_key is not state_before_handling_key:
+        # Leaving the filtered view by any key/transition retires the filter —
+        # unless the transition LANDS on a filterable view: the click-pivot
+        # into a cluster graph and the ESC return to the table must keep the
+        # filter alive, so the re-render matches the row stored at click time
+        # and the triage loop continues over the filtered list. (Entering
+        # base fires reset_state, which retires it there.)
+        if (
+            sm.view_filter_active
+            and state_after_handling_key is not state_before_handling_key
+            and state_after_handling_key not in (sm.trace_scope_full, sm.orphans, sm.clusters)
+        ):
             sm.view_filter_active = False
             sm.search_filter = ""
 
@@ -1288,7 +1304,18 @@ class XReferView(idaapi.simplecustviewer_t):
             line: str = self.GetCurrentLine()
             _, xref_item = self.extract_cell_item(line)
             if xref_item:
-                e_index: int = self.xrefer_obj.reverse_entity_lookup_index[xref_item]
+                try:
+                    e_index: int = self.xrefer_obj.reverse_entity_lookup_index[xref_item]
+                except KeyError:
+                    # Decorated non-entity line (heading, hint, footer) —
+                    # in the typing surfaces the keystroke must fall
+                    # through to the filter, not eject the state.
+                    return False
+                if not self.xrefer_obj.entity_xrefs.get(e_index):
+                    # Storage-only / orphan artifact: there is no path to
+                    # draw. Pivoting would render against a missing key.
+                    log(f"No code cross-references recorded for '{xref_item}'")
+                    return True
                 self.state_machine.selected_index = e_index
 
                 return self.state_machine.start_graph()
@@ -1834,10 +1861,15 @@ class XReferView(idaapi.simplecustviewer_t):
         if xref_item:
             try:
                 e_index: int = self.xrefer_obj.reverse_entity_lookup_index[xref_item]
-                self.state_machine.selected_index = e_index
-                return self.state_machine.start_xref_listing()
             except KeyError:
                 return False
+            if not self.xrefer_obj.entity_xrefs.get(e_index):
+                # Storage-only / orphan artifact (reachable from the
+                # binary-wide search): the listing has nothing to render.
+                log(f"No code cross-references recorded for '{xref_item}'")
+                return True
+            self.state_machine.selected_index = e_index
+            return self.state_machine.start_xref_listing()
 
         return False
 
@@ -2321,7 +2353,9 @@ class XReferView(idaapi.simplecustviewer_t):
             for group in built["rows"]:
                 group_states.setdefault(group, True)
             self._draw_orphan_table(table_name, built)
-            if len(indices) > self.SEARCH_MAX_ROWS:
+            # The overflow note belongs to the rows — a collapsed table
+            # must not carry a dangling footer about rows it isn't showing.
+            if len(indices) > self.SEARCH_MAX_ROWS and bool(self.table_states.get(table_name, 1)):
                 note = f"+{len(indices) - self.SEARCH_MAX_ROWS} more — refine the filter"
                 self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_VOIDOP}{note}\x02{ida_lines.SCOLOR_VOIDOP}")
                 self.AddLine("")
@@ -2562,15 +2596,6 @@ class XReferView(idaapi.simplecustviewer_t):
             self.Refresh()
             return
 
-        match_ids = None
-        if flt:
-            match_ids = cluster_filter_match_ids(
-                self.xrefer_obj.clusters,
-                cluster_analysis,
-                flt,
-                name_resolver=lambda ea: idc.get_func_name(int(ea)) or "",
-            )
-
         # While the analyst is typing, the binary summary gives way to the
         # table — every redraw jumps to the top, so matches must be visible
         # without scrolling past a screenful of prose.
@@ -2591,13 +2616,17 @@ class XReferView(idaapi.simplecustviewer_t):
             self._emit_binary_summary_body(binary_desc, showing_report, INDENT, LINE_WIDTH)
             self.AddLine("")
 
-        # Get formatted lines from helper
+        # Get formatted lines from helper. The filter match set is
+        # computed inside, against the same library-trim set the
+        # renderer applies — keeping matcher and visible blocks in
+        # lockstep by construction.
         lines = draw_cluster_hierarchy(
             self.xrefer_obj.clusters,
             cluster_analysis,
             self.xrefer_obj.paths,
             hide_library=self.state_machine.hide_library_clusters,
-            match_ids=match_ids,
+            flt=flt,
+            name_resolver=lambda ea: idc.get_func_name(int(ea)) or "",
         )
 
         # Add lines to view

@@ -142,8 +142,15 @@ class ContextHelp:
 
             # ----- Home (base) keyboard ------------------------------------------
             Action("S", "search / filter the view", KB, {"base"}, hint="search", weight=50),
-            Action("Shift+S", "search artifacts across the whole binary", KB, {"base"}, hint="search all", weight=49),
-            Action("S", "filter the rows (type to narrow, ESC clears)", KB, {"full trace", "orphans", "clusters"}, hint="filter", weight=60),
+            # No hint: base's compact line is over budget well above this
+            # weight, so a tease would be dead registry text — the full
+            # help (H) is the discovery path.
+            Action("Shift+S", "search artifacts across the whole binary", KB, {"base"}),
+            Action("S", "filter the rows (type to narrow, ESC clears)", KB, {"full trace", "orphans"}, hint="filter", weight=60),
+            # In the clusters table the filter must weigh BELOW L (54): the
+            # library toggle is a primary control of that view (and ON by
+            # default), so it keeps its compact slot; S sheds to full help.
+            Action("S", "filter the rows (type to narrow, ESC clears)", KB, {"clusters"}, hint="filter", weight=53),
             Action("T", "trace API calls (cycle scopes)", KB, {"base"}, hint="trace", weight=64),
             Action("C", "cluster relationship graph", KB, {"base"}, hint="clusters", weight=80),
             Action("O", "orphan artifacts", KB, {"base"}, hint="orphans", weight=46),
