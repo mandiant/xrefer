@@ -40,7 +40,7 @@ from xrefer.core.helpers import (cap_artifact_entries, find_cluster_analysis, ge
 from xrefer.core.mitre import aggregate_mitre_matrix, mitre_attack_url
 from xrefer.core.settings import XReferSettingsManager
 from xrefer.gui.action_handlers import (ClusterEverythingHandler, EstimateClusterTokensHandler, CopyAllStringsHandler, CopyDirectIndirectStringsHandler, CopyDirectStringsHandler,
-                                        CopyOrphanStringsHandler, CopyUncategorizedStringsHandler, PeekViewToggleHandler, ViewAttackMatrixHandler)
+                                        CopyOrphanStringsHandler, CopySelectedArtifactsHandler, CopyUncategorizedStringsHandler, PeekViewToggleHandler, ViewAttackMatrixHandler)
 from xrefer.gui.help import ContextHelp
 from xrefer.gui.helpers import (CollapseEventFilter, CollapseIndicator, FocusEventFilter, KeyEventFilter, colorize_api_call, create_cluster_relationship_graph,
                                 create_colored_table_from_cols, create_xrefs_table_colored, draw_cluster_hierarchy, find_cluster_analysis,
@@ -178,6 +178,9 @@ class XReferView(idaapi.simplecustviewer_t):
         self.rebase_hook: Optional[RebaseHook] = None
         self.func_ea: Optional[int] = None
         self.state_machine: XReferStateMachine = XReferStateMachine()
+        # Selections live on the core object (persisted with the DB);
+        # the state machine mutates that same dict in place.
+        self.state_machine.adopt_selected_refs(self.xrefer_obj.selected_refs)
         self.table_index_offset: int = len(self.table_names) - 1  # default starts from direct xrefs (last entry)
         self.table_count: int = len(self.table_names)
         # 8 spaces aligns expanded-table row content with the heading text that
@@ -479,6 +482,7 @@ class XReferView(idaapi.simplecustviewer_t):
                 register_popup_action(form, popup, copy_menu_path, "XRefer:copy_direct_indirect_strings", "Copy directly and indirectly referenced strings to clipboard", CopyDirectIndirectStringsHandler(), "Copy strings reached through direct or indirect cross-references")
                 register_popup_action(form, popup, copy_menu_path, "XRefer:copy_orphan_strings", "Copy orphan strings to clipboard", CopyOrphanStringsHandler(), "Copy strings with no resolved use site reachable from an entry point")
                 register_popup_action(form, popup, copy_menu_path, "XRefer:copy_uncategorized_strings", "Copy uncategorized strings to clipboard", CopyUncategorizedStringsHandler(), "Copy simple strings that carry no language-derived category")
+                register_popup_action(form, popup, "XRefer/", "XRefer:copy_selected_artifacts", "Copy selected artifacts to clipboard", CopySelectedArtifactsHandler(), "Copy every artifact selected (double-click) across all functions, type-prefixed")
 
         class RebaseHook(ida_idp.IDB_Hooks):
             def __init__(self, xrefer_view: "XReferView"):
@@ -491,6 +495,20 @@ class XReferView(idaapi.simplecustviewer_t):
                 # pre-rebase addresses.
                 self.xrefer_view._invalidate_cluster_render_caches()
                 self.xrefer_view.update(True)
+                return 0
+
+            def closebase(self) -> int:
+                # Persist user selections made since the last analysis-event
+                # save — save_analysis fires on analysis events, almost never
+                # after the user finishes ticking artifacts. Dirty-gated so
+                # an untouched session never pays the rewrite.
+                try:
+                    obj = self.xrefer_view.xrefer_obj
+                    if getattr(obj, "selected_refs_dirty", False) and obj.lang:
+                        obj.save_analysis()
+                        obj.selected_refs_dirty = False
+                except Exception:
+                    pass
                 return 0
 
             def renamed(self, *args) -> int:
@@ -828,6 +846,8 @@ class XReferView(idaapi.simplecustviewer_t):
                 try:
                     e_index: int = self.xrefer_obj.reverse_entity_lookup_index[xref_item]
                     self.state_machine.update_selected_refs(self.func_ea, e_index)
+                    # Save-on-close persists selections only when ticked.
+                    self.xrefer_obj.selected_refs_dirty = True
 
                     if e_index in self.state_machine.get_selected_refs(self.func_ea):
                         self.select_cell(xref_cell)
@@ -5383,6 +5403,7 @@ class XReferView(idaapi.simplecustviewer_t):
         # import/library pair into one merged table before rendering.
         if func_ea not in self.xrefer_obj.table_data:
             self.xrefer_obj.table_data[func_ea] = self.xrefer_obj.create_sorted_table(func_ea)
+            self._reapply_selection_markers(func_ea)
         self._merge_indirect_tables(func_ea)
         self._emit_reaches_summary(func_ea)
 
@@ -5393,6 +5414,7 @@ class XReferView(idaapi.simplecustviewer_t):
                 table_data = self.xrefer_obj.table_data[func_ea][table_name]
             except KeyError:
                 self.xrefer_obj.table_data[func_ea] = self.xrefer_obj.create_sorted_table(func_ea)
+                self._reapply_selection_markers(func_ea)
                 self._merge_indirect_tables(func_ea)
                 table_data = self.xrefer_obj.table_data[func_ea][table_name]
 
@@ -5662,6 +5684,33 @@ class XReferView(idaapi.simplecustviewer_t):
             line = set_xref_coverage_color(line, "0x%x" % xref_frm, xref_coverage_dict[xref_frm])
 
         return line
+
+    def _reapply_selection_markers(self, func_ea: int) -> None:
+        """Re-wrap the selection markers on a freshly built table.
+
+        Selections persist across sessions on the core object, but the
+        visual markers live only in rendered rows, which are rebuilt from
+        scratch on demand — without this, a restored selection would gate
+        B/D and fill the ribbon chip while every checkbox showed
+        unselected."""
+        selected = self.state_machine.get_selected_refs(func_ea)
+        if not selected:
+            return
+        tables = self.xrefer_obj.table_data.get(func_ea, {})
+        for e_index in selected:
+            try:
+                entity = self.xrefer_obj.entities[e_index]
+            except (IndexError, TypeError):
+                continue
+            if not isinstance(entity, tuple):
+                continue  # plain strings are not double-click selectable
+            cell = entity[1]
+            for table in tables.values():
+                for rows in table.get("rows", {}).values():
+                    for i, row in enumerate(rows):
+                        replaced = wrap_substring_with_string(row, cell, "\x04", case=True)
+                        if len(replaced) != len(row):
+                            rows[i] = replaced
 
     def select_cell(self, cell: str) -> None:
         """

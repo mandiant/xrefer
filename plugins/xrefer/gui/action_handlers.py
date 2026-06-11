@@ -406,6 +406,52 @@ class StartHandler(idaapi.action_handler_t):
         return idaapi.AST_ENABLE_ALWAYS
 
 
+class CopySelectedArtifactsHandler(idaapi.action_handler_t):
+    """Copy every selected artifact (across ALL functions) to the clipboard.
+
+    B / D and the ribbon chip consume selections per current function; this
+    is the aggregate view of the selection set — type-prefixed, with the
+    selecting function's address — for pasting into notes or a report.
+    """
+
+    _TYPE_NAMES = {1: "lib", 2: "import", 3: "string", 4: "capa"}
+
+    def activate(self, ctx: Any) -> bool:
+        from xrefer.plugin import plugin_instance
+
+        try:
+            view = plugin_instance.xrefer_view
+            if view is None or getattr(view, "xrefer_obj", None) is None:
+                log("XRefer analysis not loaded")
+                return False
+            obj = view.xrefer_obj
+            lines = []
+            for func_ea in sorted(getattr(obj, "selected_refs", {}) or {}):
+                for e_index in sorted(obj.selected_refs[func_ea]):
+                    try:
+                        entity = obj.entities[e_index]
+                    except (IndexError, TypeError):
+                        continue
+                    if isinstance(entity, tuple):
+                        type_name = self._TYPE_NAMES.get(int(entity[2]), "artifact")
+                        name = entity[1]
+                    else:
+                        type_name, name = "string", str(entity)
+                    lines.append(f"{type_name}\t{name}\t0x{func_ea:x}")
+            if not lines:
+                log("No artifacts selected (double-click rows in the base view to select)")
+                return False
+            QtWidgets.QApplication.clipboard().setText("\n".join(lines))
+            log(f"{len(lines)} selected artifact(s) copied to clipboard")
+            return True
+        except Exception as e:
+            log(f"[-] Error copying selected artifacts: {str(e)}")
+            return False
+
+    def update(self, ctx: Any) -> int:
+        return idaapi.AST_ENABLE_ALWAYS
+
+
 class _CopyStringsHandlerBase(idaapi.action_handler_t):
     """Base for the right-click "Copy ... strings to clipboard" actions.
 

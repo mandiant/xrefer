@@ -53,6 +53,7 @@ def _saveable_xrefer(tmp_path):
     xr.uncategorized_string_indices = set()
     xr.clusters = []
     xr.cluster_analysis = {}
+    xr.selected_refs = {0x1000: {0}}
     # The (lazy) tables may exist in memory — they still must not persist.
     xr.table_data = {0x1000: {"big": "table"}}
     return xr

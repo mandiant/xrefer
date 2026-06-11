@@ -385,6 +385,16 @@ class XReferStateMachine(StateMachine):
         self._view_filter_active = False
         self._selected_index = None
 
+    def adopt_selected_refs(self, store: Dict[int, Set[int]]) -> None:
+        """Use an externally-owned dict as the selection store.
+
+        The view passes the core analyzer's persisted dict, so user
+        selections survive IDA restarts: the state machine mutates the
+        adopted dict in place and the analyzer pickles it with the DB —
+        without the core layer ever importing gui state.
+        """
+        self._selected_refs = store
+
     def update_selected_refs(self, func_ea: int, e_index: int) -> None:
         """Update the set of selected references for a function."""
         if func_ea not in self._selected_refs:

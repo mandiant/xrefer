@@ -282,6 +282,15 @@ class XRefer:
             # (and cleared) by the GUI to show a failure dialog instead of
             # letting the run masquerade as a success. None = clean run.
             self.cluster_analysis_failure = None
+            # User artifact selections (func_ea -> {entity indices}) — the
+            # gating input for B boundary scans and D exclusions. Owned by
+            # the CORE object so it persists with the analysis DB; the gui
+            # state machine adopts this same dict (shared reference) so
+            # toggles land here without core touching gui state. The view
+            # sets selected_refs_dirty on every toggle; the close hook
+            # saves only when it is set.
+            self.selected_refs: Dict[int, Set[int]] = {}
+            self.selected_refs_dirty: bool = False
             self.mode = mode
             self.configure_llm_and_lookups()
             # Run analysis if requested
@@ -1959,6 +1968,14 @@ class XRefer:
             self.string_storage_addrs = master_struct.get("string_storage_addrs", {})
             self.clusters = master_struct.get("clusters", [])
             self.cluster_analysis = master_struct.get("cluster_analysis", {})
+            # Restore selections, dropping indices that no longer exist
+            # (stale after a fresh re-analysis changed the entity list).
+            _n_entities = len(self.entities)
+            self.selected_refs = {
+                func_ea: kept
+                for func_ea, idxs in (master_struct.get("selected_refs", {}) or {}).items()
+                if (kept := {i for i in idxs if 0 <= i < _n_entities})
+            }
 
             self.sync_image_base(False)
             self.process_exclusions()
@@ -2062,6 +2079,7 @@ class XRefer:
                 "uncategorized_string_indices": self.uncategorized_string_indices,
                 "clusters": self.clusters,
                 "cluster_analysis": self.cluster_analysis,
+                "selected_refs": self.selected_refs,
             }
             metadata = {
                 "__xrefer_metadata__": True,
@@ -2311,6 +2329,9 @@ class XRefer:
             self.caller_xrefs_cache[func_ea] = self.sync_image_base_dictkeys(self.caller_xrefs_cache[func_ea], delta)
 
         self.caller_xrefs_cache = self.sync_image_base_dictkeys(self.caller_xrefs_cache, delta)
+        # Selections are keyed by func_ea (values are entity indices —
+        # image-base independent, so only the keys shift).
+        self.selected_refs = self.sync_image_base_dictkeys(self.selected_refs, delta)
 
     def sync_image_base_p(self, delta: int) -> None:
         """
