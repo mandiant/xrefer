@@ -21,7 +21,7 @@ import pickle
 import re
 import shutil
 import datetime
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict, defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from time import time
@@ -3074,35 +3074,31 @@ class XRefer:
 
         log(f"Cleared {len(affected_entities)} affected graph cache entries")
 
-    def insert_path(self, existing_paths: List[List[int]], new_path: List[int]) -> List[List[int]]:
-        """
-        Insert a new path into the existing paths if not already present.
-
-        Args:
-            existing_paths (List[List[int]]): The list of existing paths.
-            new_path (List[int]): The new path to insert.
-
-        Returns:
-            List[List[int]]: The updated list of paths.
-        """
-        if new_path not in existing_paths:
-            existing_paths.append(new_path)
-        return existing_paths
-
-    def generate_simple_call_paths(self, initial: int, final: int, max_limit: int = 10000) -> List[List[int]]:
+    def generate_simple_call_paths(self, initial: int, final: int, preds: Dict[int, Set[int]], max_limit: int = 10000) -> List[List[int]]:
         """
         Generate call paths between two functions.
 
         Args:
             initial (int): The starting function address.
             final (int): The ending function address.
+            preds (Dict[int, Set[int]]): Predecessor map: function start ->
+                set of function starts that reference it. Built once per run
+                by inverting caller_xrefs_cache (see
+                generate_all_simple_call_paths_for_ep).
             max_limit (int): The maximum number of paths to generate. Defaults to 10000.
 
         Returns:
             List[List[int]]: A list of call paths between the initial and final functions.
         """
-        all_paths = []
-        path_buffer = [[final]]
+        all_paths: List[List[int]] = []
+        seen_paths: Set[Tuple[int, ...]] = set()
+        path_buffer = deque([[final]])
+
+        def record_path(path: List[int]) -> None:
+            key = tuple(path)
+            if key not in seen_paths:
+                seen_paths.add(key)
+                all_paths.append(path)
 
         # NOTE: progress is logged by the caller
         # (generate_all_simple_call_paths_for_ep) with a clean function name and
@@ -3111,28 +3107,27 @@ class XRefer:
         # per leaf instead of flickering through Function() reprs + per-pair
         # "Found N / No path" noise (the latter is redundant with the footer).
         while path_buffer and len(all_paths) < max_limit and len(path_buffer) < max_limit:
-            refs = set()
+            refs: Set[int] = set()
             target = path_buffer[0][-1]
 
             if len(path_buffer[0]) < max_limit:
-                for cross_ref in self._backend.get_xrefs_to(target):
-                    if fn := self._backend.get_function_at(cross_ref.source):
-                        refs.add(fn.start)
+                # The shared set from preds is only iterated, never mutated.
+                refs = preds.get(target, set())
             if refs:
-                current_path = path_buffer.pop(0)
+                current_path = path_buffer.popleft()
                 for ref in refs:
                     if ref in current_path:
                         continue
                     if ref == initial:
-                        all_paths = self.insert_path(all_paths, (current_path + [ref])[::-1])
+                        record_path((current_path + [ref])[::-1])
                     else:
                         path_buffer.append(current_path + [ref])
 
             elif initial not in path_buffer[0]:
-                path_buffer.pop(0)
+                path_buffer.popleft()
 
             elif initial in path_buffer[0]:
-                all_paths = self.insert_path(all_paths, path_buffer.pop(0)[::-1])
+                record_path(path_buffer.popleft()[::-1])
 
         return all_paths
 
@@ -3148,6 +3143,19 @@ class XRefer:
         total = len(self.leaf_funcs)
         log(f"Building call paths from {ep_name} to {total} leaf functions...")
 
+        # Invert caller_xrefs_cache (caller -> referenced targets) into a
+        # predecessor map (target -> callers) once per run. The BFS in
+        # generate_simple_call_paths only ever asks "which functions reference
+        # this one", and answering from the already-built cache avoids one
+        # get_xrefs_to + get_function_at backend round-trip per path expansion
+        # (millions on large binaries). Transient by design: rebuilt per run,
+        # never persisted, so image rebasing only has to keep
+        # caller_xrefs_cache itself in sync.
+        preds: Dict[int, Set[int]] = {}
+        for caller, targets in self.caller_xrefs_cache.items():
+            for tgt in targets:
+                preds.setdefault(tgt, set()).add(caller)
+
         for idx, func_ea in enumerate(self.leaf_funcs, 1):
             if self.current_analysis_ep != func_ea:
                 # Check if the paths from current_analysis_ep to func_ea are already stored
@@ -3155,7 +3163,7 @@ class XRefer:
                     leaf_fn = self._backend.get_function_at(Address(func_ea))
                     leaf_name = leaf_fn.name if leaf_fn else f"{func_ea:#x}"
                     log(f"Building call paths [{idx}/{total}] :: {ep_name} -> {leaf_name}")
-                    _paths = self.generate_simple_call_paths(self.current_analysis_ep, func_ea)
+                    _paths = self.generate_simple_call_paths(self.current_analysis_ep, func_ea, preds)
                     if len(_paths):
                         self.paths[self.current_analysis_ep][func_ea] = _paths
 
