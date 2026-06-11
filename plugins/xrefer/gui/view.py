@@ -1044,6 +1044,12 @@ class XReferView(idaapi.simplecustviewer_t):
             bool: True if cluster view state was changed
         """
         if self.state_machine.current_state == self.state_machine.base:
+            # Gate BEFORE the state transition: entering a cluster view with
+            # no cluster data would re-render (and previously re-crash) on
+            # every cross-function cursor move via screen_ea_changed.
+            if not self.xrefer_obj.clusters:
+                log("No cluster data — run Edit > XRefer > Run Analysis > (Re-)run Cluster Analysis first (requires an LLM configured under Edit > XRefer > Configure)")
+                return False
             # Enter cluster table view
             return self.state_machine.start_cluster_graphs()
         elif self.state_machine.current_state == self.state_machine.cluster_graphs:
@@ -1213,6 +1219,8 @@ class XReferView(idaapi.simplecustviewer_t):
         if current not in (sm.base, sm.clusters, sm.cluster_graphs, sm.pinned_cluster_graphs):
             return False
         if not self.xrefer_obj.clusters or not self.xrefer_obj.cluster_analysis:
+            # Say why instead of silently swallowing the keypress.
+            log("ATT&CK matrix needs cluster analysis — run Edit > XRefer > Run Analysis > (Re-)run Cluster Analysis first")
             return False
 
         # Scope to the active cluster when opened from a cluster graph;
@@ -1746,7 +1754,8 @@ class XReferView(idaapi.simplecustviewer_t):
 
                 # Check if we should try to go back to relationship graph
                 if not cluster_manager.get_current_cluster():  # History is empty
-                    if len(self.xrefer_obj.clusters) == 1 and not self.xrefer_obj.clusters[0].subclusters:
+                    top_clusters = self.xrefer_obj.clusters or []
+                    if len(top_clusters) == 1 and not top_clusters[0].subclusters:
                         # Single cluster with no subclusters - go back in state machine
                         success, cursor_pos = self.state_machine.go_back()
                         if cursor_pos:
@@ -2201,6 +2210,34 @@ class XReferView(idaapi.simplecustviewer_t):
 
         self.AddLine("")
 
+    def _emit_no_cluster_data_state(self, indent: str) -> None:
+        """Explain why there is no cluster data and what to do about it.
+
+        Replaces the bare "NO CLUSTER ANALYSIS AVAILABLE" dead end. The
+        diagnosis is derived from state already on hand, in order of
+        specificity: a budget-blocked run, an unconfigured/disabled LLM,
+        or an analysis that simply has not been run yet. Menu paths name
+        the real registered actions.
+        """
+
+        def line(text: str, tag: int = ida_lines.SCOLOR_DSTR) -> None:
+            self.AddLine(f"{indent}\x01{tag}{text}\x02{tag}")
+
+        line("No cluster analysis available.", ida_lines.SCOLOR_DATNAME)
+        self.AddLine("")
+        if getattr(self.xrefer_obj, "cluster_token_budget_exceeded", None):
+            line("The last run was blocked: the estimated request exceeds the model's context window.")
+            line("Pick a larger-context model in Edit > XRefer > Configure, or check sizing via")
+            line("Edit > XRefer > Run Analysis > Estimate Cluster Analysis Token Usage.")
+        elif not getattr(self.xrefer_obj, "llm_lookups", False):
+            line("LLM lookups are disabled or not configured.")
+            line("Set a model and API key in Edit > XRefer > Configure, then run")
+            line("Edit > XRefer > Run Analysis > (Re-)run Cluster Analysis.")
+        else:
+            line("Cluster analysis has not produced data yet.")
+            line("Run Edit > XRefer > Run Analysis > (Re-)run Cluster Analysis,")
+            line("or check the Output window for errors from the last run.")
+
     def draw_clusters(self) -> None:
         """Draw clusters view with comprehensive headers."""
         self.ClearLines()
@@ -2208,6 +2245,15 @@ class XReferView(idaapi.simplecustviewer_t):
 
         LINE_WIDTH = 85  # Consistent width for all text blocks
         INDENT = "    "  # Standard 4-space indent
+
+        # This view is reachable without cluster data (first run with no
+        # LLM configured, chip clicks, pinned variants) — never crash on
+        # clusters=None, diagnose instead.
+        if not self.xrefer_obj.clusters:
+            self._emit_no_cluster_data_state(INDENT)
+            self.Jump(0, 0)
+            self.Refresh()
+            return
 
         # Count total clusters and functions, respecting the
         # hide-library toggle so the header reflects what is shown.
@@ -2243,7 +2289,9 @@ class XReferView(idaapi.simplecustviewer_t):
         # Get cluster analysis data
         cluster_analysis = self.xrefer_obj.cluster_analysis
         if not cluster_analysis:
-            self.AddLine(f"{INDENT}NO CLUSTER ANALYSIS AVAILABLE")
+            self._emit_no_cluster_data_state(INDENT)
+            self.Jump(0, 0)
+            self.Refresh()
             return
 
         # Add binary information with proper alignment
@@ -2303,7 +2351,7 @@ class XReferView(idaapi.simplecustviewer_t):
 
         cluster_analysis = self.xrefer_obj.cluster_analysis
         if not cluster_analysis:
-            self.AddLine(f"{INDENT}{col('NO CLUSTER ANALYSIS AVAILABLE', ida_lines.SCOLOR_DATNAME)}")
+            self._emit_no_cluster_data_state(INDENT)
             self.Jump(0, 0)
             self.Refresh()
             return
@@ -2943,6 +2991,13 @@ class XReferView(idaapi.simplecustviewer_t):
         LINE_WIDTH = 85
         INDENT = "    "
 
+        # Reachable without cluster data (first run with no LLM configured,
+        # pinned variants, sync redraws) — diagnose instead of crashing on
+        # clusters=None below.
+        if not self.xrefer_obj.clusters:
+            self._emit_no_cluster_data_state(INDENT)
+            return
+
         # Count total clusters and subclusters
         total_clusters = 0
         unique_functions = set()
@@ -2991,7 +3046,7 @@ class XReferView(idaapi.simplecustviewer_t):
         # Get cluster analysis data
         cluster_analysis = self.xrefer_obj.cluster_analysis
         if not cluster_analysis:
-            self.AddLine(f"{INDENT}NO CLUSTER ANALYSIS AVAILABLE")
+            self._emit_no_cluster_data_state(INDENT)
             return
 
         # Print binary analysis with enhanced formatting
