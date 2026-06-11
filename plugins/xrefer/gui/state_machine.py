@@ -245,6 +245,13 @@ class XReferStateMachine(StateMachine):
         # draw_attack_matrix; cleared on reset_state.
         self._attack_matrix_scope_cluster_id: Optional[int] = None
         self._selected_index: Optional[int] = None
+        # Per-view substring filter (S in the full-trace / orphans reading
+        # views). Unlike the search STATE — a base-view mode with its own
+        # transitions — this is a flag layered onto the current state: the
+        # view keeps rendering, rows not matching search_filter are hidden,
+        # and printable keys feed the filter while it is active. Cleared on
+        # reset_state, on ESC, and whenever the state changes.
+        self._view_filter_active: bool = False
         self._boundary_methods: Optional[list] = None
         self._selected_refs = {}
         self._state_history: List[tuple] = []
@@ -375,6 +382,7 @@ class XReferStateMachine(StateMachine):
         self._attack_matrix_scope_cluster_id = None
         self._search_filter = ""
         self._address_filter = ""
+        self._view_filter_active = False
         self._selected_index = None
 
     def update_selected_refs(self, func_ea: int, e_index: int) -> None:
@@ -397,6 +405,15 @@ class XReferStateMachine(StateMachine):
     def is_pinned_graph(self) -> bool:
         """Check if current state is a pinned graph view."""
         return self.current_state in (self.pinned_graph, self.pinned_simplified_graph, self.pinned_cluster_graphs, self.pinned_neighborhood_graph)
+
+    @property
+    def view_filter_active(self) -> bool:
+        """Whether the per-view row filter is live (see __init__ note)."""
+        return self._view_filter_active
+
+    @view_filter_active.setter
+    def view_filter_active(self, value: bool) -> None:
+        self._view_filter_active = bool(value)
 
     def is_sticky_state(self) -> bool:
         """Check if the current state is a binary-wide "reading" view.

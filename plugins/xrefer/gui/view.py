@@ -868,9 +868,35 @@ class XReferView(idaapi.simplecustviewer_t):
         self.state_machine.store_cursor_position(self.state_machine.current_state, lineno, x, y)
 
         self._pending_jump = None  # only this keypress's handlers may stash
+
+        # While the per-view filter is live, printable keys MUST feed the
+        # filter before the handler dispatch — G/X/K/T would otherwise
+        # hijack mid-typing. ESC clears the text first (stay in view),
+        # then deactivates and falls through to normal ESC handling.
+        sm = self.state_machine
+        if sm.view_filter_active and sm.current_state in (sm.trace_scope_full, sm.orphans):
+            if vkey == 27:  # ESC
+                if sm.search_filter:
+                    sm.search_filter = ""
+                    self.update(True)
+                    return True
+                sm.view_filter_active = False
+            else:
+                before = sm.search_filter
+                self.handle_search_input(vkey, shift)
+                if sm.search_filter != before:
+                    self.update(True)
+                    return True
+                return True  # swallow non-text keys while typing (search-state parity)
+
         state_before_handling_key = self.state_machine.current_state
         should_update = self.handle_key_specific_actions(vkey, shift)
         state_after_handling_key = self.state_machine.current_state
+
+        # Leaving the filtered view by any key/transition retires the filter.
+        if sm.view_filter_active and state_after_handling_key is not state_before_handling_key:
+            sm.view_filter_active = False
+            sm.search_filter = ""
 
         # Check if we're entering or exiting graph view
         is_graph_before = state_before_handling_key in (
@@ -1668,6 +1694,14 @@ class XReferView(idaapi.simplecustviewer_t):
         Returns:
             bool: True if handled, False if not
         """
+        # Per-view filter for the long reading views (the search STATE is a
+        # base-view mode; these get a lightweight filter layered onto the
+        # current state instead).
+        if self.state_machine.current_state in (self.state_machine.trace_scope_full, self.state_machine.orphans):
+            self.state_machine.view_filter_active = True
+            self.state_machine.search_filter = ""
+            return True
+
         if self.state_machine.start_search():
             self.Jump(0, 0)
             return True
@@ -2133,6 +2167,10 @@ class XReferView(idaapi.simplecustviewer_t):
         # Build and render the orphan tables. The merged imports+libraries
         # table spans two entity types, so it is built specially; the rest
         # map 1:1 to a single type.
+        flt = ""
+        if self.state_machine.view_filter_active:
+            flt = self.state_machine.search_filter.lower()
+        drawn = 0
         for table_name in self.orphan_table_names:
             if table_name == self.merged_orphan_name:
                 built = self._build_merged_orphan_table(orphan_groups)
@@ -2142,9 +2180,30 @@ class XReferView(idaapi.simplecustviewer_t):
                 if not indices:
                     continue
                 built = self._build_orphan_table(table_name, type_id, indices)
+            if built is not None and flt:
+                built = self._filter_built_table(built, flt)
             if built is None:
                 continue
+            drawn += 1
             self._draw_orphan_table(table_name, built)
+        if flt and not drawn:
+            self.AddLine(f"{INDENT}No rows match '{flt}' — backspace edits, ESC clears")
+
+    @staticmethod
+    def _filter_built_table(built: Dict[str, Any], flt: str) -> Optional[Dict[str, Any]]:
+        """Row-level substring filter over a built table: group sub-headers
+        survive only when their group still has matching rows; None when the
+        whole table is empty (the caller skips it, heading included)."""
+        rows: "OrderedDict[str, List[str]]" = OrderedDict()
+        for group, lines in built["rows"].items():
+            kept = [ln for ln in lines if flt in strip_color_codes(ln).lower()]
+            if kept:
+                rows[group] = kept
+        if not rows:
+            return None
+        out = dict(built)
+        out["rows"] = rows
+        return out
 
     def _build_orphan_table(self, table_name: str, type_id: int, entity_indices: List[int]) -> Optional[Dict[str, Any]]:
         """Group entities by ``entity[0]`` (namespace / category) and
@@ -4883,6 +4942,8 @@ class XReferView(idaapi.simplecustviewer_t):
             sel_str = f"[ selected: {selected_n} ]" if selected_n else ""
             content = f"[ func_ea: 0x{self.func_ea:x} ][ func_name: {func_name} ]{exclusions_str}{sel_str}{h_str}"
 
+        if self.state_machine.view_filter_active and current_state in (self.state_machine.trace_scope_full, self.state_machine.orphans):
+            content += f"[ filter ]: {self.state_machine.search_filter}"
         return f"{base_text}{content}"
 
     def get_trace_ribbon_content(self) -> str:
@@ -5132,8 +5193,18 @@ class XReferView(idaapi.simplecustviewer_t):
             self.AddLine("    ALL API CALLS ARE EXCLUDED")
             return
 
+        flt = ""
+        if self.state_machine.view_filter_active:
+            flt = self.state_machine.search_filter.lower()
+        shown = 0
         for rec in filtered_calls:
-            self.AddLine(format_api_call_for_ida(rec))
+            line = format_api_call_for_ida(rec)
+            if flt and flt not in strip_color_codes(line).lower():
+                continue
+            shown += 1
+            self.AddLine(line)
+        if flt and not shown:
+            self.AddLine(f"    No rows match '{flt}' — backspace edits, ESC clears")
 
     def handle_trace_scope_function(self) -> None:
         """Function-scope trace: API calls made directly from the current function."""
