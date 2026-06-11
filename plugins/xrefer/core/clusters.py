@@ -21,6 +21,12 @@ from networkx import NetworkXError
 from xrefer.backend import Address, BackEnd
 from xrefer.core.helpers import find_cluster_analysis, log
 
+# Per-cluster frequent-node-cleanup narration (six lines per touched
+# cluster) buried real warnings in the Output window. The cleanup logs a
+# one-line summary by default; flip this for the full per-cluster trace
+# when debugging cluster decomposition.
+DEBUG_CLUSTER_CLEANUP = False
+
 
 class FunctionalCluster:
     """
@@ -527,8 +533,9 @@ class ClusterManager:
             log("No nodes found exceeding frequency threshold")
             return
 
-        log(f"Found {len(nodes_to_remove)} nodes appearing in >{frequency_threshold} clusters:")
-        log(f"Frequent nodes: {', '.join(f'0x{node:x}' for node in sorted(nodes_to_remove))}\n")
+        log(f"Found {len(nodes_to_remove)} nodes appearing in >{frequency_threshold} clusters")
+        if DEBUG_CLUSTER_CLEANUP:
+            log(f"Frequent nodes: {', '.join(f'0x{node:x}' for node in sorted(nodes_to_remove))}\n")
 
         def clean_cluster(cluster: "FunctionalCluster", depth: int = 0) -> None:
             """
@@ -545,7 +552,8 @@ class ClusterManager:
             cluster_type = "Cluster" if depth == 0 else "Subcluster"
 
             if remaining_size < min_cluster_size:
-                log(f"{indent}{cluster_type} {cluster.id} preserved - would have only {remaining_size} nodes (current: {original_size})")
+                if DEBUG_CLUSTER_CLEANUP:
+                    log(f"{indent}{cluster_type} {cluster.id} preserved - would have only {remaining_size} nodes (current: {original_size})")
             else:
                 # Store pre-cleanup state
                 pre_cleanup_nodes = set(cluster.nodes)
@@ -581,20 +589,20 @@ class ClusterManager:
                 final_size = len(cluster.nodes)
                 removed_nodes = pre_cleanup_nodes - cluster.nodes
 
-                log(f"{indent}{cluster_type} {cluster.id}:")
-                log(f"{indent}  Nodes: {original_size} → {final_size} ({len(removed_nodes)} removed)")
-                log(f"{indent}  Removed nodes: {', '.join(f'0x{n:x}' for n in sorted(removed_nodes))}")
-
-                if root_changed:
-                    log(f"{indent}  Root node changed: 0x{old_root:x} → 0x{cluster.root_node:x}")
-
+                if DEBUG_CLUSTER_CLEANUP:
+                    log(f"{indent}{cluster_type} {cluster.id}:")
+                    log(f"{indent}  Nodes: {original_size} → {final_size} ({len(removed_nodes)} removed)")
+                    log(f"{indent}  Removed nodes: {', '.join(f'0x{n:x}' for n in sorted(removed_nodes))}")
+                    if root_changed:
+                        log(f"{indent}  Root node changed: 0x{old_root:x} → 0x{cluster.root_node:x}")
+                    log("")  # Empty line for readability
+                # A cluster losing every valid node is a real warning, not
+                # narration — always surfaced.
                 if hasattr(cluster, "marked_for_removal"):
-                    log(f"{indent}  ⚠️ Cluster marked for removal - no valid nodes remain")
-
-                log("")  # Empty line for readability
+                    log(f"{indent}  ⚠️ {cluster_type} {cluster.id} marked for removal - no valid nodes remain")
 
             # Process subclusters
-            if cluster.subclusters:
+            if cluster.subclusters and DEBUG_CLUSTER_CLEANUP:
                 log(f"{indent}Processing {len(cluster.subclusters)} subclusters of {cluster_type} {cluster.id}:")
 
             for subcluster in cluster.subclusters:
@@ -604,11 +612,8 @@ class ClusterManager:
             original_subcluster_count = len(cluster.subclusters)
             cluster.subclusters = [sub for sub in cluster.subclusters if not hasattr(sub, "marked_for_removal")]
 
-            if original_subcluster_count != len(cluster.subclusters):
+            if original_subcluster_count != len(cluster.subclusters) and DEBUG_CLUSTER_CLEANUP:
                 log(f"{indent}Removed {original_subcluster_count - len(cluster.subclusters)} empty subclusters from {cluster_type} {cluster.id}")
-
-        log("\nStarting cluster cleanup:")
-        log("=" * 50)
 
         # Clean all clusters
         original_cluster_count = len(clusters)
@@ -618,11 +623,8 @@ class ClusterManager:
         # Remove empty root clusters
         clusters[:] = [cluster for cluster in clusters if not hasattr(cluster, "marked_for_removal")]
 
-        log("\nCleanup Summary:")
-        log("=" * 50)
-        log(f"Original clusters: {original_cluster_count}")
-        log(f"Final clusters: {len(clusters)}")
-        log(f"Clusters removed: {original_cluster_count - len(clusters)}")
+        log(f"Frequent-node cleanup: {original_cluster_count} -> {len(clusters)} clusters "
+            f"({original_cluster_count - len(clusters)} removed)")
 
     @staticmethod
     def decompose_into_clusters(

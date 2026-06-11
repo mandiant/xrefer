@@ -21,7 +21,7 @@ import threading
 import unicodedata
 from collections import defaultdict
 from contextlib import contextmanager
-from time import sleep, time
+from time import monotonic, sleep, time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import networkx as nx
@@ -1114,6 +1114,55 @@ def log(string: str) -> None:
     """
     if _log_func is not None:
         _log_func(string)
+    else:
+        print(f"[XRefer] {string}")
+
+
+_progress_func = None
+
+
+def set_progress_function(func) -> None:
+    """Set the transient progress sink (e.g. the IDA wait-box updater).
+
+    Progress messages are high-frequency and ephemeral; the GUI registers a
+    box-only updater so they keep the wait box alive without flooding the
+    Output window the way routing them through log() would.
+    """
+    global _progress_func
+    _progress_func = func
+
+
+_PROGRESS_MIN_INTERVAL_S = 0.25
+_PROGRESS_PRINT_EVERY = 500
+_progress_state = {"last": 0.0, "count": 0}
+
+
+def log_progress(string: str, final: bool = False) -> None:
+    """Throttled progress reporting for hot loops.
+
+    Per-iteration call sites (per path-group, per leaf, per cluster) used to
+    route straight through log() — a print plus a wait-box replace each —
+    firing tens of thousands of times per analysis: seconds-to-minutes of
+    pure logging overhead, with real warnings drowned in the spray.
+
+    Emission policy: at most one update per ~0.25s (the wait box stays
+    alive at ~4Hz); of those, only every Nth goes to the full log channel
+    (Output trace without the flood), the rest hit the box-only sink.
+    ``final=True`` always emits on the full channel so the closing
+    "[total/total]" line lands.
+    """
+    now = monotonic()
+    if not final and now - _progress_state["last"] < _PROGRESS_MIN_INTERVAL_S:
+        return
+    _progress_state["last"] = now
+    _progress_state["count"] += 1
+    if final or _progress_state["count"] % _PROGRESS_PRINT_EVERY == 1:
+        log(string)
+    elif _progress_func is not None:
+        try:
+            _progress_func(string)
+        except Exception:
+            pass
     else:
         print(f"[XRefer] {string}")
 

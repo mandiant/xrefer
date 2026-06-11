@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union, 
 import xrefer
 from xrefer.backend import Address, BackEnd, FunctionType, XrefType, get_current_backend
 from xrefer.core.clusters import ClusterManager, FunctionalCluster
-from xrefer.core.helpers import AnalysisCancelled, cancellable_phase, check_cancelled, enrich_string_data_core, find_cluster_analysis, log, log_elapsed_time, sanitize_dirtree_name
+from xrefer.core.helpers import AnalysisCancelled, cancellable_phase, check_cancelled, enrich_string_data_core, find_cluster_analysis, log, log_elapsed_time, log_progress, sanitize_dirtree_name
 from xrefer.core.settings import XReferSettingsManager, deep_merge_settings
 from xrefer.lang import get_language_object
 from xrefer.llm import ClusterAnalyzer, CATEGORIES, Categorizer
@@ -972,8 +972,7 @@ class XRefer:
             queued.discard(edge)
             parent, child = edge
             processed += 1
-            if processed % 5000 == 0:
-                log(f"Propagating xrefs :: {processed} edge merges, {len(pending)} queued")
+            log_progress(f"Propagating xrefs :: {processed} edge merges, {len(pending)} queued")
             if self.merge_xrefs(parent, child):
                 # Parent's indirect set grew — its own callers may now have
                 # something new to pick up.
@@ -3389,7 +3388,7 @@ class XRefer:
                             continue
                         leaf_fn = self._backend.get_function_at(Address(func_ea))
                         leaf_name = leaf_fn.name if leaf_fn else f"{func_ea:#x}"
-                        log(f"Building call paths [{idx}/{total}] :: {ep_name} -> {leaf_name}")
+                        log_progress(f"Building call paths [{idx}/{total}] :: {ep_name} -> {leaf_name}", final=idx == total)
                         # Backward reachability from this leaf; expansion is
                         # restricted to nodes that both reach the leaf and
                         # are reachable from the EP — every such node lies on
