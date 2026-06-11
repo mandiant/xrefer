@@ -276,6 +276,12 @@ class XRefer:
             # run is skipped for exceeding the model's context window; consumed
             # (and cleared) by the GUI to show the budget bar. None = no block.
             self.cluster_token_budget_exceeded = None
+            # Set when a cluster-analysis run fails outright or completes
+            # only partially (skipped stage-1 calls, stage-2 fallback, user
+            # cancel); a dict with severity/stage/message details. Consumed
+            # (and cleared) by the GUI to show a failure dialog instead of
+            # letting the run masquerade as a success. None = clean run.
+            self.cluster_analysis_failure = None
             self.mode = mode
             self.configure_llm_and_lookups()
             # Run analysis if requested
@@ -1349,6 +1355,7 @@ class XRefer:
             # can overflow even a wide window, so this is the real per-binary
             # backstop.
             self.cluster_token_budget_exceeded = None
+            self.cluster_analysis_failure = None
             from xrefer.llm.cluster_analyzer import exceeds_context_window
             try:
                 _estimate = ClusterAnalyzer.estimate_cluster_request(self.clusters, self)
@@ -1390,8 +1397,17 @@ class XRefer:
                     self.clusters, self, batch_size=batch_size, force_no_cache=force_no_cache,
                 )
                 # self.cluster_analysis = ClusterAnalyzer.populate_dummy_cluster_analysis(self.clusters)
-                if not self.cluster_analysis:  # Empty results usually means network issue
-                    log("No analysis results obtained - likely network connectivity issue")
+                if not self.cluster_analysis:
+                    # The budget gate inside the run also returns {} after
+                    # setting its own flag; don't double-report that case.
+                    if not self.cluster_token_budget_exceeded:
+                        log("No analysis results obtained from the LLM run")
+                        self.cluster_analysis_failure = {
+                            "severity": "total",
+                            "stage": "stage 1",
+                            "error": "EmptyResult",
+                            "message": "The run produced no cluster analyses. Check the Output window for the underlying errors.",
+                        }
                     self.clusters = current_clusters or []
                     self.cluster_analysis = current_analysis or {}
                     return
@@ -1443,12 +1459,24 @@ class XRefer:
                 if not isinstance(e, litellm.exceptions.RateLimitError):
                     traceback.print_exc()
                 log(f"[-] Error analyzing clusters: {str(e)}")
+                self.cluster_analysis_failure = {
+                    "severity": "total",
+                    "stage": "run",
+                    "error": e.__class__.__name__,
+                    "message": str(e)[:300],
+                }
                 # Restore previous state (coerce None to empty defaults on first run)
                 self.clusters = current_clusters or []
                 self.cluster_analysis = current_analysis or {}
 
         except Exception as e:
             log(f"[-] Error in cluster analysis: {str(e)}")
+            self.cluster_analysis_failure = {
+                "severity": "total",
+                "stage": "clustering",
+                "error": e.__class__.__name__,
+                "message": str(e)[:300],
+            }
             # Restore previous state (coerce None to empty defaults on first run)
             self.clusters = current_clusters or []
             self.cluster_analysis = current_analysis or {}

@@ -100,15 +100,22 @@ class ClusterEverythingHandler(idaapi.action_handler_t):
 
             if getattr(xrefer_obj, "cluster_token_budget_exceeded", None):
                 log("Cluster analysis skipped — request exceeds the model's context window")
+            elif getattr(xrefer_obj, "cluster_analysis_failure", None):
+                _f = xrefer_obj.cluster_analysis_failure
+                log("Cluster analysis cancelled" if _f.get("cancelled")
+                    else "Cluster analysis completed partially" if _f.get("severity") == "partial"
+                    else "Cluster analysis FAILED")
             else:
                 log("Cluster analysis complete")
             idaapi.hide_wait_box()
 
-            # Show the budget bar (blocked framing) if the run was skipped for
-            # exceeding the model's context window. After hide_wait_box so the
-            # modal isn't stacked under the wait box.
-            from xrefer.gui.token_estimate import show_budget_block_if_pending
+            # Surface what actually happened. After hide_wait_box so the
+            # modal isn't stacked under the wait box: the budget bar if the
+            # run was blocked for window overflow, or the failure dialog if
+            # it failed / completed partially (mutually exclusive flags).
+            from xrefer.gui.token_estimate import show_budget_block_if_pending, show_cluster_failure_if_pending
             show_budget_block_if_pending(xrefer_obj)
+            show_cluster_failure_if_pending(xrefer_obj)
             return True
 
         except Exception as e:

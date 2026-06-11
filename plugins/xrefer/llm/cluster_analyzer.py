@@ -243,6 +243,29 @@ class ClusterAnalyzer:
         cls.current_config = config
         cls._processor = None  # Force new processor with new config
 
+    @staticmethod
+    def _note_partial_failure(xrefer_obj, **fields) -> None:
+        """Record a partial-failure note on the analyzer object.
+
+        The GUI consumes (and clears) ``cluster_analysis_failure`` after the
+        run to show what went wrong instead of announcing success —
+        precedent: ``cluster_token_budget_exceeded`` is written from here
+        the same way. Notes merge, so stage-1 skips and a stage-2 fallback
+        within one run are both reported; ``skipped_cluster_ids``
+        accumulates. Never raises (reporting must not break the run).
+        """
+        try:
+            note = getattr(xrefer_obj, "cluster_analysis_failure", None) or {}
+            note.setdefault("severity", "partial")
+            for key, value in fields.items():
+                if key == "skipped_cluster_ids":
+                    note[key] = sorted(set(note.get(key, [])) | set(value))
+                else:
+                    note[key] = value
+            xrefer_obj.cluster_analysis_failure = note
+        except Exception:
+            pass
+
     @classmethod
     def analyze_clusters(
         cls,
@@ -407,6 +430,13 @@ class ClusterAnalyzer:
             # it — the analyst can re-run later to fill in the rest.
             log("[!] Cluster analysis cancelled — saving the per-cluster analyses "
                 "gathered so far with placeholder binary fields.")
+            cls._note_partial_failure(
+                xrefer_obj,
+                stage="stage 1",
+                cancelled=True,
+                message="Cancelled by user; the per-cluster analyses gathered so far were kept.",
+                partial_cluster_count=len(stage1_clusters),
+            )
             return {
                 "clusters": stage1_clusters,
                 "binary_description": "",
@@ -479,6 +509,13 @@ class ClusterAnalyzer:
             # whole run).
             log("[!] Stage 2 produced no binary-level synthesis; saving the "
                 "per-cluster analyses with placeholder binary fields.")
+            cls._note_partial_failure(
+                xrefer_obj,
+                stage="stage 2",
+                stage2_failed=True,
+                message="Binary-level synthesis failed; the per-cluster analyses were kept with placeholder binary fields.",
+                partial_cluster_count=len(stage1_clusters),
+            )
             return {
                 "clusters": stage1_clusters,
                 "binary_description": binary_description or "",
@@ -1011,6 +1048,13 @@ class ClusterAnalyzer:
                             log(f"[!] Stage 1: call for clusters {sorted(respond_ids)} failed again "
                                 f"({e.__class__.__name__}); skipping these {len(call)} cluster(s) and continuing.")
                             results = {}
+                            cls._note_partial_failure(
+                                xrefer_obj,
+                                stage="stage 1",
+                                error=e.__class__.__name__,
+                                message="Some stage-1 cluster calls failed twice and were skipped.",
+                                skipped_cluster_ids=respond_ids,
+                            )
                 got = results.get("clusters", {}) or {}
                 stage1_clusters.update(got)
                 for c in call:

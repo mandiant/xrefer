@@ -367,12 +367,15 @@ class XReferView(idaapi.simplecustviewer_t):
             log(traceback.format_exc())
             self.cleanup()
 
-        # Surface a 'cluster analysis blocked' dialog if the just-run analysis
-        # was skipped for exceeding the model's context window. Outside the
-        # try/except above so a dialog hiccup can't trigger view cleanup.
+        # Surface what happened to the just-run cluster analysis: a 'blocked'
+        # budget dialog if it was skipped for window overflow, or a failure
+        # dialog if it failed / completed partially — instead of letting the
+        # initial-analysis flow swallow it. Outside the try/except above so a
+        # dialog hiccup can't trigger view cleanup.
         try:
-            from xrefer.gui.token_estimate import show_budget_block_if_pending
+            from xrefer.gui.token_estimate import show_budget_block_if_pending, show_cluster_failure_if_pending
             show_budget_block_if_pending(getattr(self, "xrefer_obj", None))
+            show_cluster_failure_if_pending(getattr(self, "xrefer_obj", None))
         except Exception:
             pass
 

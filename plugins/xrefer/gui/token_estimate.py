@@ -495,3 +495,111 @@ def show_budget_block_if_pending(xrefer_obj) -> None:
             log(f"[-] Error showing token-budget block dialog: {exc}")
         except Exception:
             pass
+
+
+def _show_cluster_failure_dialog(failure: dict, parent=None) -> None:
+    """Themed modal explaining a failed or partially-completed cluster run.
+
+    Shares the settings/estimate dialog chrome so it reads as part of
+    xrefer rather than a raw message box.
+    """
+    from xrefer.gui.settings import _build_dialog_qss
+
+    cancelled = bool(failure.get("cancelled"))
+    partial = failure.get("severity") == "partial"
+    if cancelled:
+        heading = "Cluster Analysis Cancelled"
+    elif partial:
+        heading = "Cluster Analysis Partially Completed"
+    else:
+        heading = "Cluster Analysis Failed"
+
+    window_c, text_c, _accent = _palette()
+    muted = _blend(text_c, window_c, 0.6).name()
+
+    if parent is None:
+        parent = _ida_main_window()
+    dialog = QtWidgets.QDialog(parent)
+    dialog.setWindowTitle(f"Cluster Analysis — {heading.split(' ', 2)[-1]}")
+    dialog.setMinimumWidth(520)
+    dialog.setStyleSheet(_build_dialog_qss())
+
+    root = QtWidgets.QVBoxLayout(dialog)
+    root.setContentsMargins(0, 0, 0, 0)
+    root.setSpacing(0)
+    content_widget = QtWidgets.QWidget()
+    content = QtWidgets.QVBoxLayout(content_widget)
+    content.setContentsMargins(22, 20, 22, 14)
+    content.setSpacing(10)
+
+    title = QtWidgets.QLabel(f'<span style="font-size:13pt; font-weight:700;">{heading}</span>')
+    title.setTextFormat(QtCore.Qt.RichText)
+    content.addWidget(title)
+
+    rows = []
+    if failure.get("message"):
+        rows.append(str(failure["message"]))
+    if failure.get("stage"):
+        detail = f"Where: {failure['stage']}"
+        if failure.get("error") and not cancelled:
+            detail += f" ({failure['error']})"
+        rows.append(detail)
+    skipped = failure.get("skipped_cluster_ids") or []
+    if skipped:
+        shown = ", ".join(str(i) for i in skipped[:12])
+        more = f" (+{len(skipped) - 12} more)" if len(skipped) > 12 else ""
+        rows.append(f"Skipped clusters: {shown}{more}")
+    if failure.get("partial_cluster_count"):
+        rows.append(f"Per-cluster analyses kept: {failure['partial_cluster_count']}")
+    if partial:
+        rows.append("Re-run Edit > XRefer > Run Analysis > (Re-)run Cluster Analysis to fill in the rest.")
+    else:
+        rows.append("See the Output window for details, then re-run Edit > XRefer > Run Analysis > (Re-)run Cluster Analysis.")
+
+    for row_text in rows:
+        lbl = QtWidgets.QLabel(row_text)
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet(f"color:{muted}; font-size:10pt;")
+        content.addWidget(lbl)
+
+    root.addWidget(content_widget, 1)
+    sep = QtWidgets.QFrame()
+    sep.setFrameShape(QtWidgets.QFrame.HLine)
+    sep.setProperty("separator", True)
+    root.addWidget(sep)
+    button_bar = QtWidgets.QHBoxLayout()
+    button_bar.setContentsMargins(16, 12, 16, 16)
+    button_bar.addStretch()
+    close_button = QtWidgets.QPushButton("Close")
+    close_button.setProperty("primary", True)
+    close_button.setDefault(True)
+    close_button.clicked.connect(dialog.accept)
+    button_bar.addWidget(close_button)
+    root.addLayout(button_bar)
+
+    frame_geom = dialog.frameGeometry()
+    frame_geom.moveCenter(QtWidgets.QApplication.primaryScreen().availableGeometry().center())
+    dialog.move(frame_geom.topLeft())
+    dialog.exec_()
+
+
+def show_cluster_failure_if_pending(xrefer_obj) -> None:
+    """If the last cluster run failed or completed partially, show the
+    failure dialog and clear the flag. No-op otherwise. Same contract as
+    show_budget_block_if_pending: consume-and-clear, never raises into the
+    caller — a 10-minute blocking run must never masquerade as a success.
+    """
+    try:
+        if xrefer_obj is None:
+            return
+        failure = getattr(xrefer_obj, "cluster_analysis_failure", None)
+        if not failure:
+            return
+        # Clear first so a later trigger (e.g. a view refresh) can't re-show it.
+        xrefer_obj.cluster_analysis_failure = None
+        _show_cluster_failure_dialog(failure)
+    except Exception as exc:
+        try:
+            log(f"[-] Error showing cluster-failure dialog: {exc}")
+        except Exception:
+            pass
