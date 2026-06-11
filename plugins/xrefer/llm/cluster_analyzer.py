@@ -33,6 +33,50 @@ def _llm_processor_cls():
     return LLMProcessor
 
 
+def _fmt_secs(seconds: float) -> str:
+    s = int(seconds)
+    return f"{s // 60}m{s % 60:02d}s" if s >= 60 else f"{s}s"
+
+
+class _CallTimer:
+    """Per-phase wall-clock stats feeding the pre-call wait-box line.
+
+    The IDA main thread blocks for the duration of every LLM call, so the
+    message logged just before a call is the only feedback the analyst
+    gets for the next 30 seconds to 30 minutes — without timing, working
+    and hung look identical. Each phase keeps its own timer (full-mode
+    batches are uniform, so their average/ETA is honest; hierarchical
+    calls vary by cluster size, so their ETA is suppressed). Timing wraps
+    the WHOLE resilient call so retries count as wall time — the litellm
+    success callback only ever sees successful attempts — and stays on
+    this thread: the background callback is never read. DSPy cache hits
+    contribute ~0s samples, which correctly accelerate the estimate.
+    """
+
+    def __init__(self):
+        self.samples: List[float] = []
+
+    @contextmanager
+    def measure(self) -> Iterator[None]:
+        from time import monotonic
+        start = monotonic()
+        try:
+            yield
+        finally:
+            self.samples.append(monotonic() - start)
+
+    def progress_suffix(self, remaining_calls: int = 0) -> str:
+        """One sentence for the pre-call log/wait-box message."""
+        if not self.samples:
+            return " IDA is unresponsive during each call."
+        avg = sum(self.samples) / len(self.samples)
+        out = f" Last call {_fmt_secs(self.samples[-1])}, avg {_fmt_secs(avg)}"
+        if remaining_calls > 0:
+            out += f", ~{_fmt_secs(avg * remaining_calls)} remaining"
+        out += ". IDA is unresponsive during each call."
+        return out
+
+
 # Realistic upper bound on response tokens for ESTIMATE math. Some models
 # advertise enormous output caps (grok-4: 256k, grok-4-fast: 2M) we'd never
 # approach for cluster analysis; using them verbatim would falsely inflate the
@@ -526,6 +570,7 @@ class ClusterAnalyzer:
                 done = 0
                 batch_no = 0
                 cancelled = False
+                timer = _CallTimer()
                 for closure in closures:
                     if cancelled:
                         break
@@ -541,14 +586,16 @@ class ClusterAnalyzer:
                         log(
                             f"Stage 1 (full): batch {batch_no}/{total_batches}, "
                             f"{len(respond_ids)} cluster(s) [{done}/{cluster_count}] "
-                            f"(full corpus {_measure(cluster_data, model_id)})"
+                            f"(full corpus {_measure(cluster_data, model_id)})."
+                            + timer.progress_suffix(total_batches - batch_no + 1)
                         )
                         # Resilient: a failure on batch 9/10 used to
                         # propagate out and discard the nine completed
                         # batches; now it costs at most this batch.
-                        stage1_clusters.update(cls._resilient_stage1_call(
-                            processor, cluster_data, respond_ids, xrefer_obj, _full_ctx,
-                        ))
+                        with timer.measure():
+                            stage1_clusters.update(cls._resilient_stage1_call(
+                                processor, cluster_data, respond_ids, xrefer_obj, _full_ctx,
+                            ))
 
                     # One follow-up re-ask per closure for ids the batch
                     # loop didn't land (rate-limited or model-dropped) —
@@ -588,7 +635,7 @@ class ClusterAnalyzer:
             }
 
         # ── Stage 2: binary-level synthesis ──────────────────────────
-        log("Stage 2: synthesising binary-level analysis from per-cluster results")
+        log("Stage 2: synthesising binary-level analysis from per-cluster results — one combined call; IDA is unresponsive until it returns")
         synthesis_input = cls.format_synthesis_input(clusters, xrefer_obj, stage1_clusters)
         log(f"Stage 2: generated synthesis input ({_measure(synthesis_input, model_id)})")
         # Stage-2 fit gate: it is one combined call by nature; if it overflows
@@ -1104,6 +1151,9 @@ class ClusterAnalyzer:
         log(f"Stage 1 (hierarchical): {total} clusters in {len(waves)} bottom-up level(s); "
             f"per-call budget ~{budget_tokens:,} tok (scaffold ~{scaffold_tokens:,})"
             + (" — caps num_ctx" if local else ""))
+        if local:
+            log("Local model: each call can take several minutes; IDA stays unresponsive for the duration of a call.")
+        timer = _CallTimer()
 
         summaries: Dict[int, Any] = {}
         stage1_clusters: Dict[str, Any] = {}
@@ -1163,7 +1213,11 @@ class ClusterAnalyzer:
                     f"{len(call)} cluster(s) [{done_count}/{total}], ~{need:,} tok needed"
                     + (f", num_ctx={num_ctx_used:,}" if num_ctx_used else "")
                     + (" [over budget — large cluster]"
-                       if num_ctx_used and num_ctx_used > budget_tokens else ""))
+                       if num_ctx_used and num_ctx_used > budget_tokens else "")
+                    # No ETA on purpose: hierarchical calls vary by cluster
+                    # size and fan-out, so an average-based estimate would
+                    # be dishonest. Last/avg still anchor expectations.
+                    + timer.progress_suffix())
                 # Resilient call (shared helper). A small local model
                 # occasionally emits output that fails Pydantic validation
                 # or errors outright; the helper also treats a response
@@ -1177,7 +1231,8 @@ class ClusterAnalyzer:
                         overrides["cache"] = False  # force a fresh generation
                     return processor.override_lm(**overrides)
 
-                got = cls._resilient_stage1_call(processor, cluster_data, respond_ids, xrefer_obj, _hier_ctx)
+                with timer.measure():
+                    got = cls._resilient_stage1_call(processor, cluster_data, respond_ids, xrefer_obj, _hier_ctx)
                 stage1_clusters.update(got)
                 for c in call:
                     s = got.get(f"cluster_{c.id}")
