@@ -244,6 +244,68 @@ class ClusterAnalyzer:
         cls._processor = None  # Force new processor with new config
 
     @staticmethod
+    def _stage1_ids_present(stage1_clusters: Dict[str, Any]) -> Set[int]:
+        """Cluster ids already answered for, parsed from 'cluster_<id>' keys
+        (unparseable keys from a misbehaving model are ignored)."""
+        present: Set[int] = set()
+        for key in stage1_clusters:
+            try:
+                present.add(int(str(key).rsplit("_", 1)[1]))
+            except (IndexError, ValueError):
+                continue
+        return present
+
+    @classmethod
+    def _resilient_stage1_call(cls, processor: LLMProcessor, cluster_data: str,
+                               respond_ids: Set[int], xrefer_obj, make_ctx) -> Dict[str, Any]:
+        """One stage-1 call with retry-on-incomplete and skip-on-repeat.
+
+        The success condition is "the response carries cluster_<id> for
+        every requested id" — NOT "no exception": the processor absorbs
+        rate limits and returns {} without raising, and a model can
+        silently drop ids, so keying on exceptions alone misses both.
+        ``make_ctx(attempt)`` supplies the LM context per attempt; the
+        retry attempt must bypass the response cache, or a cached
+        bad/partial response just replays. A still-incomplete second
+        attempt keeps whatever DID come back (attempts merge), records
+        the gap for the failure dialog, and lets the run continue —
+        stage 2 already tolerates missing entries.
+        """
+        wanted = {f"cluster_{cid}" for cid in respond_ids}
+        merged: Dict[str, Any] = {}
+        for _attempt in range(2):
+            error_name = None
+            try:
+                with make_ctx(_attempt):
+                    results = dict(processor.process_items(
+                        cluster_data,
+                        prompt_type=PromptType.CLUSTER_ANALYZER,
+                        ignore_token_limit=True,
+                    ))
+                merged.update(results.get("clusters", {}) or {})
+            except Exception as e:
+                error_name = e.__class__.__name__
+            missing = wanted - set(merged)
+            if not missing:
+                return merged
+            missing_ids = sorted(respond_ids - cls._stage1_ids_present(merged))
+            if _attempt == 0:
+                reason = error_name or f"{len(missing_ids)} cluster id(s) missing from the response"
+                log(f"[!] Stage 1: call for clusters {sorted(respond_ids)} incomplete "
+                    f"({reason}); retrying once with the cache bypassed.")
+            else:
+                log(f"[!] Stage 1: clusters {missing_ids} still missing after retry; "
+                    "skipping them and continuing.")
+                cls._note_partial_failure(
+                    xrefer_obj,
+                    stage="stage 1",
+                    error=error_name or "IncompleteResponse",
+                    message="Some stage-1 cluster calls stayed incomplete after a retry; the affected clusters were skipped.",
+                    skipped_cluster_ids=set(missing_ids),
+                )
+        return merged
+
+    @staticmethod
     def _note_partial_failure(xrefer_obj, **fields) -> None:
         """Record a partial-failure note on the analyzer object.
 
@@ -391,6 +453,11 @@ class ClusterAnalyzer:
                 log(f"Stage 1 (full): {cluster_count} clusters in {len(closures)} group(s); "
                     f"{total_batches} batch(es) of up to {batch_size}, full corpus sent each call")
 
+                def _full_ctx(attempt: int):
+                    # Attempt 0 honors the force-no-cache run setting; the
+                    # retry attempt always bypasses the cache.
+                    return processor.uncached_lm() if (force_no_cache or attempt == 1) else cache_ctx()
+
                 done = 0
                 batch_no = 0
                 cancelled = False
@@ -411,14 +478,26 @@ class ClusterAnalyzer:
                             f"{len(respond_ids)} cluster(s) [{done}/{cluster_count}] "
                             f"(full corpus {_measure(cluster_data, model_id)})"
                         )
-                        with cache_ctx():
-                            results = processor.process_items(
-                                cluster_data,
-                                prompt_type=PromptType.CLUSTER_ANALYZER,
-                                ignore_token_limit=True,
-                            )
-                        results = dict(results)
-                        stage1_clusters.update(results.get("clusters", {}))
+                        # Resilient: a failure on batch 9/10 used to
+                        # propagate out and discard the nine completed
+                        # batches; now it costs at most this batch.
+                        stage1_clusters.update(cls._resilient_stage1_call(
+                            processor, cluster_data, respond_ids, xrefer_obj, _full_ctx,
+                        ))
+
+                    # One follow-up re-ask per closure for ids the batch
+                    # loop didn't land (rate-limited or model-dropped) —
+                    # bounded extra cost, and far cheaper than letting them
+                    # silently become stage-2 placeholders.
+                    if not cancelled and not check_cancelled():
+                        still_missing = set(closure_ids) - cls._stage1_ids_present(stage1_clusters)
+                        if still_missing:
+                            log(f"Stage 1 (full): follow-up call for {len(still_missing)} "
+                                f"cluster(s) missed across batches: {sorted(still_missing)}")
+                            cluster_data = cls.format_cluster_data(closure, xrefer_obj, respond_for_ids=still_missing)
+                            stage1_clusters.update(cls._resilient_stage1_call(
+                                processor, cluster_data, still_missing, xrefer_obj, _full_ctx,
+                            ))
 
         if not stage1_clusters:
             log("[-] Error: No cluster data received after stage 1")
@@ -1020,42 +1099,20 @@ class ClusterAnalyzer:
                     + (f", num_ctx={num_ctx_used:,}" if num_ctx_used else "")
                     + (" [over budget — large cluster]"
                        if num_ctx_used and num_ctx_used > budget_tokens else ""))
-                # Resilient call. A small local model occasionally emits output
-                # that fails Pydantic validation (e.g. a MITRE entry missing a
-                # field) or otherwise errors. Retry ONCE with the cache bypassed
-                # (a fresh generation often validates); if it still fails, skip
-                # just these clusters and keep going rather than letting one bad
-                # call abort the whole multi-call run. Skipped clusters simply
-                # get no stage-1 summary — stage 2 already tolerates gaps.
-                results: Dict[str, Any] = {}
-                for _attempt in range(2):
-                    overrides = dict(lm_overrides)
-                    if _attempt == 1:
+                # Resilient call (shared helper). A small local model
+                # occasionally emits output that fails Pydantic validation
+                # or errors outright; the helper also treats a response
+                # MISSING requested ids (rate-limited {} or model-dropped)
+                # as incomplete. Retry once with the cache bypassed (a
+                # fresh generation often validates); whatever is still
+                # missing is skipped and recorded — stage 2 tolerates gaps.
+                def _hier_ctx(attempt: int, _ov=lm_overrides):
+                    overrides = dict(_ov)
+                    if attempt == 1:
                         overrides["cache"] = False  # force a fresh generation
-                    try:
-                        with processor.override_lm(**overrides):
-                            results = dict(processor.process_items(
-                                cluster_data,
-                                prompt_type=PromptType.CLUSTER_ANALYZER,
-                                ignore_token_limit=True,
-                            ))
-                        break
-                    except Exception as e:
-                        if _attempt == 0:
-                            log(f"[!] Stage 1: call for clusters {sorted(respond_ids)} failed "
-                                f"({e.__class__.__name__}: {str(e)[:140]}); retrying once.")
-                        else:
-                            log(f"[!] Stage 1: call for clusters {sorted(respond_ids)} failed again "
-                                f"({e.__class__.__name__}); skipping these {len(call)} cluster(s) and continuing.")
-                            results = {}
-                            cls._note_partial_failure(
-                                xrefer_obj,
-                                stage="stage 1",
-                                error=e.__class__.__name__,
-                                message="Some stage-1 cluster calls failed twice and were skipped.",
-                                skipped_cluster_ids=respond_ids,
-                            )
-                got = results.get("clusters", {}) or {}
+                    return processor.override_lm(**overrides)
+
+                got = cls._resilient_stage1_call(processor, cluster_data, respond_ids, xrefer_obj, _hier_ctx)
                 stage1_clusters.update(got)
                 for c in call:
                     s = got.get(f"cluster_{c.id}")
