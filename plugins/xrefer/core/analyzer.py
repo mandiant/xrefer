@@ -440,6 +440,10 @@ class XRefer:
             - strings[1]: Extended string references with additional data
         """
         log("Sifting string references...")
+        # Membership shadow for string_index_cache: the list stays (pickled,
+        # ordered) but the per-string `in` check was a linear scan that made
+        # this loop quadratic on string-heavy binaries.
+        cached_indices = set(self.string_index_cache)
         for str_ea in self.lang.strings:
             string_contents = self.lang.strings[str_ea][0]
             if len(string_contents) >= 3:
@@ -460,7 +464,8 @@ class XRefer:
                 else:
                     self.strings[0].append(Reference(str_ea, e_index, EntityType.STRING))
 
-                if e_index not in self.string_index_cache:
+                if e_index not in cached_indices:
+                    cached_indices.add(e_index)
                     self.string_index_cache.append(e_index)
 
         # Record the 'simple' (uncategorized) string indices so the
@@ -677,18 +682,58 @@ class XRefer:
         """
         Get the index of an entity, adding it to the list if not already present.
 
+        Backed by a lazily-synced hash index instead of a linear scan over
+        all entities (the scan made first-analysis interning quadratic —
+        tens of seconds of main-thread blocking on string-heavy Rust/Go
+        binaries). The index rebuilds when the entities list object is
+        replaced wholesale (string enrichment, DB load) and extends
+        incrementally over entries appended directly (load_imports), so an
+        identical tuple interned later still dedupes against them.
+        Post-enrichment 7-tuples contain dicts/lists and are unhashable;
+        they are skipped when indexing — an unhashable entity can never
+        compare equal to any hashable probe, so the linear scan would never
+        have matched one either. Duplicate keys keep the FIRST position,
+        matching the scan's first-match return.
+
         Args:
             entity (Tuple[str, str, EntityType]): The entity to look up or add.
 
         Returns:
             int: The index of the entity in the entities list.
         """
-        for index, _entity in enumerate(self.entities):
-            if entity == _entity:
-                return index
+        entities = self.entities
+        index_map = getattr(self, "_entity_index_map", None)
+        if index_map is None or getattr(self, "_entity_index_ident", None) != id(entities):
+            index_map = {}
+            self._entity_index_map = index_map
+            self._entity_index_ident = id(entities)
+            self._entity_indexed_count = 0
+        for pos in range(self._entity_indexed_count, len(entities)):
+            try:
+                index_map.setdefault(entities[pos], pos)
+            except TypeError:
+                pass  # unhashable post-enrichment tuple — see docstring
+        self._entity_indexed_count = len(entities)
 
-        self.entities.append(entity)
-        return len(self.entities) - 1
+        try:
+            existing = index_map.get(entity)
+        except TypeError:
+            # Unhashable probe (no current caller does this) — fall back to
+            # the equality scan the map replaced.
+            for index, _entity in enumerate(entities):
+                if entity == _entity:
+                    return index
+            existing = None
+        if existing is not None:
+            return existing
+
+        entities.append(entity)
+        try:
+            index_map[entity] = len(entities) - 1
+        except TypeError:
+            pass
+        self._entity_indexed_count = len(entities)
+        return len(entities) - 1
 
     def load_imports(self) -> None:
         """
@@ -949,6 +994,20 @@ class XRefer:
         orphan_func_artifacts = {}  # Same structure for orphans
         orphan_artifacts = []  # For artifacts with no xrefs at all
 
+        # Back-fill entity_xrefs for indices the analyze() loop didn't
+        # touch, in ONE pass over mapped_refs (it used to rescan all of
+        # mapped_refs once per missing entity — and mapped_refs is not
+        # persisted, so on a loaded DB every one of those scans iterated
+        # an empty list for nothing). Only found entries are written, so
+        # no empty sets leak into the persisted entity_xrefs.
+        missing = {idx for idx in interesting_indices if idx not in self.entity_xrefs}
+        if missing and self.mapped_refs:
+            refs_by_entity: Dict[int, Set[int]] = {}
+            for ref in self.mapped_refs:
+                if ref.entity_index in missing:
+                    refs_by_entity.setdefault(ref.entity_index, set()).add(ref.address)
+            self.entity_xrefs.update(refs_by_entity)
+
         # Filter out excluded artifacts and those with >2 xrefs
         filtered_indices = set()
         excluded_count = 0
@@ -957,9 +1016,6 @@ class XRefer:
             if self.settings["enable_exclusions"] and idx in self.excluded_entities:
                 excluded_count += 1
                 continue
-            # Check xref count before adding
-            if idx not in self.entity_xrefs:
-                self.populate_entity_xrefs(idx)
             xrefs = self.entity_xrefs.get(idx, set())
             if len(xrefs) > 2:  # Only include if 2 or fewer xrefs
                 high_xref_count += 1
@@ -981,18 +1037,6 @@ class XRefer:
             self._process_artifact_xrefs(idx, entity, xrefs, func_artifacts, orphan_func_artifacts, orphan_artifacts)
 
         return func_artifacts, orphan_func_artifacts, orphan_artifacts
-
-    def populate_entity_xrefs(self, entity_idx: int) -> None:
-        """Quickly populate xrefs for a specific entity."""
-        entity = self.entities[entity_idx]
-        entity_type = entity[2]  # Type ID of entity
-
-        # Search through mapped refs to find xrefs for this entity
-        for ref in self.mapped_refs:
-            if ref.entity_index == entity_idx:  # If entity index matches
-                if entity_idx not in self.entity_xrefs:
-                    self.entity_xrefs[entity_idx] = set()
-                self.entity_xrefs[entity_idx].add(ref.address)
 
     def has_indirect_xrefs(self, func_ea: int) -> bool:
         """
