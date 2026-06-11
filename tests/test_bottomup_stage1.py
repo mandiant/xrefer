@@ -90,6 +90,10 @@ class _Obj:
 
 
 def _patch_litellm(monkeypatch, window=200000, out=8192):
+    # The auth pre-flight issues a real (1-token) completion for hosted
+    # models; unit tests must never touch the network.
+    from xrefer.llm.cluster_analyzer import ClusterAnalyzer as _CA
+    monkeypatch.setattr(_CA, "_preflight_auth", classmethod(lambda cls, p, x: True))
     monkeypatch.setattr(
         "litellm.token_counter",
         lambda model=None, **kw: (len(kw["text"]) // 4 if "text" in kw else 5000),
@@ -372,6 +376,8 @@ class _DispatchProc(_FakeProc):
 
 
 def _run_dispatch(monkeypatch, mode, model):
+    # Never let the auth pre-flight touch the network from a unit test.
+    monkeypatch.setattr(ClusterAnalyzer, "_preflight_auth", classmethod(lambda cls, p, x: True))
     monkeypatch.setattr("litellm.token_counter", lambda model=None, **kw: 500)
     monkeypatch.setattr("litellm.get_model_info",
                         lambda m: {"max_input_tokens": 1_000_000, "max_output_tokens": 8192, "max_tokens": 8192})

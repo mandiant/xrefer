@@ -254,6 +254,52 @@ class ClusterAnalyzer:
         cls.current_config = config
         cls._processor = None  # Force new processor with new config
 
+    @classmethod
+    def _preflight_auth(cls, processor: LLMProcessor, xrefer_obj) -> bool:
+        """Settle authentication with one minimal completion before stage 1.
+
+        Hosted models only — local (Ollama) and explicit-api_base configs
+        have no key semantics. Blocks the run ONLY on a definitive
+        AuthenticationError; any other probe hiccup (transient 5xx,
+        timeout) passes through so an unrelated failure can't veto a run
+        the real calls might survive. On a rejected key the failure flag
+        is set (the ux dialog explains it) and nothing else is sent.
+        """
+        cfg = getattr(processor, "config", None)
+        model_id = (getattr(cfg, "model_id", None) if cfg else None) or ""
+        api_base = (getattr(cfg, "api_base", None) if cfg else None) or None
+        api_key = (getattr(cfg, "api_key", "") if cfg else "") or ""
+        from xrefer.llm.ollama import is_ollama_model
+        if not model_id or is_ollama_model(model_id) or api_base:
+            return True
+        import litellm
+        try:
+            kwargs: Dict[str, Any] = {
+                "model": model_id,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 16,
+                "timeout": 30,
+            }
+            if api_key:
+                kwargs["api_key"] = api_key
+            litellm.completion(**kwargs)
+        except litellm.exceptions.AuthenticationError as exc:
+            log(f"[-] LLM authentication failed for {model_id}: {str(exc).splitlines()[0][:200]}")
+            try:
+                xrefer_obj.cluster_analysis_failure = {
+                    "severity": "total",
+                    "stage": "authentication",
+                    "error": "AuthenticationError",
+                    "message": f"The API key for {model_id} was rejected before any analysis was sent. "
+                               "Fix it in Edit > XRefer > Configure (the Test button validates it).",
+                }
+            except Exception:
+                pass
+            return False
+        except Exception:
+            return True
+        return True
+
     @staticmethod
     def _stage1_ids_present(stage1_clusters: Dict[str, Any]) -> Set[int]:
         """Cluster ids already answered for, parsed from 'cluster_<id>' keys
@@ -399,6 +445,14 @@ class ClusterAnalyzer:
 
         if force_no_cache:
             log("Force re-analyze: bypassing DSPy / LiteLLM response cache for this run.")
+
+        # Wrong-key fast-fail: a rejected key otherwise burns the whole
+        # multi-minute run (the full path dies mid-corpus; the hierarchical
+        # path retries-and-skips every wave into an empty "success"). One
+        # tiny completion settles authentication in seconds before any
+        # heavy call goes out.
+        if not cls._preflight_auth(processor, xrefer_obj):
+            return {}
 
         def cache_ctx():
             return processor.uncached_lm() if force_no_cache else _null_context()

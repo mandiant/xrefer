@@ -79,7 +79,28 @@ class ClusterEverythingHandler(idaapi.action_handler_t):
 
     def activate(self, ctx: Any) -> bool:
         """Handle cluster everything action."""
+        import ida_kernwin
+
         from xrefer.plugin import plugin_instance
+
+        # No-LLM pre-flight: clustering REQUIRES a model, and without this
+        # check the run just logs a line and "completes" empty. Offer the
+        # Configure dialog right here; saving it re-runs
+        # configure_llm_and_lookups, so a fixed config proceeds immediately.
+        _obj = plugin_instance.xrefer_view.xrefer_obj
+        if not getattr(_obj, "llm_lookups", False):
+            choice = ida_kernwin.ask_buttons(
+                "Configure", "Cancel", "", ida_kernwin.ASKBTN_YES,
+                "HIDECANCEL\nCluster analysis needs an LLM, but none is configured.\n"
+                "Set a model and API key now?",
+            )
+            if choice != ida_kernwin.ASKBTN_YES:
+                return True
+            from xrefer.gui.settings import XReferSettingsDialog
+            XReferSettingsDialog().exec_()
+            if not getattr(_obj, "llm_lookups", False):
+                log("LLM still not configured — cluster analysis not run")
+                return True
 
         try:
             idaapi.show_wait_box("HIDECANCEL\n")

@@ -1531,9 +1531,10 @@ class XRefer:
                 )
                 # self.cluster_analysis = ClusterAnalyzer.populate_dummy_cluster_analysis(self.clusters)
                 if not self.cluster_analysis:
-                    # The budget gate inside the run also returns {} after
-                    # setting its own flag; don't double-report that case.
-                    if not self.cluster_token_budget_exceeded:
+                    # The budget gate and the auth pre-flight inside the run
+                    # also return {} after setting their own flags; don't
+                    # overwrite their specific diagnosis with a generic one.
+                    if not self.cluster_token_budget_exceeded and not self.cluster_analysis_failure:
                         log("No analysis results obtained from the LLM run")
                         self.cluster_analysis_failure = {
                             "severity": "total",
@@ -2134,7 +2135,8 @@ class XRefer:
                 from xrefer.llm.ollama import is_ollama_model
                 _is_local_model = is_ollama_model(model_id)
                 if not model_id:
-                    log(f"LLM lookups are enabled but missing setting(s): llm_model_id. Disabling LLM for this session. Update {self.settings_manager.settings_file} to enable it.")
+                    log("LLM lookups are enabled but no model is configured. Disabling LLM for this session. Set a model in Edit > XRefer > Configure (headless: edit "
+                        f"{self.settings_manager.settings_file}).")
                     self.llm_lookups = False
                     self.settings["llm_lookups"] = False
                     return
@@ -2155,9 +2157,10 @@ class XRefer:
                         env_has_key = False
                     if not env_has_key:
                         log(f"LLM lookups are enabled but no API key was found (in settings or the "
-                            f"environment) for '{model_id}'. Disabling LLM for this session. Set "
-                            f"api_key in {self.settings_manager.settings_file}, pass --api-key, or "
-                            f"export the provider's API key environment variable.")
+                            f"environment) for '{model_id}'. Disabling LLM for this session. Set the "
+                            f"key in Edit > XRefer > Configure (headless: api_key in "
+                            f"{self.settings_manager.settings_file}, --api-key, or the provider's "
+                            f"API key environment variable).")
                         self.llm_lookups = False
                         self.settings["llm_lookups"] = False
                         return

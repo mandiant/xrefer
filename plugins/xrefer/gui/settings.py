@@ -1098,11 +1098,33 @@ class XReferSettingsDialog(QDialog):
         self.api_key_edit.setEchoMode(QLineEdit.Password)
         self.api_key_edit.setToolTip("API key for the selected LLM provider")
 
+        # Pre-flight test: one minimal real request against the CURRENT
+        # (unsaved) field values. Without it, a wrong key or model id is
+        # only discovered minutes into the first analysis run.
+        self.test_llm_btn = QPushButton("Test")
+        self.test_llm_btn.setToolTip(
+            "Validate the model id / API key / server with one minimal "
+            "request, without saving. Tests the categorization model too "
+            "when one is enabled."
+        )
+        self.test_llm_btn.setEnabled(self.settings["llm_lookups"])
+        self.test_llm_btn.clicked.connect(self._test_llm_connection)
+
+        self.test_result_label = QLabel("")
+        self.test_result_label.setWordWrap(True)
+        self.test_result_label.setVisible(False)
+
         model_row = QHBoxLayout()
         model_row.setContentsMargins(0, 0, 0, 0)
         model_row.setSpacing(6)
         model_row.addWidget(self.llm_model_combo, 1)
         model_row.addWidget(self.refresh_models_btn, 0)
+
+        key_row = QHBoxLayout()
+        key_row.setContentsMargins(0, 0, 0, 0)
+        key_row.setSpacing(6)
+        key_row.addWidget(self.api_key_edit, 1)
+        key_row.addWidget(self.test_llm_btn, 0)
 
         llm_grid.addWidget(QLabel("LLM Model ID:"), 0, 0)
         llm_grid.addLayout(model_row, 0, 1)
@@ -1110,7 +1132,8 @@ class XReferSettingsDialog(QDialog):
         llm_grid.addWidget(self.api_base_label, 2, 0)
         llm_grid.addWidget(self.api_base_edit, 2, 1)
         llm_grid.addWidget(QLabel("API Key:"), 3, 0)
-        llm_grid.addWidget(self.api_key_edit, 3, 1)
+        llm_grid.addLayout(key_row, 3, 1)
+        llm_grid.addWidget(self.test_result_label, 4, 1)
 
         options_layout.addWidget(self.llm_checkbox)
         options_layout.addLayout(llm_grid)
@@ -1620,12 +1643,65 @@ class XReferSettingsDialog(QDialog):
         self.exclusion_default_check.stateChanged.connect(lambda state: self.toggle_path_default("exclusions", state))
         self.exclusion_browse_btn.clicked.connect(lambda: self.browse_path("exclusions"))
 
+    def _test_llm_connection(self) -> None:
+        """Probe the CURRENT (unsaved) model config with a minimal real
+        request — primary model always, the light/categorization model too
+        when enabled. Synchronous on purpose: seconds at most, the same
+        main-thread posture as every other LLM call in the plugin, and the
+        result lands inline instead of minutes into a failed run.
+        """
+        from xrefer.llm.base import test_model_connection
+
+        checks = []
+        primary_model = self.llm_model_combo.currentText().strip()
+        primary_key = self.api_key_edit.text().strip()
+        primary_base = self.api_base_edit.text().strip() if self.local_model_check.isChecked() else ""
+        checks.append(("Model", primary_model, primary_key, primary_base))
+
+        if self.use_light_model_check.isChecked():
+            light_model = self.light_model_combo.currentText().strip()
+            if light_model:
+                light_base = self.light_api_base_edit.text().strip() if self.light_local_check.isChecked() else ""
+                if self.light_same_key_check.isChecked():
+                    light_key = primary_key
+                else:
+                    light_key = self.light_api_key_edit.text().strip()
+                checks.append(("Categorization model", light_model, light_key, light_base))
+
+        # This module stays importable without IDA (offscreen Qt
+        # prototyping); the wait box is best-effort chrome.
+        try:
+            import idaapi
+        except ImportError:
+            idaapi = None
+
+        results = []
+        if idaapi:
+            idaapi.show_wait_box("HIDECANCEL\nTesting model connection...")
+        try:
+            for label, model_id, api_key, api_base in checks:
+                if idaapi and len(checks) > 1:
+                    idaapi.replace_wait_box(f"HIDECANCEL\nTesting {label.lower()}...")
+                ok, msg = test_model_connection(model_id, api_key=api_key, api_base=api_base)
+                results.append((label, ok, msg))
+        finally:
+            if idaapi:
+                idaapi.hide_wait_box()
+
+        all_ok = all(ok for _, ok, _ in results)
+        lines = [f"{'✓' if ok else '✗'} {label}: {msg}" for label, ok, msg in results]
+        # Green/red picked to stay readable on both dark and light themes.
+        self.test_result_label.setStyleSheet(f"color: {'#3fb950' if all_ok else '#f85149'}; font-size: 9pt;")
+        self.test_result_label.setText("\n".join(lines))
+        self.test_result_label.setVisible(True)
+
     def toggle_llm_options(self, state):
         """Toggle LLM-related controls based on checkbox state"""
         enabled = state == Qt.Checked
         self.llm_model_combo.setEnabled(enabled)
         self.refresh_models_btn.setEnabled(enabled)
         self.api_key_edit.setEnabled(enabled)
+        self.test_llm_btn.setEnabled(enabled)
         self.cluster_batch_size_spin.setEnabled(enabled)
         self.cluster_context_mode_combo.setEnabled(enabled)
         self.local_max_call_tokens_spin.setEnabled(enabled)
