@@ -49,14 +49,8 @@ def _make_recording_xrefer(mode):
 
     calls = []
 
-    def _propagate(iters):
-        # while self.propagate_xref_nodes(iters): ... — return False so it is
-        # evaluated exactly once and the loop body is skipped.
-        calls.append("propagate_xref_nodes")
-        return False
-
     o.generate_all_simple_call_paths_for_ep = lambda: calls.append("generate_paths")
-    o.propagate_xref_nodes = _propagate
+    o.propagate_xref_nodes = lambda: calls.append("propagate_xref_nodes")
     o.fix_thunk_xrefs = lambda: calls.append("fix_thunk_xrefs")
     o.populate_xref_addrs = lambda: calls.append("populate_xref_addrs")
     o.cluster_all_non_excluded = lambda: calls.append("cluster_all_non_excluded")

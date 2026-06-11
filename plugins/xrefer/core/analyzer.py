@@ -864,75 +864,132 @@ class XRefer:
                 ref_to_search = []
 
         log(f"Mapped {len(self.mapped_refs)} references to {len(self.leaf_funcs) - initial_leaf_count} new leaf functions (total: {len(self.leaf_funcs)})")
-    def propagate_xref_nodes(self, iter: int) -> bool:
+    def _path_corpus_topology(self) -> Tuple[List[int], List[Tuple[int, int]], List[Tuple[int, int]]]:
+        """One walk over the stored path corpus for the current entry point.
+
+        The propagation, address-population and thunk-fix passes only ever
+        need the corpus' distinct nodes and call edges, yet each used to
+        re-walk every node of every stored path (the same edge recurs
+        across up to 10k paths per leaf). Returns:
+
+        * nodes — every path node, first-encounter order;
+        * edges — every distinct ``(parent, child)`` call edge,
+          first-encounter order. Order is load-bearing: the ``*_ea`` maps'
+          insertion order feeds the INDIRECT xref table row order.
+        * last_edges — distinct ``(second-to-last, leaf)`` pairs, the only
+          pairs ``fix_thunk_xrefs`` acts on.
+
+        The walk mirrors the original per-path ``reversed(path)``
+        iteration, so first-encounter order matches the old passes' first
+        processing order. Edges come strictly from the stored corpus —
+        never ``caller_xrefs_cache``, whose binary-wide edges off any EP
+        path would over-propagate and change results.
+        """
+        nodes: List[int] = []
+        seen_nodes: Set[int] = set()
+        edges: List[Tuple[int, int]] = []
+        seen_edges: Set[Tuple[int, int]] = set()
+        last_edges: List[Tuple[int, int]] = []
+        seen_last: Set[Tuple[int, int]] = set()
+        for path_group in self.paths[self.current_analysis_ep].values():
+            for path in path_group:
+                child: Optional[int] = None
+                for idx, func_ea in enumerate(reversed(path)):
+                    if func_ea not in seen_nodes:
+                        seen_nodes.add(func_ea)
+                        nodes.append(func_ea)
+                    if child is not None:
+                        edge = (func_ea, child)
+                        if edge not in seen_edges:
+                            seen_edges.add(edge)
+                            edges.append(edge)
+                        if idx == 1 and edge not in seen_last:
+                            seen_last.add(edge)
+                            last_edges.append(edge)
+                    child = func_ea
+        return nodes, edges, last_edges
+
+    def propagate_xref_nodes(self) -> None:
         """
         Propagate cross-reference information through call paths.
 
-        Iteratively propagates cross-reference information up call chains,
-        ensuring complete visibility of references through call paths.
-        Critical for boundary analysis and path tracking.
-
-        Args:
-            iter (int): Current iteration number for logging
-
-        Returns:
-            bool: True if any modifications were made during propagation
+        Worklist propagation over the corpus' distinct call edges: each
+        edge is merged once, and an edge is re-queued only when its
+        child's information actually grew. merge_xrefs is a monotone set
+        union, so this reaches the same least fixpoint as the previous
+        whole-corpus passes — which re-merged every adjacent pair of
+        every stored path (millions of redundant idempotent merges for
+        tens of thousands of distinct edges) and repeated until a full
+        pass changed nothing.
 
         Side Effects:
             - Updates global_xrefs with propagated reference information
-
-        Note:
-            - Handles both direct and indirect references
-            - Maintains reference type distinction during propagation
-            - Updates entity visibility through call chains
+              (including merge_xrefs' create-on-first-touch entries for
+              every node appearing in any path)
         """
-        total = len(self.paths[self.current_analysis_ep]) - 1
-        assert total >= 0, f"Hmm, {self.current_analysis_ep = :#x}, {self.paths = }"
-        modified = False
+        assert len(self.paths[self.current_analysis_ep]) >= 1, f"Hmm, {self.current_analysis_ep = :#x}, {self.paths = }"
+        nodes, edges, _ = self._path_corpus_topology()
+        # The old passes created global_xrefs entries for both endpoints of
+        # every merged edge; cover every path node explicitly (including
+        # single-node paths with no edges at all).
+        for func_ea in nodes:
+            self.ensure_global_xrefs_entry(func_ea)
 
-        for index, (_, path_group) in enumerate(self.paths[self.current_analysis_ep].items()):
-            log(f"Propagating xref nodes :: [pass {iter}] :: [{index}/{total}]")
-            for path in path_group:
-                child_func_ea = None
+        parents_of: Dict[int, Set[int]] = {}
+        for parent, child in edges:
+            parents_of.setdefault(child, set()).add(parent)
 
-                for func_ea in reversed(path):
-                    if child_func_ea:
-                        ret = self.merge_xrefs(func_ea, child_func_ea)
-                        if ret:
-                            modified = ret
-                    child_func_ea = func_ea
-
-        return modified
+        log(f"Propagating xrefs across {len(edges)} distinct call edges ({len(nodes)} functions)...")
+        pending = deque(edges)
+        queued: Set[Tuple[int, int]] = set(edges)
+        processed = 0
+        while pending:
+            edge = pending.popleft()
+            queued.discard(edge)
+            parent, child = edge
+            processed += 1
+            if processed % 5000 == 0:
+                log(f"Propagating xrefs :: {processed} edge merges, {len(pending)} queued")
+            if self.merge_xrefs(parent, child):
+                # Parent's indirect set grew — its own callers may now have
+                # something new to pick up.
+                for grandparent in parents_of.get(parent, ()):
+                    gedge = (grandparent, parent)
+                    if gedge not in queued:
+                        queued.add(gedge)
+                        pending.append(gedge)
+        log(f"Propagation complete after {processed} edge merges")
 
     def fix_thunk_xrefs(self) -> None:
         """
         Fix cross-references for thunk functions.
 
         This method adjusts cross-references related to thunk functions
-        to ensure proper analysis and display of references.
+        to ensure proper analysis and display of references. Only the
+        final (caller-of-leaf, leaf) pair of each path can qualify, so it
+        runs once per distinct such pair instead of once per stored path
+        (which also re-resolved the same leaf function per path and kept
+        iterating the rest of the path to no effect).
         """
         log("Fixing thunk function references...")
 
-        for index, (_, path_group) in enumerate(self.paths[self.current_analysis_ep].items()):
-            for path in path_group:
-                child_func_ea = None
-                for _index, func_ea in enumerate(reversed(path)):
-                    if _index == 1 and self.global_xrefs[child_func_ea][self.DIRECT_XREFS]["imports"]:
-                        fn = self._backend.get_function_at(child_func_ea)
-                        if fn.is_thunk:
-                            node = next(iter(self.global_xrefs[child_func_ea][self.DIRECT_XREFS]["imports"]))
-                            self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports"].add(node)
-                            try:
-                                if node not in self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports_ea"]:
-                                    call_xrefs = self.caller_xrefs_cache[func_ea][child_func_ea]
-                                    self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports_ea"][node] = call_xrefs
-                                    self.entity_xrefs[node].update(call_xrefs)
-                            except (KeyError, AttributeError) as e:
-                                log(f"Warning: Failed to update thunk imports for function 0x{func_ea:x}: {e}")
-                            self.global_xrefs[func_ea][self.INDIRECT_XREFS]["imports"].discard(node)
-                            break
-
-                    child_func_ea = func_ea
+        _, _, last_edges = self._path_corpus_topology()
+        for func_ea, child_func_ea in last_edges:
+            if not self.global_xrefs[child_func_ea][self.DIRECT_XREFS]["imports"]:
+                continue
+            fn = self._backend.get_function_at(child_func_ea)
+            if not fn.is_thunk:
+                continue
+            node = next(iter(self.global_xrefs[child_func_ea][self.DIRECT_XREFS]["imports"]))
+            self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports"].add(node)
+            try:
+                if node not in self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports_ea"]:
+                    call_xrefs = self.caller_xrefs_cache[func_ea][child_func_ea]
+                    self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports_ea"][node] = call_xrefs
+                    self.entity_xrefs[node].update(call_xrefs)
+            except (KeyError, AttributeError) as e:
+                log(f"Warning: Failed to update thunk imports for function 0x{func_ea:x}: {e}")
+            self.global_xrefs[func_ea][self.INDIRECT_XREFS]["imports"].discard(node)
 
     def _process_artifact_xrefs(self, idx: int, entity: Tuple, xrefs: Set[int], func_artifacts: Dict, orphan_func_artifacts: Dict, orphan_artifacts: List) -> None:
         """
@@ -1166,31 +1223,40 @@ class XRefer:
         Populate cross-reference addresses through paths.
 
         This method fills in the cross-reference address information
-        for all functions in the analyzed paths.
+        for all functions in the analyzed paths. The COMBINED set depends
+        only on the function and the ``*_ea`` maps only on the (parent,
+        child) pair, so one pass over the corpus' unique nodes and one
+        over its distinct edges produces the identical result the old
+        every-node-of-every-path walk did — in first-encounter order, so
+        the ``*_ea`` insertion order (which feeds the INDIRECT table row
+        order) is unchanged.
         """
-        total = len(self.paths[self.current_analysis_ep]) - 1
-        for index, (_, path_group) in enumerate(self.paths[self.current_analysis_ep].items()):
-            log(f"Populating xref addresses :: [{index}/{total}]")
-            for path in path_group:
-                child_func_ea = None
-                for func_ea in reversed(path):
-                    parent_xref_entry = self.ensure_global_xrefs_entry(func_ea)
-                    for xref_type in "libs", "imports", "strings", "capa", "api_trace":
-                        for xref_cat in self.DIRECT_XREFS, self.INDIRECT_XREFS:
-                            parent_xref_entry[self.COMBINED_XREFS].update(parent_xref_entry[xref_cat][xref_type])
-                            if child_func_ea is None:
-                                continue
-                            child_xref_entry = self.ensure_global_xrefs_entry(child_func_ea)
-                            try:
-                                for xref in child_xref_entry[xref_cat][xref_type]:
-                                    try:
-                                        parent_xref_entry[self.INDIRECT_XREFS][self.entity_suffix_map[xref_type]][xref].add(child_func_ea)
-                                    except KeyError:
-                                        parent_xref_entry[self.INDIRECT_XREFS][self.entity_suffix_map[xref_type]][xref] = {child_func_ea}
-                            except KeyError:
-                                pass
+        nodes, edges, _ = self._path_corpus_topology()
+        log(f"Populating xref addresses across {len(nodes)} functions / {len(edges)} edges...")
+        xref_types = ("libs", "imports", "strings", "capa", "api_trace")
 
-                    child_func_ea = func_ea
+        for func_ea in nodes:
+            entry = self.ensure_global_xrefs_entry(func_ea)
+            for xref_type in xref_types:
+                for xref_cat in (self.DIRECT_XREFS, self.INDIRECT_XREFS):
+                    entry[self.COMBINED_XREFS].update(entry[xref_cat][xref_type])
+
+        for func_ea, child_func_ea in edges:
+            parent_xref_entry = self.ensure_global_xrefs_entry(func_ea)
+            child_xref_entry = self.ensure_global_xrefs_entry(child_func_ea)
+            for xref_type in xref_types:
+                suffix = self.entity_suffix_map[xref_type]
+                for xref_cat in (self.DIRECT_XREFS, self.INDIRECT_XREFS):
+                    try:
+                        child_xrefs = child_xref_entry[xref_cat][xref_type]
+                    except KeyError:
+                        continue
+                    target_map = parent_xref_entry[self.INDIRECT_XREFS][suffix]
+                    for xref in child_xrefs:
+                        try:
+                            target_map[xref].add(child_func_ea)
+                        except KeyError:
+                            target_map[xref] = {child_func_ea}
 
     def generate_reverse_entity_lookup_index(self) -> None:
         """
@@ -3055,9 +3121,7 @@ class XRefer:
         if not any(ep_paths.values()):
             raise AssertionError(f"Call path generation produced only empty targets for entry point 0x{self.current_analysis_ep:x}")
         if self.mode == 'full':
-            iters = 1
-            while self.propagate_xref_nodes(iters):
-                iters += 1
+            self.propagate_xref_nodes()
         # fix_thunk_xrefs runs in BOTH modes. It forwards a thunk's resolved
         # import onto the calling function's DIRECT xrefs (global_xrefs[...]
         # [DIRECT_XREFS]['imports'] and entity_xrefs), which both the cluster
