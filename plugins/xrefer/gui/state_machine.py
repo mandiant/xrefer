@@ -148,7 +148,11 @@ class XReferStateMachine(StateMachine):
     toggle_on_trace_scope_full = trace_scope_path.to(trace_scope_full)
     toggle_on_trace_scope_function = trace_scope_full.to(trace_scope_function)
 
-    # trace revert transition
+    # trace revert transitions — ESC steps the scope cycle back one at a
+    # time (full -> path -> function), the inverse of T's forward cycle.
+    # The full -> path arm did not exist, so ESC from the full scope had
+    # no single-step way back and skipped past path.
+    revert_trace_scope_full_to_trace_scope_path = trace_scope_full.to(trace_scope_path)
     revert_trace_scope_path_to_trace_scope_fn = trace_scope_path.to(trace_scope_function)
 
     # help revert transitions
@@ -334,7 +338,19 @@ class XReferStateMachine(StateMachine):
             # transitions exist but were never reachable past this filter,
             # stranding the triage loop in the overview).
             event_name = str(event)
-            is_mode_flip = event_name.startswith("toggle_") and event_name not in ("toggle_on_clusters", "toggle_on_cluster_graphs")
+            # toggle_ events are mode flips (pin, sync, library visibility)
+            # whose states must not be revisited — EXCEPT real view changes
+            # that ESC should walk back through one at a time: the cluster
+            # table <-> graph pair, and the trace-scope cycle. Without the
+            # trace exemptions, ESC returning from help (or any state opened
+            # from a trace scope) would skip past the scope the user was in.
+            is_mode_flip = event_name.startswith("toggle_") and event_name not in (
+                "toggle_on_clusters",
+                "toggle_on_cluster_graphs",
+                "toggle_on_trace_scope_path",
+                "toggle_on_trace_scope_full",
+                "toggle_on_trace_scope_function",
+            )
 
             # Check if this state meets our criteria
             if prev_state != current_state and not is_mode_flip:
@@ -382,6 +398,25 @@ class XReferStateMachine(StateMachine):
             self._state_history = self._state_history[: i + 1]
             self.toggle_on_clusters()
             return True
+        return False
+
+    def step_back_trace_scope(self) -> bool:
+        """ESC within the trace-scope cycle steps back exactly one scope
+        (full -> path -> function) and then out to base.
+
+        This is a pure function of the CURRENT scope, not of history, so
+        it never skips a scope and never dead-ends on the cyclic history
+        the T key builds (T wraps full -> function, which would otherwise
+        leave ``go_back`` with no single-step arm to walk). Returns False
+        when not in a trace scope, so the caller falls through to the
+        normal ESC handling.
+        """
+        if self.current_state == self.trace_scope_full:
+            return bool(self.revert_trace_scope_full_to_trace_scope_path())
+        if self.current_state == self.trace_scope_path:
+            return bool(self.revert_trace_scope_path_to_trace_scope_fn())
+        if self.current_state == self.trace_scope_function:
+            return bool(self.to_base())
         return False
 
     def reset_state(self) -> None:

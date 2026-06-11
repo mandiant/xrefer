@@ -1974,6 +1974,19 @@ class XReferView(idaapi.simplecustviewer_t):
                 self.update(True)
                 return True
 
+        # The trace-scope cycle steps back one scope per ESC
+        # (full -> path -> function -> base), deterministically — the
+        # cyclic history T builds (it wraps full -> function) can't be
+        # walked one-step-at-a-time by go_back, so handle it explicitly.
+        if self.state_machine.current_state in (
+            self.state_machine.trace_scope_function,
+            self.state_machine.trace_scope_path,
+            self.state_machine.trace_scope_full,
+        ):
+            if self.state_machine.step_back_trace_scope():
+                self.update(True)
+                return True
+
         # Otherwise try default escape handling
         if len(self.state_machine.state_history) <= 1:
             set_focus_to_code()
