@@ -147,6 +147,12 @@ def test_every_state_has_a_hint(ch):
         assert keys, f"state {state!r} produced an empty compact hint"
         non_help = [k for k in keys if k != "H"]
         assert non_help, f"state {state!r} hint only shows 'H' — needs real hints"
+        if state == "search":
+            # H is deliberately excluded in search: the keystroke types 'h'
+            # into the filter (no search→help transition exists), so the
+            # hint must not advertise a dead key.
+            assert "H" not in keys, "search hint must not advertise the dead H key"
+            continue
         assert keys[-1] == "H", f"state {state!r} hint must end with H: full help"
 
 

@@ -1473,7 +1473,8 @@ def help_text() -> List[str]:
  GLOBAL KEYS (available in every view):
  [ESC]      Go back one view, or (at home) switch focus back to IDA
  [ENTER]    Return to the home view (per-function tables)
- [H]        Show / hide this help
+ [H]        Show / hide this help (except while typing a search filter,
+            where 'h' goes into the filter text)
  [N]        Rename the function / reference under the cursor
  (MOUSE)    Click = expand row / open cluster / show call details;
             Double-click = select artifact or jump to address; Hover = tooltip

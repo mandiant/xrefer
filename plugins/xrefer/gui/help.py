@@ -65,13 +65,21 @@ class Action:
     states: Set[str] = None
     hint: Optional[str] = None
     weight: int = 0
+    # States where a GLOBAL action is nonetheless dead — e.g. ``H`` inside
+    # search, where the keystroke must stay typeable into the filter. The
+    # hint must not advertise keys that won't fire.
+    exclude_states: Set[str] = None
 
     def __post_init__(self):
         if self.states is None:
             self.states = set()
+        if self.exclude_states is None:
+            self.exclude_states = set()
 
     def live_in(self, state: str) -> bool:
         """True when this action is available in ``state`` (empty states ⇒ global)."""
+        if state in self.exclude_states:
+            return False
         return not self.states or state in self.states
 
 
@@ -123,7 +131,9 @@ class ContextHelp:
             # ----- Global keyboard ------------------------------------------------
             Action("ESC", "go back / return to IDA", KB),
             Action("ENTER", "return to the home view", KB),
-            Action("H", "show / hide the full help", KB, hint="full help"),
+            # H is global EXCEPT in search, where the keystroke types into
+            # the filter (there is deliberately no search→help arm).
+            Action("H", "show / hide the full help", KB, hint="full help", exclude_states={"search"}),
             Action("N", "rename the function / reference under the cursor", KB),
             # ESC teased only where the view is otherwise sparse.
             Action("ESC", "exit search", KB, {"search"}, hint="exit", weight=40),

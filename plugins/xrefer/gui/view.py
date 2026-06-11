@@ -1772,8 +1772,9 @@ class XReferView(idaapi.simplecustviewer_t):
         Returns:
             bool: True if navigation occurred
         """
-        self.state_machine.to_base()
-        return True
+        # Return the real transition result: a no-op (already in base, or a
+        # state without a to_base arm) must not force a pointless redraw.
+        return bool(self.state_machine.to_base())
 
     def handle_key_escape(self, shift: bool) -> bool:
         """
