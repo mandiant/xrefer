@@ -1591,6 +1591,7 @@ def help_text() -> List[str]:
 
  NEIGHBORHOOD VIEW (after pressing [V]):
  Shows the cursor function centered, with adjacent clusters around it
+ [G]    Pin / unpin the neighborhood graph (survives navigation)
  [V]    Exit the neighborhood view
  [M]    Intermediate paths through the cursor function
  [ESC/ENTER] Return to the previous view / home

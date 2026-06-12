@@ -98,12 +98,25 @@ def test_go_back_lands_on_table_after_matrix_exit(sm):
     assert sm.current_state == sm.clusters
 
 
-def test_go_back_still_skips_real_mode_flips(sm):
-    # A state entered via a pin flip must remain invisible to go_back:
-    # graph -> pinned (flip) -> help; ESC from help lands on graph, never
-    # on the pinned intermediate.
+def test_help_round_trip_restores_pinned_graph(sm):
+    # Opening help FROM a pinned graph and pressing ESC must return to the
+    # pinned graph, not a stripped-down plain graph. The pin/simplify
+    # toggles are content-changing view modes that go_back walks back onto
+    # (the revert_help_to_pinned_graph arm was previously unreachable).
     sm.start_graph()
     sm.toggle_on_pinned_graph()
+    sm.start_help()
+    success, _pos = sm.go_back()
+    assert success
+    assert sm.current_state == sm.pinned_graph
+
+
+def test_help_round_trip_honors_a_later_unpin(sm):
+    # If the user unpinned before opening help, ESC returns to the
+    # (unpinned) graph — go_back honors the most recent explicit mode.
+    sm.start_graph()
+    sm.toggle_on_pinned_graph()
+    sm.toggle_on_graph()
     sm.start_help()
     success, _pos = sm.go_back()
     assert success

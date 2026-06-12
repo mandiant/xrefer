@@ -172,6 +172,7 @@ class ContextHelp:
             Action("G", "artifact path graph", KB, {"base", "search", "artifact search"}, hint="paths", weight=76),
             Action("G", "pin / unpin the graph", KB, set(GRAPH), hint="pin", weight=76),
             Action("G", "pin / unpin the cluster graph", KB, set(CLUSTER_GRAPH), hint="pin", weight=76),
+            Action("G", "pin / unpin the neighborhood graph", KB, set(NEIGHBORHOOD), hint="pin", weight=76),
             Action("G", "open the ATT&CK heat-grid popup", KB, {"attack matrix"}, hint="heat-grid", weight=80),
 
             # ----- Inside artifact graphs ----------------------------------------

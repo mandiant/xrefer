@@ -46,11 +46,21 @@ class PeekViewToggleHandler(idaapi.action_handler_t):
         )
         idaapi.update_action_label("XRefer:toggle_peek", action_desc.label)
 
-        if plugin_instance.xrefer_view.peek_flag:
-            plugin_instance.xrefer_view.update(ea=idc.get_screen_ea())
-        elif plugin_instance.xrefer_view.state_machine.current_state == plugin_instance.xrefer_view.state_machine.call_focus:
-            plugin_instance.xrefer_view.state_machine.go_back()
-            plugin_instance.xrefer_view.update(True)
+        view = plugin_instance.xrefer_view
+        sm = view.state_machine
+        if view.peek_flag:
+            # Enabling peek only ARMS the mode for future clicks. Forcing an
+            # immediate sync from a deliberately-navigated view (a graph, a
+            # trace, a deep cluster stack) would let the peek branch hijack
+            # it — usually tearing it down to base — on a menu toggle whose
+            # only advertised effect is arming. Apply it now only where peek
+            # legitimately owns the panel; otherwise the next real cursor
+            # event applies it.
+            if sm.current_state in (sm.base, sm.call_focus):
+                view.update(ea=idc.get_screen_ea())
+        elif sm.current_state == sm.call_focus:
+            sm.go_back()
+            view.update(True)
 
         log(f"Peek view {state}")
         return True

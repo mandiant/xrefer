@@ -790,6 +790,14 @@ class XReferView(idaapi.simplecustviewer_t):
 
                 cluster = self.xrefer_obj.find_cluster_by_id(cluster_id)
                 if cluster:
+                    # A chip click navigates to a concrete cluster — if the
+                    # intermediate sub-view is open, close its bookkeeping
+                    # first (the draw dispatch short-circuits to the spider
+                    # while the flag is set, so the click would be a visual
+                    # no-op and the one-pop M/ESC undo would later pop the
+                    # wrong cluster).
+                    if self.state_machine.intermediate_view_func_ea is not None:
+                        self.state_machine.discard_intermediate_view()
                     # Prepare to navigate to that cluster
                     if current := cluster_manager.get_current_cluster():
                         parent_id = current.cluster_id
@@ -954,16 +962,22 @@ class XReferView(idaapi.simplecustviewer_t):
         should_update = self.handle_key_specific_actions(vkey, shift)
         state_after_handling_key = self.state_machine.current_state
 
-        # Leaving the filtered view by any key/transition retires the filter —
-        # unless the transition LANDS on a filterable view: the click-pivot
-        # into a cluster graph and the ESC return to the table must keep the
-        # filter alive, so the re-render matches the row stored at click time
-        # and the triage loop continues over the filtered list. (Entering
-        # base fires reset_state, which retires it there.)
+        # Leaving the filtered view by any key/transition retires the filter
+        # — unless the transition lands on a filterable view OR on a
+        # cluster-context side trip the analyst returns FROM (a chip/J pivot
+        # into a cluster graph, K into the ATT&CK matrix): keeping the filter
+        # alive there means the ESC return re-renders the same filtered table
+        # at the stored row, continuing the triage loop. The flag is dormant
+        # in those non-filterable states (no filter render, no key routing),
+        # and base entry's reset_state retires it for good.
+        _filter_keep = (
+            sm.trace_scope_full, sm.orphans, sm.clusters,
+            sm.cluster_graphs, sm.pinned_cluster_graphs, sm.attack_matrix,
+        )
         if (
             sm.view_filter_active
             and state_after_handling_key is not state_before_handling_key
-            and state_after_handling_key not in (sm.trace_scope_full, sm.orphans, sm.clusters)
+            and state_after_handling_key not in _filter_keep
         ):
             sm.view_filter_active = False
             sm.search_filter = ""
@@ -1176,8 +1190,15 @@ class XReferView(idaapi.simplecustviewer_t):
         Returns:
             bool: True if boundary scan was initiated, False otherwise
         """
+        # Gate on a non-empty selection BEFORE the transition, mirroring
+        # the L key. Entering the boundary view with nothing selected
+        # rendered a ribbonless "NO BOUNDARY METHODS FOUND" panel and
+        # overwrote the cached last-boundary results with that placeholder.
+        scan_entities = self.state_machine.get_selected_refs(self.func_ea)
+        if not scan_entities:
+            log("No artifacts selected — double-click artifacts to select, then press B")
+            return False
         if self.state_machine.start_boundary_results():
-            scan_entities = self.state_machine.get_selected_refs(self.func_ea)
             boundary_methods: List[int] = self.xrefer_obj.run_boundary_scan(scan_entities)
             self.state_machine.boundary_methods = boundary_methods
             return True
@@ -1224,7 +1245,13 @@ class XReferView(idaapi.simplecustviewer_t):
         Returns:
             bool: True if focus mode was entered, False otherwise
         """
-        if self.state_machine.current_state != self.state_machine.call_focus:
+        # Gate on base (start_call_focus' only arm), and BEFORE the side
+        # effects. From any other state the transition is doomed, but the
+        # old `!= call_focus` guard still set address_filter and scrolled a
+        # long reading view to line 0 first — losing the analyst's place for
+        # nothing and leaving a stale address_filter behind. P is advertised
+        # only in base.
+        if self.state_machine.current_state == self.state_machine.base:
             word: str = self.GetCurrentWord()
             if word.startswith("0x"):
                 try:
@@ -1316,6 +1343,14 @@ class XReferView(idaapi.simplecustviewer_t):
         elif current_state == self.state_machine.pinned_cluster_graphs:
             # Unpin cluster graph
             return self.state_machine.toggle_unpinned_cluster_graph()
+
+        if current_state == self.state_machine.neighborhood_graph:
+            # Pin the neighborhood graph so it survives cursor moves, just
+            # like the other graph views (G was a dead key here and the
+            # pinned state, though fully built, was unreachable).
+            return self.state_machine.toggle_pinned_neighborhood_graph()
+        elif current_state == self.state_machine.pinned_neighborhood_graph:
+            return self.state_machine.toggle_unpinned_neighborhood_graph()
 
         # Handle regular graph pinning (existing logic)
         if current_state in (self.state_machine.graph, self.state_machine.pinned_graph, self.state_machine.simplified_graph, self.state_machine.pinned_simplified_graph):
@@ -1414,15 +1449,26 @@ class XReferView(idaapi.simplecustviewer_t):
 
         # If in cluster view, toggle sync
         if current_state in (self.state_machine.cluster_graphs, self.state_machine.pinned_cluster_graphs):
+            # Sync toggling is meaningless inside the focused
+            # intermediate-paths sub-view, and doing it there would
+            # silently unpin (the next cursor move then tears the view to
+            # base) or accrue a stack push beneath the sub-view. Leave J
+            # inert until the sub-view is closed.
+            if self.state_machine.intermediate_view_func_ea is not None:
+                return False
             if not self.state_machine.cluster_sync_enabled:
-                result = self.find_function_in_clusters(self.func_ea)
+                cur = self.state_machine.cluster_manager.get_current_cluster()
+                cur_id = cur.cluster_id if cur else None
+                result = self.find_function_in_clusters(self.func_ea, cur_id)
 
                 if result:
                     cluster_id, is_intermediate = result
-                    if not is_intermediate:
+                    # Push only when the cursor's cluster differs from the
+                    # one already on top — J on a function already shown
+                    # otherwise double-stacks the same cluster (J,J ->
+                    # [A,A]), so the later ESC redraws it with no effect.
+                    if not is_intermediate and cluster_id != cur_id:
                         self.state_machine.cluster_manager.push_cluster(cluster_id)
-                    # if current := self.state_machine.cluster_manager.get_current_cluster():
-                    #     current.simplified = not is_intermediate
 
             self.state_machine.toggle_cluster_sync()
             return True
@@ -1574,7 +1620,14 @@ class XReferView(idaapi.simplecustviewer_t):
         current = sm.current_state
 
         if sm.intermediate_view_func_ea is not None:
-            return self._exit_intermediate_view_with_undo()
+            if current in (sm.cluster_graphs, sm.pinned_cluster_graphs):
+                return self._exit_intermediate_view_with_undo()
+            # The sub-view flag lingered from a cluster-graph visit the
+            # user then left (e.g. via V into the neighborhood). There is
+            # no live sub-view to close here; discard the stale bookkeeping
+            # so M can open the sub-view fresh from this state instead of
+            # silently no-opping (M is advertised here).
+            sm.discard_intermediate_view()
 
         # Open path. Eligible source states are those where the banner
         # hint advertises M.
@@ -1661,7 +1714,12 @@ class XReferView(idaapi.simplecustviewer_t):
         current = sm.current_state
 
         if current in (sm.neighborhood_graph, sm.pinned_neighborhood_graph):
-            sm.go_back()
+            # Mirror the ESC / K-matrix exits: restore the caller's cursor
+            # row on the way back instead of dropping to row 0 (the landing
+            # view's draw ends in Jump(0,0)).
+            _success, cursor_pos = sm.go_back()
+            if cursor_pos:
+                self._pending_jump = cursor_pos
             return True
 
         eligible = (
@@ -2171,11 +2229,15 @@ class XReferView(idaapi.simplecustviewer_t):
         boundary_methods = self.state_machine.boundary_methods
         entity_list = self.state_machine.get_selected_refs(self.func_ea)
 
-        if not len(boundary_methods):
+        if not boundary_methods:
+            # Render the message but do NOT cache it as the last scan — a
+            # fruitless scan must not clobber a previous real result that L
+            # re-shows. Keep the ribbon so the panel has a label and an ESC
+            # affordance rather than a near-blank line.
             self.ClearLines()
-            self.last_boundary_scan_results = ["NO BOUNDARY METHODS FOUND"]
+            self.print_ribbon()
             self.AddLine("")
-            self.AddLine("    %s" % self.last_boundary_scan_results[0])
+            self.AddLine("    NO BOUNDARY METHODS FOUND")
             self.Refresh()
             return
 
@@ -4989,8 +5051,19 @@ class XReferView(idaapi.simplecustviewer_t):
                 if not self.peek_flag:
                     return
 
-            # Handle cluster sync if enabled
-            if self.state_machine.cluster_sync_enabled and self.state_machine.current_state in (self.state_machine.cluster_graphs, self.state_machine.pinned_cluster_graphs):
+            # Handle cluster sync if enabled — but NOT while the
+            # intermediate-paths sub-view is open. Following the cursor
+            # would mutate the cluster stack under the sub-view (so the
+            # M/ESC count-based undo pops the wrong entry), capture a
+            # spider-graph cursor position as the wrong cluster's, and
+            # never actually render the followed cluster (the sub-view
+            # short-circuits the cluster-graph draw). The cursor banner
+            # still updates via the no-result path below.
+            if (
+                self.state_machine.cluster_sync_enabled
+                and self.state_machine.intermediate_view_func_ea is None
+                and self.state_machine.current_state in (self.state_machine.cluster_graphs, self.state_machine.pinned_cluster_graphs)
+            ):
                 current_cluster = self.state_machine.cluster_manager.get_current_cluster()
                 current_cluster_id = current_cluster.cluster_id if current_cluster else None
 
@@ -5030,9 +5103,19 @@ class XReferView(idaapi.simplecustviewer_t):
                     force = True
                     self.func_ea = func_ea
 
-            elif self.peek_flag and not self.state_machine.is_sticky_state() and not self.state_machine.is_pinned_graph():
+            elif (
+                self.peek_flag
+                and not self.state_machine.is_sticky_state()
+                and not self.state_machine.is_pinned_graph()
+                and self.state_machine.current_state != self.state_machine.search
+            ):
                 # Peek hijacks the panel with a call-focus preview; while a
-                # reading view or pinned graph is up, it must not.
+                # reading view, pinned graph, or live search is up, it must
+                # not. (search is not sticky, so without this guard a click
+                # on a call line mid-typing fired start_call_focus — which
+                # no-ops from search — then still set address_filter and
+                # forced a redraw that dropped every non-matching row, and a
+                # click on a non-call line tore the search down to base.)
                 # Get all operands of the current instruction
                 has_func_operand = False
                 # Check up to 6 operands (typical maximum in IDA)
