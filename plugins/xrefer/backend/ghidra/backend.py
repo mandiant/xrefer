@@ -278,6 +278,7 @@ class GhidraBackend(BackEnd):
         state = self.__dict__.copy()
         state["_program"] = None
         state["_addr_factory"] = None
+        state["_rustmain_insn_cache"] = None  # transient per-search memo; don't persist
         return state
 
     def __setstate__(self, state):
@@ -882,3 +883,385 @@ class GhidraBackend(BackEnd):
             text=text
         )
         return ins
+
+    # ── Rust rust_main detection (parity with IDA / Vivisect backends) ────────
+    # Rust wraps user code in a CRT-emitted ``main``/``_main`` (or a PE bootstrap
+    # one level below ``start``) that loads a function pointer to the user
+    # ``main::main`` and then calls a Rust-runtime bootstrap. Without recovering
+    # that pointer the dominator anchor in analyzer.py never fires on Ghidra, so
+    # Rust binaries stay rooted at the PE entry and report "Undetermined". This
+    # ports the byte-walk used by the IDA and Vivisect backends onto Ghidra's API
+    # so Rust comparisons are apples-to-apples across backends.
+
+    # Rust/glibc bootstrap routines that receive the user main as an argument.
+    _BOOTSTRAP_NAMES = ('lang_start', 'libc_start_main', 'libc_start_call_main')
+
+    # MinGW / MSVCRT helper-function fragments. Calls to these from a PE entry
+    # are CRT plumbing, not the Rust bootstrap, so don't recurse into them.
+    _CRT_HELPER_PATTERNS = (
+        'getmainargs', 'set_app_type', 'security_init_cookie', 'initterm',
+        'cexit', 'amsg_exit', 'getstartupinfo', 'setusermatherr', 'commode',
+        'fmode', 'mingwthr_', 'mingw_tlscallback', 'pei386_runtime',
+        'lconv_init', 'gcc_register_frame', 'gcc_deregister_frame',
+    )
+
+    def _gh_addr(self, addr_int: int):
+        """Build a Ghidra Address from an int offset via the cached factory."""
+        # Ensure the factory is live: it is reset to None across pickling
+        # (__setstate__), and _get_actual_program() lazily restores it. Every
+        # sibling accessor calls _get_actual_program() first; do the same here so
+        # this helper is safe to call as the first factory access after unpickle.
+        if self._addr_factory is None:
+            self._get_actual_program()
+        return self._addr_factory.getAddress(f"{addr_int:x}")
+
+    def _ghidra_func_at_start(self, addr_int: int):
+        """Return the raw Ghidra Function whose ENTRY POINT is exactly
+        ``addr_int`` (not merely containing it), excluding externals; else None.
+        """
+        program = self._get_actual_program()
+        fn = program.getFunctionManager().getFunctionAt(self._gh_addr(addr_int))
+        if fn is None or fn.isExternal():
+            return None
+        return fn
+
+    def _func_insn_addrs(self, func_ea: int) -> list[int]:
+        """Sorted instruction addresses belonging to the function containing
+        ``func_ea`` (ascending — ``getInstructions`` walks the body forward).
+
+        Memoised by the containing function's entry point for the duration of one
+        rust_main search: the reachability probe revisits the same functions many
+        times, and re-walking the listing each time is the dominant cost.
+        """
+        program = self._get_actual_program()
+        fn = program.getFunctionManager().getFunctionContaining(self._gh_addr(func_ea))
+        if fn is None:
+            return []
+        key = fn.getEntryPoint().getOffset()
+        cache = getattr(self, "_rustmain_insn_cache", None)
+        if cache is None:
+            cache = self._rustmain_insn_cache = {}
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+        listing = program.getListing()
+        addrs: list[int] = []
+        it = listing.getInstructions(fn.getBody(), True)
+        while it.hasNext():
+            addrs.append(it.next().getAddress().getOffset())
+        cache[key] = addrs
+        return addrs
+
+    def _is_call_at(self, addr_int: int) -> bool:
+        """True if a recognised call instruction starts at ``addr_int``."""
+        program = self._get_actual_program()
+        inst = program.getListing().getInstructionAt(self._gh_addr(addr_int))
+        return inst is not None and inst.getFlowType().isCall()
+
+    def _is_bootstrap_call_target(self, tgt: int) -> bool:
+        """True if a call to ``tgt`` is a Rust-runtime bootstrap — by name
+        (``lang_start*``, ``__libc_start_main``) directly or via a thunk, or a
+        direct call to a statically-linked runtime wrapper (non-external func).
+        """
+        name = (self.get_name_at(Address(tgt)) or "").lower()
+        if any(s in name for s in self._BOOTSTRAP_NAMES):
+            return True
+        fn = self._ghidra_func_at_start(tgt)
+        if fn is None:
+            return False
+        if fn.isThunk():
+            thunked = fn.getThunkedFunction(True)
+            if thunked is not None:
+                tn = (thunked.getName() or "").lower()
+                return any(s in tn for s in self._BOOTSTRAP_NAMES)
+            return False
+        # A named CRT helper is plumbing, never the Rust bootstrap — reject it so
+        # a ``mov reg,<ptr>; call <crt_helper>`` shape is not misread as a handoff.
+        if self._is_crt_helper_name(name.lstrip("._")):
+            return False
+        # Statically-linked Rust runtime wrapper: a direct call to a real
+        # (non-external) user function counts as a bootstrap call.
+        return not fn.isExternal()
+
+    def _has_following_bootstrap_call(self, addrs: list[int], idx: int, maxn: int) -> bool:
+        """True if any of the next ``maxn`` instructions is a call whose
+        resolved target is a Rust bootstrap routine.
+        """
+        for j in range(idx + 1, min(idx + 1 + maxn, len(addrs))):
+            if not self._is_call_at(addrs[j]):
+                continue
+            # Accept ALL resolved targets of the call — an indirect call through
+            # a pointer slot is recorded as a data/unknown ref, not CALL.
+            for xr in self.get_xrefs_from(Address(addrs[j])):
+                if self._is_bootstrap_call_target(int(xr.target)):
+                    return True
+        return False
+
+    def _loaded_code_pointers_at(self, addr: int, body) -> list[int]:
+        """Code-pointer targets *loaded* (not branched to) at ``addr`` that leave
+        ``body``. Collected from BOTH Ghidra data-ref xrefs AND the instruction's
+        immediate operand — the latter so detection doesn't depend on Ghidra
+        having created a reference for a ``mov reg, <imm>`` (its auto-analysis is
+        not consistent about that, which is exactly the resolvable case the mentor
+        flagged). De-duplicated, order-preserving.
+        """
+        out: list[int] = []
+        seen: set[int] = set()
+
+        def add(t: int):
+            if t not in seen and not body.contains(self._gh_addr(t)):
+                seen.add(t)
+                out.append(t)
+
+        for xr in self.get_xrefs_from(Address(addr)):
+            if xr.type in (XrefType.CALL, XrefType.JUMP):
+                continue                           # data ref only, not a branch
+            add(int(xr.target))
+        try:
+            ins = self.disassemble(Address(addr))
+        except Exception:
+            ins = None
+        if ins is not None and not ins.mnemonic.startswith(("call", "j", "ret")):
+            for op in ins.operands:
+                v = getattr(op, "value", None)
+                if isinstance(v, Address):
+                    add(int(v))
+        return out
+
+    def _scan_wrapper_for_rust_main(self, func_ea: int) -> int | None:
+        """Byte-walk the function containing ``func_ea`` for a loaded code pointer
+        that leaves the wrapper and resolves to a function start (directly, or by
+        following a closure JMP-thunk), followed within 8 instructions by a Rust
+        bootstrap call. Returns the resolved target or None. Does not rename.
+        """
+        program = self._get_actual_program()
+        fn = program.getFunctionManager().getFunctionContaining(self._gh_addr(func_ea))
+        if fn is None:
+            return None
+        body = fn.getBody()
+        addrs = self._func_insn_addrs(func_ea)
+        for i, addr in enumerate(addrs):
+            for tgt in self._loaded_code_pointers_at(addr, body):
+                cand = self._ghidra_func_at_start(tgt)
+                if cand is None:
+                    # The loaded pointer may be a closure/JMP-thunk rather than a
+                    # promoted function start (32-bit PE: `mov reg,<closure>` where
+                    # the closure is a tiny `... ; jmp <main_body>` trampoline).
+                    # Resolve it statically by following the unconditional jump.
+                    resolved = self._follow_to_function_start(tgt)
+                    if resolved is None:
+                        continue                   # not a function start nor a thunk
+                    tgt = resolved
+                    cand = self._ghidra_func_at_start(tgt)
+                    if cand is None:
+                        continue
+                # Reject trivial trampolines (jmp rax, etc.): rust_main has at
+                # least 2 basic blocks OR a single block with an outgoing call.
+                cand_bbs = list(GhidraFunction(cand, self).basic_blocks)
+                if len(cand_bbs) < 2:
+                    if not any(xr2.type == XrefType.CALL
+                               for xr2 in self.get_xrefs_from(Address(tgt))):
+                        continue
+                if self._has_following_bootstrap_call(addrs, i, 8):
+                    return tgt
+        return None
+
+    def _iter_user_callees(self, func_ea: int) -> Iterator[int]:
+        """Yield function-start addresses directly called from ``func_ea`` that
+        are plausible Rust bootstrap candidates: not external, not thunk, not a
+        known CRT helper. Used to descend one level below a PE entry.
+        """
+        seen: set[int] = set()
+        for addr in self._func_insn_addrs(func_ea):
+            if not self._is_call_at(addr):
+                continue
+            for xr in self.get_xrefs_from(Address(addr)):
+                if xr.type != XrefType.CALL:
+                    continue
+                tgt = int(xr.target)
+                if tgt in seen:
+                    continue
+                cand = self._ghidra_func_at_start(tgt)
+                if cand is None or cand.isThunk() or cand.isExternal():
+                    continue
+                nm = (self.get_name_at(Address(tgt)) or "").lstrip("._")
+                if self._is_crt_helper_name(nm):
+                    continue
+                seen.add(tgt)
+                yield tgt
+
+    @classmethod
+    def _is_crt_helper_name(cls, name: str) -> bool:
+        """True for MinGW / MSVCRT helpers we don't want to recurse into.
+        Conservative — a false positive only costs a wasted byte-walk.
+        """
+        if not name:
+            return False
+        stripped = name.lstrip(".").lstrip("_").split(".")[0].lower()
+        # MinGW's static-init helper is ``__main`` -> strips to ``main``; the
+        # real Rust bootstrap is unnamed here, so an exact ``main`` is the helper.
+        if stripped == "main":
+            return True
+        return any(p in stripped for p in cls._CRT_HELPER_PATTERNS)
+
+    # rust_main detection tuning.
+    _MAIN_MIN_REACH = 16          # the genuine rust_main reaches >= this many funcs
+    _MAIN_REACH_CAP = 64          # cap on the reachability probe (relative size only)
+    _MAIN_SEARCH_MAX_DEPTH = 4    # BFS depth through the CRT chain
+    _MAIN_SEARCH_MAX_FUNCS = 250  # cap on functions scanned during the deep search
+
+    def _follow_to_function_start(self, addr_int: int, max_hops: int = 4) -> int | None:
+        """Resolve a loaded code pointer to a real function start.
+
+        If ``addr_int`` is already a function start, return it. Otherwise, if it
+        begins a tiny trampoline that ends in an unconditional ``JMP``, follow
+        that jump (a few hops) to a function start. Rust passes the user main as
+        ``mov reg, <closure>`` where the closure is frequently a ``…; jmp
+        <monomorphised body>`` thunk that Ghidra never promotes to a function —
+        statically followable without any emulation. Returns the resolved start
+        or None.
+        """
+        program = self._get_actual_program()
+        listing = program.getListing()
+        cur = addr_int
+        for _ in range(max_hops):
+            if self._ghidra_func_at_start(cur) is not None:
+                return cur
+            # Scan a tiny window from ``cur`` for the trampoline's terminating
+            # unconditional jump/tail-call. ``getInstructions(start, True)``
+            # yields the first DEFINED instruction at-or-after ``cur``, so this
+            # works even when the closure entry byte itself isn't disassembled.
+            window_end = self._gh_addr(cur + 0x20)
+            it = listing.getInstructions(self._gh_addr(cur), True)
+            landed = None
+            steps = 0
+            while it.hasNext() and steps < 4:
+                inst = it.next()
+                if inst.getAddress().compareTo(window_end) >= 0:
+                    break
+                ft = inst.getFlowType()
+                if (ft.isJump() or ft.isCall()) and ft.isUnConditional():
+                    flows = inst.getFlows()
+                    if flows:
+                        landed = flows[0].getOffset()
+                    break
+                if ft.isTerminal() or ft.isConditional():
+                    break
+                steps += 1
+            if landed is None:
+                return None
+            cur = landed
+        return None
+
+    def _func_callee_starts(self, func_ea: int) -> set[int]:
+        """Function-start addresses called from ``func_ea`` (resolved CALL /
+        indirect edges), for the reachability probe."""
+        out: set[int] = set()
+        program = self._get_actual_program()
+        fm = program.getFunctionManager()
+        for ia in self._func_insn_addrs(func_ea):
+            # Count a CALL edge, or an UNKNOWN/computed edge ONLY when it
+            # originates from a call instruction (an indirect/vtable dispatch).
+            # An UNKNOWN edge off a non-call instruction is a data-pointer load,
+            # not a call, and counting it inflates the reach of runtime stubs.
+            is_call_site = self._is_call_at(ia)
+            for xr in self.get_xrefs_from(Address(ia)):
+                if not (xr.type == XrefType.CALL
+                        or (is_call_site and xr.type == XrefType.UNKNOWN)):
+                    continue
+                f = fm.getFunctionContaining(self._gh_addr(int(xr.target)))
+                if f is not None and not f.isExternal():
+                    out.add(f.getEntryPoint().getOffset())
+        return out
+
+    def _capped_reach(self, start: int, cap: int) -> int:
+        """Functions reachable from ``start`` via call edges, capped at ``cap``
+        (we only need the relative size to tell a real main from a dead-end)."""
+        seen = {start}
+        stack = [start]
+        while stack and len(seen) < cap:
+            x = stack.pop()
+            for c in self._func_callee_starts(x):
+                if c not in seen:
+                    seen.add(c)
+                    if len(seen) >= cap:
+                        break
+                    stack.append(c)
+        return len(seen)
+
+    def _search_main_handoffs(self, entry_ea: int) -> Iterator[int]:
+        """BFS the CRT call chain from ``entry_ea`` (bounded), yielding every
+        resolved rust_main handoff the byte-walk finds at any depth. Used when
+        the shallow scan only lands on a dead-end stub — on 32-bit PE the real
+        ``mov reg,<closure>; call lang_start`` handoff sits two+ levels below the
+        entry, so a one-level recursion never reaches it."""
+        from collections import deque
+        visited = {entry_ea}
+        q = deque([(entry_ea, 0)])
+        scanned = 0
+        while q and scanned < self._MAIN_SEARCH_MAX_FUNCS:
+            fea, depth = q.popleft()
+            scanned += 1
+            hit = self._scan_wrapper_for_rust_main(fea)
+            if hit is not None:
+                yield hit
+            if depth < self._MAIN_SEARCH_MAX_DEPTH:
+                for callee in self._iter_user_callees(fea):
+                    if callee not in visited:
+                        visited.add(callee)
+                        q.append((callee, depth + 1))
+
+    def find_rust_main_candidate(self, main_addr: Address) -> Address | None:
+        """Ghidra rust_main detection.
+
+        Walks the CRT call chain from the entry with a single bounded BFS
+        (:meth:`_search_main_handoffs`, depth ``<= _MAIN_SEARCH_MAX_DEPTH``,
+        ``<= _MAIN_SEARCH_MAX_FUNCS`` functions scanned). The byte-walk at each
+        level looks for the ``mov reg, <user-main ptr>; ... ; call <bootstrap>``
+        shape, resolving the loaded immediate and following its closure JMP-thunk
+        to the monomorphised body. Depth 0 covers the ELF/glibc shape (the
+        pointer load sits in the entry itself); deeper levels cover the 32-bit PE
+        shape, where the ``mov reg,<closure>; call lang_start`` handoff is a
+        statically-recoverable immediate two+ levels below the entry.
+
+        Every handoff found at any depth is a candidate; we pick the
+        MOST-CONNECTED one by capped call-graph reach (:meth:`_capped_reach`).
+        The genuine user main dominates the user call graph, so taking the max
+        reach robustly beats dead-end runtime stubs without depending on scan
+        order, and lands on the real main directly rather than leaning on the
+        clustering stage's connectivity guard. A candidate must reach at least
+        ``_MAIN_MIN_REACH`` functions to be accepted.
+
+        On a hit the function is renamed ``rust_main`` so a later
+        ``get_address_for_name("rust_main")`` short-circuits the scan.
+        """
+        main_ea = int(main_addr)
+        # Per-search memo for the listing walk; reset so it can't go stale across
+        # calls (e.g. a re-analysis after the program changed).
+        self._rustmain_insn_cache = {}
+
+        # Collect every rust_main handoff the byte-walk finds along the CRT chain
+        # (entry at depth 0 covers the ELF/glibc shape directly; deeper levels
+        # cover the 32-bit PE shape), resolving each loaded immediate and
+        # following its closure JMP-thunk. Pick the MOST-CONNECTED candidate: the
+        # genuine user main dominates the user call graph, so taking the max reach
+        # robustly beats dead-end runtime stubs (whose reach can flicker just over
+        # a fixed gate via UNKNOWN edges) without depending on scan order.
+        best, best_reach = None, -1
+        for cand in self._search_main_handoffs(main_ea):
+            r = self._capped_reach(cand, self._MAIN_REACH_CAP)
+            if r > best_reach:
+                best, best_reach = cand, r
+        chosen = best if (best is not None and best_reach >= self._MAIN_MIN_REACH) else None
+
+        if chosen is None:
+            return None
+        fn = self._ghidra_func_at_start(chosen)
+        if fn is not None:
+            try:
+                from ghidra.program.model.symbol import SourceType
+                fn.setName("rust_main", SourceType.USER_DEFINED)
+            except Exception as e:
+                logging.getLogger(__name__).debug(
+                    "Failed to rename rust_main candidate 0x%x: %s", chosen, e)
+        return Address(chosen)
