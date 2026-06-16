@@ -1364,6 +1364,19 @@ class XRefer:
                         self.clusters, tiny_leaf_max_nodes=tiny_max,
                     )
 
+                # Collapse maximal fully-library subtrees into a single node.
+                # Statically-linked language runtimes (Rust/Go std) get
+                # decomposed into large bushy library subtrees that are pure
+                # noise to an analyst; C/C++ dynamically link libc so they have
+                # no such subtrees. This generalises the two narrow rules above
+                # to bushy multi-child runtimes (which they miss), is a proven
+                # no-op on C/C++ (preserves existing Ghidra<->Vivisect parity),
+                # and never touches a cluster with any behavior descendant, so
+                # binary classification is preserved. Toggle via
+                # analysis_options.coarsen_library_subtrees.
+                if analysis_opts.get("coarsen_library_subtrees", True):
+                    ClusterManager.collapse_pure_library_subtrees(self.clusters)
+
                 # Rust-only: merge near-duplicate sibling subclusters. Rust std-heavy
                 # binaries fragment one body of user code into N heavily-overlapping
                 # same-size clusters (the over-split gap vs Ghidra). C/C++/Go already

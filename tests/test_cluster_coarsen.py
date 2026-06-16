@@ -211,3 +211,108 @@ def test_cluster_refs_redirected_after_merge():
     assert referrer.cluster_refs[referrer_node] == root.id
     assert leaf_id not in all_ids([root, referrer])
     assert mid_id not in all_ids([root, referrer])
+
+
+# ── collapse_pure_library_subtrees ─────────────────────────────────────────
+
+def _make_tree(root, children):
+    """Attach children (FunctionalClusters) to root, setting parent ids."""
+    root.subclusters = list(children)
+    for c in children:
+        c.parent_cluster_id = root.id
+    return root
+
+
+def test_bushy_pure_library_subtree_collapses_to_one():
+    # A behavior root with one bushy fully-library child subtree:
+    #   beh(root) -> lib_a(lib) -> {lib_b(lib), lib_c(lib) -> lib_d(lib)}
+    # The maximal pure-library subtree is lib_a; it folds to a single node.
+    lib_d = make(0x50, True, {0x51})
+    lib_c = _make_tree(make(0x40, True, {0x41}), [lib_d])
+    lib_b = make(0x30, True, {0x31})
+    lib_a = _make_tree(make(0x20, True, {0x21}), [lib_b, lib_c])
+    root = _make_tree(make(0x10, False, {0x11}), [lib_a])
+
+    removed = ClusterManager.collapse_pure_library_subtrees([root])
+
+    assert removed == 3                       # b, c, d folded into a
+    assert root.subclusters == [lib_a]        # behavior root + lib root kept
+    assert lib_a.subclusters == []            # flattened to a leaf
+    # every node is preserved (rolled up into the surviving subtree root)
+    assert {0x21, 0x30, 0x31, 0x40, 0x41, 0x50, 0x51}.issubset(lib_a.nodes)
+
+
+def test_subtree_with_behavior_descendant_not_collapsed():
+    # lib parent whose subtree contains a behavior cluster is NOT pure-library,
+    # so nothing in that subtree is collapsed (behavior must be reachable).
+    behavior_leaf = make(0x50, False, {0x51})
+    lib_mid = _make_tree(make(0x40, True, {0x41}), [behavior_leaf])
+    lib_root = _make_tree(make(0x20, True, {0x21}), [lib_mid])
+
+    removed = ClusterManager.collapse_pure_library_subtrees([lib_root])
+
+    assert removed == 0
+    assert lib_root.subclusters == [lib_mid]
+    assert lib_mid.subclusters == [behavior_leaf]
+
+
+def test_mixed_behavior_parent_collapses_only_pure_library_siblings():
+    # beh_root -> { pure_lib_subtree, behavior_child(with lib grandchild) }
+    # Only the pure-library sibling collapses; the behavior child and its
+    # (mixed) subtree are untouched.
+    pure_gc = make(0x60, True, {0x61})
+    pure_lib = _make_tree(make(0x50, True, {0x51}), [pure_gc])          # pure
+    lib_under_beh = make(0x40, True, {0x41})
+    beh_child = _make_tree(make(0x30, False, {0x31}), [lib_under_beh])  # mixed
+    root = _make_tree(make(0x10, False, {0x11}), [pure_lib, beh_child])
+
+    removed = ClusterManager.collapse_pure_library_subtrees([root])
+
+    assert removed == 1                        # only pure_gc folds into pure_lib
+    assert pure_lib.subclusters == []
+    assert beh_child.subclusters == [lib_under_beh]   # behavior subtree intact
+    assert {0x61}.issubset(pure_lib.nodes)
+
+
+def test_no_library_subtree_is_a_noop():
+    # C/C++-like shape: behavior clusters with at most isolated library leaves
+    # that are already maximal (no descendants) -> nothing to fold.
+    lib_leaf = make(0x30, True, {0x31})          # pure but childless -> no-op
+    beh = make(0x20, False, {0x21})
+    root = _make_tree(make(0x10, False, {0x11}), [beh, lib_leaf])
+
+    removed = ClusterManager.collapse_pure_library_subtrees([root])
+
+    assert removed == 0
+    assert root.subclusters == [beh, lib_leaf]
+
+
+def test_top_level_pure_library_root_collapses():
+    # A top-level fully-library tree collapses to its root (parent is None).
+    gc = make(0x30, True, {0x31})
+    child = _make_tree(make(0x20, True, {0x21}), [gc])
+    top = _make_tree(make(0x10, True, {0x11}), [child])
+
+    removed = ClusterManager.collapse_pure_library_subtrees([top])
+
+    assert removed == 2
+    assert top.subclusters == []
+    assert {0x21, 0x30, 0x31}.issubset(top.nodes)
+
+
+def test_cluster_refs_redirected_after_subtree_collapse():
+    # A behavior cluster references a node inside a folded library subtree;
+    # the ref must redirect to the surviving subtree root.
+    gc = make(0x30, True, {0x31})
+    lib_root = _make_tree(make(0x20, True, {0x21}), [gc])
+    root = _make_tree(make(0x10, False, {0x11}), [lib_root])
+    referrer = make(0x80, False, {0x81})
+    referrer.cluster_refs[0x82] = gc.id
+    root.subclusters.append(referrer)
+    referrer.parent_cluster_id = root.id
+
+    gc_id = gc.id
+    ClusterManager.collapse_pure_library_subtrees([root])
+
+    assert referrer.cluster_refs[0x82] == lib_root.id
+    assert gc_id not in all_ids([root])

@@ -742,6 +742,123 @@ class ClusterManager:
         return len(decisions)
 
     @staticmethod
+    def collapse_pure_library_subtrees(
+        clusters: List["FunctionalCluster"],
+    ) -> int:
+        """
+        Collapse every *maximal fully-library subtree* into a single node.
+
+        Motivation: statically-linked language runtimes (Rust/Go std, panic and
+        threading machinery, the allocator) get decomposed by the clusterer into
+        large bushy subtrees of library clusters. To an analyst that is pure
+        noise — the runtime should read as ONE node, exactly the way C/C++
+        binaries already do (their libc is dynamically linked, so it is never in
+        the image to be decomposed). This is what makes Ghidra over-report ~86
+        clusters on a Rust PE while matching C/C++ exactly.
+
+        A *pure-library subtree* is a cluster whose entire subtree (itself and
+        every descendant) has ``is_library is True``. We collapse only the
+        *maximal* such subtrees: a pure-library cluster whose parent is NOT
+        itself pure-library (or which is top-level). The whole subtree is folded
+        into that root cluster, which keeps its identity and label and becomes a
+        leaf.
+
+        Safety invariant (same spirit as :meth:`coarsen_library_clusters`): a
+        subtree is collapsed only when it contains *no* behavior cluster, so
+        every ``is_library is False`` cluster — and any library cluster that has
+        a behavior descendant — is left completely untouched. Binary
+        classification, which is carried by the behavior clusters, is therefore
+        preserved by construction. The two narrow rules in
+        ``coarsen_library_clusters`` (single-child chain, tiny leaf) are special
+        cases of this; this generalises them to bushy multi-child runtimes,
+        which is what those rules miss. It is a proven no-op on C/C++ (no large
+        all-library subtrees exist in those images), so existing parity holds.
+
+        Args:
+            clusters: top-level clusters; mutated in place.
+
+        Returns:
+            Number of clusters removed (folded away).
+        """
+        # Memoised "is the whole subtree library?" over a snapshot of the tree.
+        all_lib_cache: Dict[int, bool] = {}
+
+        def subtree_all_library(cluster: "FunctionalCluster") -> bool:
+            cached = all_lib_cache.get(id(cluster))
+            if cached is not None:
+                return cached
+            result = bool(getattr(cluster, "is_library", False)) and all(
+                subtree_all_library(sub) for sub in cluster.subclusters
+            )
+            all_lib_cache[id(cluster)] = result
+            return result
+
+        # Identify maximal pure-library roots: pure-library, but whose parent is
+        # not (so we collapse at the highest point, never double-collapse).
+        maximal_roots: List["FunctionalCluster"] = []
+
+        def find_maximal(cluster, parent_is_pure):
+            is_pure = subtree_all_library(cluster)
+            if is_pure and not parent_is_pure:
+                maximal_roots.append(cluster)
+            for sub in cluster.subclusters:
+                find_maximal(sub, is_pure)
+
+        for cluster in clusters:
+            find_maximal(cluster, False)
+
+        redirect: Dict[int, int] = {}
+        removed = 0
+
+        def fold_into(root: "FunctionalCluster", node: "FunctionalCluster") -> None:
+            # Absorb a single descendant's content into the surviving root.
+            nonlocal removed
+            root.nodes.update(node.nodes)
+            root.edges.extend(node.edges)
+            root.cluster_refs.update(node.cluster_refs)
+            redirect[node.id] = root.id
+            removed += 1
+
+        for root in maximal_roots:
+            if not root.subclusters:
+                continue  # nothing below it to collapse
+            # Fold every descendant (not the root) into the root, then flatten.
+            stack = list(root.subclusters)
+            while stack:
+                desc = stack.pop()
+                stack.extend(desc.subclusters)
+                fold_into(root, desc)
+            root.subclusters = []
+
+        if not removed:
+            log("Coarsening: no pure-library subtrees to collapse")
+            return 0
+
+        # Redirect any cluster_ref that pointed at a folded-away cluster.
+        def resolve(ref_id: int) -> int:
+            seen = set()
+            while ref_id in redirect and ref_id not in seen:
+                seen.add(ref_id)
+                ref_id = redirect[ref_id]
+            return ref_id
+
+        def fix_refs(cluster: "FunctionalCluster") -> None:
+            if cluster.cluster_refs:
+                cluster.cluster_refs = {
+                    node: resolve(ref_id)
+                    for node, ref_id in cluster.cluster_refs.items()
+                }
+            for sub in cluster.subclusters:
+                fix_refs(sub)
+
+        for cluster in clusters:
+            fix_refs(cluster)
+
+        log(f"Coarsening: collapsed {len(maximal_roots)} pure-library "
+            f"subtree(s), folding away {removed} cluster(s)")
+        return removed
+
+    @staticmethod
     def coarsen_redundant_siblings(
         clusters: List["FunctionalCluster"],
         artifact_fn=None,
