@@ -155,6 +155,9 @@ class RustStringParser:
         while curr_ea < data_rel_ro.end.value:
             ea_candidate = self._read_ptr(curr_ea)
             len_candidate = self._read_ptr(curr_ea + self.next_offset)
+            if ea_candidate is None or len_candidate is None:
+                curr_ea += 1
+                continue
 
             if self._is_valid_string(len_candidate, ea_candidate, rdata):
                 try:
