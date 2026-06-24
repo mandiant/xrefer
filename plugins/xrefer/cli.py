@@ -400,7 +400,11 @@ def parse_entry_point(value: str) -> int:
     return ep
 
 
-def maybe_prompt_for_llm_settings(settings_path: Path) -> None:
+def maybe_prompt_for_llm_settings(settings_path: Path, cli_api_key: str | None = None, llm_disabled: bool = False) -> None:
+    # Nothing to prompt for if the user disabled the LLM or already supplied a
+    # key on the command line.
+    if llm_disabled or cli_api_key:
+        return
     settings = _load_llm_settings(settings_path)
     if not settings.get("llm_lookups", True):
         return
@@ -442,7 +446,7 @@ def maybe_prompt_for_llm_settings(settings_path: Path) -> None:
 
 
 def _load_llm_settings(settings_path: Path) -> dict[str, Any]:
-    settings = {"llm_lookups": True, "llm_model_id": "gemini/gemini-2.5-pro", "api_key": ""}
+    settings = {"llm_lookups": True, "llm_model_id": "gemini/gemini-flash-latest", "api_key": ""}
     if settings_path.exists():
         try:
             settings.update(json.loads(settings_path.read_text()))
@@ -451,8 +455,80 @@ def _load_llm_settings(settings_path: Path) -> dict[str, Any]:
     return settings
 
 
+def _env_has_provider_key(model_id: str) -> bool:
+    """True if litellm can resolve the provider's API key from the environment
+    (the provider-standard vars: GEMINI_API_KEY, OPENAI_API_KEY, etc.)."""
+    if not model_id:
+        return False
+    try:
+        import litellm
+        return bool(litellm.validate_environment(model=model_id).get("keys_in_environment"))
+    except Exception:
+        return False
+
+
 def _missing_llm_fields(settings: dict[str, Any]) -> list[str]:
-    return [field for field in ("llm_model_id", "api_key") if not settings.get(field)]
+    missing = []
+    model_id = settings.get("llm_model_id", "") or ""
+    if not model_id:
+        missing.append("llm_model_id")
+    # Local (Ollama) models authenticate via the base URL, not a key; a hosted
+    # model is satisfied by either a saved key or a provider env var.
+    is_local = model_id.startswith("ollama")
+    if not is_local and not settings.get("api_key") and not _env_has_provider_key(model_id):
+        missing.append("api_key")
+    return missing
+
+
+def build_settings_overrides(args: argparse.Namespace) -> dict[str, Any]:
+    """Translate CLI flags into a settings-override dict that is deep-merged on
+    top of settings.json for the run. Only keys the user actually passed appear,
+    so unset flags never clobber saved settings.
+    """
+    overrides: dict[str, Any] = {}
+    if getattr(args, "model", None):
+        overrides["llm_model_id"] = args.model
+    if getattr(args, "api_key", None):
+        overrides["api_key"] = args.api_key
+    if getattr(args, "api_base", None):
+        overrides["api_base"] = args.api_base
+    if getattr(args, "llm", None) is not None:
+        overrides["llm_lookups"] = args.llm
+    if getattr(args, "git_lookups", None) is not None:
+        overrides["git_lookups"] = args.git_lookups
+
+    # Heavy/light model resolution. --model is the HEAVY model (deep cluster
+    # analysis); the LIGHT model runs the high-volume categorization.
+    #   --model X                  -> X for both (collapse; one model, one key)
+    #   --model X --light-model Y  -> heavy X, light Y
+    #   --light-model Y            -> heavy from settings/default, light Y
+    if getattr(args, "light_model", None):
+        overrides["use_light_model"] = True
+        overrides["light_model_id"] = args.light_model
+        if getattr(args, "light_api_key", None):
+            overrides["light_api_key"] = args.light_api_key
+            overrides["light_use_primary_key"] = False
+        else:
+            # Reuse the primary key (correct for the same provider or a local
+            # Ollama light model, which needs no key at all).
+            overrides["light_use_primary_key"] = True
+    elif getattr(args, "model", None):
+        # A single --model with no --light-model means "use this one model for
+        # everything": collapse the split so categorization uses --model (and
+        # its key) instead of the default flash-lite light model.
+        overrides["use_light_model"] = False
+
+    paths: dict[str, str] = {}
+    if getattr(args, "capa", None):
+        paths["capa"] = str(Path(args.capa).resolve())
+    if getattr(args, "trace", None):
+        paths["trace"] = str(Path(args.trace).resolve())
+    if getattr(args, "user_xrefs", None):
+        paths["xrefs"] = str(Path(args.user_xrefs).resolve())
+    if paths:
+        overrides["paths"] = paths
+    return overrides
+
 
 def cli():
     """Command line interface."""
@@ -462,12 +538,86 @@ def cli():
     parser.add_argument("file", type=Path, help="Path to the file to analyze")
     parser.add_argument("--backend", choices=available_backends, required=True, help=f"Analysis backend to use (available: {', '.join(available_backends)})")
     parser.add_argument("--save", action="store_true", help="Save changes to database/project")
-    parser.add_argument("--auto-analysis", action="store_true", help="Run auto analysis (default: True)", default=True)
-    parser.add_argument("--mode", choices=["light", "full"], default="light", help="Select analyzer mode (default: full)")
+    parser.add_argument(
+        "--auto-analysis",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run the disassembler's auto-analysis when opening the file (default: on)",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["light", "full"],
+        default="light",
+        help=(
+            "Analyzer mode (default: light). 'light' produces the SAME report as "
+            "'full', just faster: it skips interactive-only work (indirect-xref "
+            "propagation, per-function context tables) that the report does not "
+            "use, so its saved .xrefer cache is report-only. Use '--mode full' "
+            "when you also want a complete, GUI-reusable .xrefer cache."
+        ),
+    )
     parser.add_argument("--report-data-mode", choices=["html", "json", "none"], default="html", help="Report output format: html (standalone), json (data only), or none")
     parser.add_argument("--force", action="store_true", help="Remove previous artifacts and re-analyze")
     parser.add_argument("--entry-point", type=parse_entry_point, help="Override entry point address (decimal or hex like 0x401000)")
     parser.add_argument("-L", "--logfile", help="Output log file path")
+
+    settings_group = parser.add_argument_group(
+        "settings overrides",
+        "Override ~/.xrefer/settings.json for this run only. Precedence: these flags > "
+        "environment > settings.json > defaults. Add --save-settings to persist them.",
+    )
+    settings_group.add_argument(
+        "--model",
+        help="LLM model id used for BOTH the deep cluster analysis and categorization (unless "
+        "--light-model is given). E.g. gemini/gemini-flash-latest, openai/gpt-5, "
+        "anthropic/claude-opus-4-5, ollama_chat/llama3.1.",
+    )
+    settings_group.add_argument(
+        "--api-key",
+        help="LLM provider API key. If omitted, the provider's standard environment variable is used "
+        "(GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, XAI_API_KEY, DASHSCOPE_API_KEY).",
+    )
+    settings_group.add_argument(
+        "--api-base",
+        help="Base URL for a local / self-hosted (Ollama) model, e.g. http://localhost:11434.",
+    )
+    settings_group.add_argument(
+        "--light-model",
+        help="Optional separate (cheaper / local) model for the high-volume categorization task, e.g. "
+        "ollama_chat/llama3.1 or gemini/gemini-flash-lite-latest. Without this, --model is used for "
+        "categorization too.",
+    )
+    settings_group.add_argument(
+        "--light-api-key",
+        help="API key for --light-model (defaults to reusing --api-key; a local Ollama --light-model "
+        "needs none).",
+    )
+    settings_group.add_argument(
+        "--llm",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable/disable LLM lookups (cluster analysis + categorization). --no-llm runs the "
+        "structural analysis only. Default: from settings.",
+    )
+    settings_group.add_argument(
+        "--git-lookups",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable/disable enriching strings via public GitHub code search (slower; off by default).",
+    )
+    settings_group.add_argument("--capa", help="Path to a capa JSON results file (default: <binary>_capa.json).")
+    settings_group.add_argument("--trace", help="Path to an API trace file (default: <binary>_trace.zip).")
+    settings_group.add_argument("--user-xrefs", help="Path to a user cross-references file (default: <binary>_user_xrefs.txt).")
+    settings_group.add_argument(
+        "-o", "--output",
+        help="Report output path (default: <binary>_report.html, or _report_data.json for --report-data-mode json).",
+    )
+    settings_group.add_argument(
+        "--save-settings",
+        action="store_true",
+        help="Persist the supplied overrides (model / key / api-base / --llm / --git-lookups, and input "
+        "paths scoped to this binary) to ~/.xrefer/settings.json for future runs.",
+    )
 
     args = parser.parse_args()
 
@@ -481,7 +631,7 @@ def cli():
         sys.exit(1)
 
     settings_path = Path.home() / ".xrefer" / "settings.json"
-    maybe_prompt_for_llm_settings(settings_path)
+    maybe_prompt_for_llm_settings(settings_path, cli_api_key=args.api_key, llm_disabled=(args.llm is False))
 
     original_stdout = sys.stdout
     original_stderr = sys.stderr
@@ -502,6 +652,16 @@ def cli():
     if args.entry_point is not None:
         xrefer_kwargs["ep"] = args.entry_point
 
+    overrides = build_settings_overrides(args)
+    if overrides:
+        xrefer_kwargs["settings_overrides"] = overrides
+        if args.save_settings:
+            xrefer_kwargs["persist_settings"] = True
+    elif args.save_settings:
+        print("[!] --save-settings was given but no override flags were set; nothing to persist.")
+    if args.output:
+        xrefer_kwargs["report_path"] = str(Path(args.output).resolve())
+
     try:
         print(f"[+] Starting XRefer analysis with {args.backend} backend")
         print(f"[+] File: {file_path}")
@@ -510,6 +670,25 @@ def cli():
         print(f"[+] Report data mode: {args.report_data_mode}")
         print(f"[+] Save changes: {args.save}")
         print(f"[+] Force re-analysis: {args.force}")
+        if args.model:
+            print(f"[+] Model: {args.model}")
+        if args.light_model:
+            print(f"[+] Categorization (light) model: {args.light_model}")
+            if (not args.light_api_key and not args.light_model.startswith("ollama")
+                    and args.model
+                    and args.model.split("/", 1)[0] != args.light_model.split("/", 1)[0]):
+                print("[!] --light-model is a different provider than --model and no --light-api-key was "
+                      "given; it will reuse the primary key and likely fail categorization. Pass --light-api-key.")
+        elif args.model:
+            print("[+] Categorization uses the same model as analysis (--model)")
+        if args.llm is not None:
+            print(f"[+] LLM lookups: {'enabled' if args.llm else 'disabled'}")
+        if args.git_lookups is not None:
+            print(f"[+] GitHub string lookups: {'enabled' if args.git_lookups else 'disabled'}")
+        if args.output:
+            print(f"[+] Report output: {Path(args.output).resolve()}")
+        if args.save_settings and overrides:
+            print("[+] Persisting these settings to ~/.xrefer/settings.json")
         if args.entry_point is not None:
             print(f"[+] Entry point override: {args.entry_point:#x}")
 

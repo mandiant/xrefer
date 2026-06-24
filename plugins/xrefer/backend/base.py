@@ -2,11 +2,20 @@
 base classes for backend abstraction.
 """
 
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Optional, Tuple
+
+# Common disassembler-generated function-name prefixes (IDA sub_/nullsub_/loc_,
+# Ghidra FUN_, Binary Ninja sub_). Used by Function.has_default_name's portable
+# fallback; backends with a precise API override the property.
+_DEFAULT_NAME_RE = re.compile(
+    r"^(sub|nullsub|funcsub|fun|loc|locret|unknown_libname|j_nullsub)_[0-9A-Fa-f]+",
+    re.IGNORECASE,
+)
 
 
 class BackendError(Exception):
@@ -213,10 +222,34 @@ class Function(ABC):
         """Check if function is a thunk (jump stub)."""
 
     @property
+    def has_default_name(self) -> bool:
+        """True when the function still carries a disassembler-generated
+        placeholder name (``sub_4012a0``, ``FUN_004012a0``, …) rather than a
+        FLIRT / import / user-assigned name.
+
+        Concrete default: a name-prefix heuristic covering the common
+        auto-name schemes (IDA ``sub_``/``nullsub_``/``loc_``, Ghidra
+        ``FUN_``, Binary Ninja ``sub_``). Backends with a precise API
+        (e.g. IDA's ``has_dummy_name``) should override this. Used by the
+        cluster renamer so it never clobbers a meaningful name.
+        """
+        return bool(_DEFAULT_NAME_RE.match(self.name or ""))
+
+    @property
     @abstractmethod
     def basic_blocks(self) -> Iterator[BasicBlock]:
         """Iterate over basic blocks in the function."""
         ...
+
+    @property
+    def chunk_ranges(self) -> Optional[List[Tuple[int, int]]]:
+        """Half-open ``[start, end)`` address ranges composing the
+        function, tail chunks included, or None when the backend cannot
+        enumerate them. Callers that get None fall back to per-address
+        ``contains`` checks; backends with chunked functions (IDA)
+        override this so containment can be answered Python-side.
+        """
+        return None
 
     @abstractmethod
     def contains(self, address: Address) -> bool:
@@ -545,12 +578,17 @@ class BackEnd(ABC):
         ...
 
     @abstractmethod
-    def get_xrefs_from(self, address: Address) -> Iterator[Xref]:
+    def get_xrefs_from(self, address: Address, far_only: bool = False) -> Iterator[Xref]:
         """
         Get all references FROM the specified address.
 
         Args:
             address: Source address
+            far_only: When True, exclude ordinary fall-through flow refs
+                (IDA's XREF_ALL yields one per instruction — millions of
+                wrapper allocations on big binaries when only real
+                call/jump/data refs are wanted). Backends whose reference
+                model has no fall-through refs may ignore it.
 
         Yields:
             Cross-references originating from the address

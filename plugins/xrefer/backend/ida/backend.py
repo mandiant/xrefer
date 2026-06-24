@@ -1,6 +1,6 @@
 """IDA-specific wrapper classes."""
 
-from typing import Iterator, Optional, Tuple
+from typing import Iterator, List, Optional, Tuple
 
 import ida_bytes
 import ida_entry
@@ -74,9 +74,23 @@ class IDAFunction(Function):
         """Check if the function is a thunk."""
         return bool(idc.get_func_flags(self._func.start_ea) & idc.FUNC_THUNK)
 
+    @property
+    def has_default_name(self) -> bool:
+        """True if IDA still shows a dummy/auto name (sub_/loc_/nullsub_/…)
+        rather than a FLIRT, import, or user-assigned name. Precise override of
+        the base name-prefix heuristic, via IDA's own dummy-name flag."""
+        return bool(ida_bytes.has_dummy_name(ida_bytes.get_flags(self._func.start_ea)))
+
     def contains(self, address: Address) -> bool:
         """Check if the address is within the function."""
         return idc.func_contains(self._func.start_ea, address.value)
+
+    @property
+    def chunk_ranges(self) -> List[Tuple[int, int]]:
+        """Half-open [start, end) ranges of the function's chunks, tail
+        chunks included — the same coverage idc.func_contains answers
+        against, so containment can be checked Python-side."""
+        return [(int(start), int(end)) for start, end in idautils.Chunks(self._func.start_ea)]
 
     @property
     def basic_blocks(self) -> Iterator[BasicBlock]:
@@ -139,29 +153,41 @@ class IDAString(String):
 
 
 class IDAXref(Xref):
-    """IDA cross-reference wrapper."""
+    """IDA cross-reference wrapper (eager snapshot).
 
-    def __init__(self, xref: "ida_xref.xrefblk_t") -> None:
-        self._xref: "ida_xref.xrefblk_t" = xref
+    Every wrapper yielded by an xrefblk_t enumeration used to alias the
+    SAME live mutable struct — reading a previously-yielded ref after the
+    iterator advanced (e.g. ``list(get_xrefs_from(...))``) silently
+    returned the wrong values, and every property read was a fresh SWIG
+    crossing. Snapshotting frm/to/type at yield time fixes the aliasing
+    and makes repeated property reads free.
+    """
+
+    __slots__ = ("_frm", "_to", "_type_code")
+
+    def __init__(self, frm: int, to: int, type_code: int) -> None:
+        self._frm = frm
+        self._to = to
+        self._type_code = type_code
 
     @property
     def source(self) -> Address:
-        return Address(self._xref.frm)
+        return Address(self._frm)
 
     @property
     def target(self) -> Address:
-        return Address(self._xref.to)
+        return Address(self._to)
 
     @property
     def type(self) -> XrefType:
-        if self._xref.type in (ida_xref.fl_CN, ida_xref.fl_CF):
+        if self._type_code in (ida_xref.fl_CN, ida_xref.fl_CF):
             return XrefType.CALL
-        elif self._xref.type in (ida_xref.fl_JN, ida_xref.fl_JF, ida_xref.fl_F):
+        elif self._type_code in (ida_xref.fl_JN, ida_xref.fl_JF, ida_xref.fl_F):
             return XrefType.JUMP
-        elif self._xref.type in (ida_xref.dr_R, ida_xref.dr_O, ida_xref.dr_T, ida_xref.dr_I):
+        elif self._type_code in (ida_xref.dr_R, ida_xref.dr_O, ida_xref.dr_T, ida_xref.dr_I):
             # TODO: ida_xref.dr_O is not DATA_READ exactly, but it is okay for this project now. (Simplicity for now)
             return XrefType.DATA_READ
-        elif self._xref.type in (ida_xref.dr_W,):
+        elif self._type_code in (ida_xref.dr_W,):
             return XrefType.DATA_WRITE
         return XrefType.UNKNOWN
 
@@ -315,17 +341,22 @@ class IDABackend(BackEnd):
         """Get all references TO the specified address."""
         xref: "ida_xref.xrefblk_t" = ida_xref.xrefblk_t()
         if xref.first_to(address.value, ida_xref.XREF_ALL):
-            yield IDAXref(xref)
+            yield IDAXref(xref.frm, xref.to, xref.type)
             while xref.next_to():
-                yield IDAXref(xref)
+                yield IDAXref(xref.frm, xref.to, xref.type)
 
-    def get_xrefs_from(self, address: Address) -> Iterator[IDAXref]:
-        """Get all references FROM the specified address."""
+    def get_xrefs_from(self, address: Address, far_only: bool = False) -> Iterator[IDAXref]:
+        """Get all references FROM the specified address.
+
+        ``far_only`` maps to XREF_FAR: ordinary fall-through flow refs
+        (one per instruction under XREF_ALL) are skipped at the source.
+        """
+        flags = ida_xref.XREF_FAR if far_only else ida_xref.XREF_ALL
         xref: "ida_xref.xrefblk_t" = ida_xref.xrefblk_t()
-        if xref.first_from(address.value, ida_xref.XREF_ALL):
-            yield IDAXref(xref)
+        if xref.first_from(address.value, flags):
+            yield IDAXref(xref.frm, xref.to, xref.type)
             while xref.next_from():
-                yield IDAXref(xref)
+                yield IDAXref(xref.frm, xref.to, xref.type)
 
     def read_bytes(self, address: Address, size: int) -> Optional[bytes]:
         """Read bytes from address."""

@@ -18,9 +18,10 @@ DSPy-native LLM processor with Pydantic validation.
 
 import re
 import secrets
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterator, List, Optional
+from time import monotonic
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import dspy
 import litellm
@@ -37,6 +38,31 @@ from xrefer.llm.dspy_modules import BinarySynthesisResponse, BinarySynthesizerMo
 # code paths that touch this module don't accidentally activate a
 # live LLM logging side-effect.
 _LLM_IO_CALLBACK_REGISTERED: bool = False
+
+# Request timeout (seconds) for local Ollama calls. litellm's default is 600s
+# (10 min), which a laptop-local model blows past on a large cluster prompt —
+# the server then logs a 500 at ~10m0s and the run fails. Local generations are
+# inherently slow, so give them a generous ceiling. (Hosted models keep
+# litellm's default; their latency is bounded.)
+_OLLAMA_REQUEST_TIMEOUT_S = 1800
+
+# Memo for the hosted-model internet preflight. Batched runs call
+# process_items many times back-to-back, and every probe miss costs up to
+# two 3-second raw-IP timeouts. All LLM calls are main-thread synchronous,
+# so a plain module global needs no locking.
+_INTERNET_PROBE_TTL_S = 60.0
+_internet_probe: Optional[Tuple[float, bool]] = None
+
+
+def _internet_reachable() -> bool:
+    """check_internet_connectivity, memoized for a short TTL."""
+    global _internet_probe
+    now = monotonic()
+    if _internet_probe is not None and now - _internet_probe[0] < _INTERNET_PROBE_TTL_S:
+        return _internet_probe[1]
+    ok = check_internet_connectivity()
+    _internet_probe = (now, ok)
+    return ok
 
 
 def _log_llm_io(kwargs, completion_response, start_time, end_time) -> None:
@@ -176,6 +202,10 @@ class LLMProcessor:
         # so uncached_lm() can rebuild a parallel LM with cache disabled
         # for force-analyze runs without affecting the main LM.
         self._lm_kwargs: Dict[str, Any] = {}
+        # The DSPy adapter chosen for this model (JSONAdapter for Ollama,
+        # ChatAdapter for hosted). Stored so each call can re-assert THIS
+        # processor's lm+adapter via dspy.context() — see _process_single.
+        self.adapter: Optional[Any] = None
 
     def _build_lm_kwargs(self, config: ModelConfig) -> Dict[str, Any]:
         """Compute the dspy.LM kwargs dict from a ModelConfig.
@@ -195,9 +225,43 @@ class LLMProcessor:
         """
         lm_kwargs: Dict[str, Any] = {
             "model": config.model_id,
-            "api_key": config.api_key,
             "cache_seed": 0x72616e64306d,
         }
+        # Pass the key explicitly only when we actually have one. Leaving it
+        # unset lets litellm resolve the provider key from the environment
+        # (e.g. GEMINI_API_KEY / OPENAI_API_KEY), which is how zero-config /
+        # env-based auth works for headless runs.
+        if config.api_key:
+            lm_kwargs["api_key"] = config.api_key
+
+        # ── Local models via Ollama ──────────────────────────────────
+        # ollama_chat/<model> + api_base. Crucially, set num_ctx to the model's
+        # real context length (from /api/show) — Ollama defaults num_ctx to
+        # 2048, far too small for cluster prompts, and silently truncates
+        # beyond it. The hosted-model branches below (OpenAI reasoning,
+        # Anthropic 1M, catalog output cap) don't apply to local models.
+        from xrefer.llm.ollama import is_ollama_model, model_context_length
+        if is_ollama_model(config.model_id):
+            # Ollama doesn't understand litellm's cache_seed and logs
+            # "invalid option provided"; drop it for local models.
+            lm_kwargs.pop("cache_seed", None)
+            if config.api_base:
+                lm_kwargs["api_base"] = config.api_base
+            num_ctx = model_context_length(config.api_base, config.model_id)
+            if num_ctx:
+                lm_kwargs["num_ctx"] = num_ctx
+            # Local generations are slow; raise the request timeout well above
+            # litellm's 600s default so a long cluster call isn't killed at
+            # ~10m0s (see _OLLAMA_REQUEST_TIMEOUT_S).
+            lm_kwargs["timeout"] = _OLLAMA_REQUEST_TIMEOUT_S
+            # Disable chain-of-thought. Thinking models (e.g. Gemma) spend the
+            # bulk of each call emitting reasoning tokens before the JSON, which
+            # makes cluster analysis unusably slow locally — a 1-cluster call
+            # measured ~134s with thinking vs ~54s without. The structured
+            # cluster output doesn't need visible CoT. (Ignored by models that
+            # don't support thinking.)
+            lm_kwargs["think"] = False
+            return lm_kwargs
 
         # ── Hard-constrained branch: OpenAI reasoning models ─────────
         # These models require temperature=1.0 and max_tokens >= 16000;
@@ -264,7 +328,25 @@ class LLMProcessor:
         self.config = config
         self._lm_kwargs = self._build_lm_kwargs(config)
         self.lm = dspy.LM(**self._lm_kwargs)
-        dspy.settings.configure(lm=self.lm)
+        # Adapter choice. Local (Ollama) models emit raw JSON, NOT DSPy's
+        # ChatAdapter "[[ ## field ## ]]" marker format — so ChatAdapter fails
+        # to parse and DSPy silently retries with a fallback adapter, DOUBLING
+        # every call (measured: 2 model calls per cluster). JSONAdapter parses
+        # their native JSON on the first attempt (and drives Ollama's
+        # constrained `format` output, which is more reliable). Hosted models
+        # keep the default ChatAdapter they're tuned and tested against. Setting
+        # it explicitly each time also resets correctly when the user switches
+        # between a local and a hosted model mid-session.
+        from xrefer.llm.ollama import is_ollama_model
+        try:
+            adapter = dspy.JSONAdapter() if is_ollama_model(config.model_id) else dspy.ChatAdapter()
+            self.adapter = adapter
+            dspy.settings.configure(lm=self.lm, adapter=adapter)
+        except Exception:
+            # If the adapter classes ever move/rename, don't break LLM setup —
+            # fall back to DSPy's default adapter.
+            self.adapter = None
+            dspy.settings.configure(lm=self.lm)
         # Lazy registration of the LiteLLM success callback so every
         # subsequent LLM call (categorizer, cluster_analyzer,
         # binary_synthesizer, the API-key validation call, anything
@@ -316,33 +398,158 @@ class LLMProcessor:
             self.lm = prior_lm
             dspy.settings.configure(lm=prior_lm)
 
+    @contextmanager
+    def override_lm(self, **extra_kwargs) -> Iterator[None]:
+        """Temporarily rebuild the active LM with ``extra_kwargs`` merged
+        over the configured kwargs, for the duration of the ``with`` block.
+
+        Generalises ``uncached_lm``: the hierarchical stage-1 path uses it to
+        pin a smaller ``num_ctx`` (so Ollama allocates a bounded KV cache on a
+        laptop instead of the model's full advertised window) and, when the
+        force-re-analyze flow is active, to also disable the response cache —
+        both in a single rebuilt LM so they compose. No-op when no model is
+        configured or ``extra_kwargs`` is empty.
+        """
+        if self.config is None or self.lm is None or not extra_kwargs:
+            yield
+            return
+
+        prior_lm = self.lm
+        kwargs = dict(self._lm_kwargs)
+        kwargs.update(extra_kwargs)
+        try:
+            new_lm = dspy.LM(**kwargs)
+        except TypeError:
+            # Older dspy.LM may reject some kwargs (e.g. cache=); drop the
+            # cache flag and retry — a randomized cache_seed (if supplied)
+            # still bypasses the cache.
+            kwargs.pop("cache", None)
+            new_lm = dspy.LM(**kwargs)
+
+        self.lm = new_lm
+        dspy.settings.configure(lm=new_lm)
+        try:
+            yield
+        finally:
+            self.lm = prior_lm
+            dspy.settings.configure(lm=prior_lm)
+
+    # Session memo for validate_api_key, keyed by exact credentials. The
+    # libs and imports categorization passes both probe back-to-back; one
+    # real probe per configuration is enough. Class-level so the dual-model
+    # processor instances share verdicts for identical configs.
+    _key_validation_memo: Dict[Tuple[str, str, str], bool] = {}
+
     def validate_api_key(self) -> bool:
-        """Validate API key with a test call."""
+        """Validate the configured credentials with one real test call.
+
+        Routed through uncached_lm() so the probe can never be answered
+        from the disk response cache — the fixed cache_seed used to replay
+        an old success for a since-revoked key (and the cached path made
+        the probe pointless as a check). The verdict is memoized per
+        (model_id, api_key, api_base) for the session.
+        """
         if not self.lm:
             raise ValueError("Model not configured")
+        cfg = self.config
+        memo_key = (
+            (getattr(cfg, "model_id", "") if cfg else "") or "",
+            (getattr(cfg, "api_key", "") if cfg else "") or "",
+            (getattr(cfg, "api_base", "") if cfg else "") or "",
+        )
+        cached = self._key_validation_memo.get(memo_key)
+        if cached is not None:
+            return cached
         try:
-            self.lm("Say 'valid'")
-            return True
+            with self.uncached_lm():
+                self.lm("Say 'valid'")
+            ok = True
         except Exception as e:
             log(f"API validation failed: {e}")
-            return False
+            ok = False
+        self._key_validation_memo[memo_key] = ok
+        return ok
+
+    def render_request_messages(self, prompt_type: PromptType, item: str, model_id: Optional[str] = None) -> List[Dict[str, str]]:
+        """Render the exact chat messages DSPy would send for a single
+        ``item`` under ``prompt_type`` — WITHOUT calling the LLM.
+
+        Uses the same Predict signature and adapter DSPy uses at call
+        time (``ChatAdapter`` unless an adapter is configured on
+        ``dspy.settings``). The rendered messages therefore include the
+        signature instructions AND the Pydantic output-model JSON schema
+        — the prompt scaffolding that a raw count of ``item`` alone
+        misses, and usually the larger share of a small request. Returned
+        as ``[{"role", "content"}, ...]`` ready for
+        ``litellm.token_counter(messages=...)``.
+
+        Side-effect free: constructing the module builds a ``dspy.Predict``
+        but never invokes it, so no API key or network access is needed.
+        Raises ``ValueError`` for prompt types without a single string
+        input field; callers wanting a soft fallback should catch and
+        count the raw ``item`` text instead.
+        """
+        import dspy
+        from dspy.adapters import ChatAdapter
+        from xrefer.llm.dspy_modules import BinarySynthesizerModule, ClusterAnalyzerModule
+
+        # Use THIS processor's adapter (set in set_model_config), NOT the global
+        # dspy.settings.adapter — in a dual-model setup the global reflects
+        # whichever model was configured last (e.g. the light Ollama model's
+        # JSONAdapter), which would mis-render the heavy model's estimate. When
+        # this processor is unconfigured (the fresh-LLMProcessor estimate path),
+        # derive the adapter from the model_id being estimated, else ChatAdapter.
+        adapter = self.adapter
+        if adapter is None:
+            _mid = model_id or (self.config.model_id if self.config else None)
+            if _mid:
+                from xrefer.llm.ollama import is_ollama_model
+                adapter = dspy.JSONAdapter() if is_ollama_model(_mid) else ChatAdapter()
+        if adapter is None:
+            adapter = ChatAdapter()
+        if prompt_type == PromptType.CLUSTER_ANALYZER:
+            signature = ClusterAnalyzerModule().predictor.signature
+            inputs = {"cluster_data": item}
+        elif prompt_type == PromptType.BINARY_SYNTHESIZER:
+            signature = BinarySynthesizerModule().predictor.signature
+            inputs = {"synthesis_input": item}
+        else:
+            raise ValueError(f"render_request_messages: unsupported prompt type {prompt_type!r}")
+        # ChatAdapter.format(signature, demos, inputs); no few-shot demos
+        # are configured for these modules, matching the live call path.
+        return adapter.format(signature, [], inputs)
 
     def _process_single(self, items: List[Any], prompt_type: PromptType, config: Optional[ProcessConfig]=None) -> Dict[str, Any]:
         """
         Process items using DSPy module.
+
+        Dual-model routing: each role (cluster analysis vs categorization) runs
+        on its OWN ``LLMProcessor`` instance with its own ``self.lm``/``adapter``.
+        Because ``dspy.settings`` is GLOBAL (last ``configure`` wins) and these
+        run as separate phases that can interleave / re-run, we re-assert THIS
+        processor's lm+adapter per call via ``dspy.context`` (thread-local).
+        ``override_lm`` / ``uncached_lm`` mutate ``self.lm``, so the context
+        picks those up too.
         """
         try:
-            if prompt_type == PromptType.CATEGORIZER:
-                response: "CategorizationResponse" = CategorizerModule()(items=items, categories=config.categories, item_type=config.item_type)
-                return response.model_dump()
-            elif prompt_type == PromptType.CLUSTER_ANALYZER:
-                response: "ClusterAnalysisResponse" = ClusterAnalyzerModule()(cluster_data=items[0])
-                return response.model_dump()
-            elif prompt_type == PromptType.BINARY_SYNTHESIZER:
-                response: "BinarySynthesisResponse" = BinarySynthesizerModule()(synthesis_input=items[0])
-                return response.model_dump()
-            else:
-                raise ValueError(f"Unsupported prompt type: {prompt_type}")
+            ctx_kwargs: Dict[str, Any] = {}
+            if self.lm is not None:
+                ctx_kwargs["lm"] = self.lm
+            if self.adapter is not None:
+                ctx_kwargs["adapter"] = self.adapter
+            ctx = dspy.context(**ctx_kwargs) if ctx_kwargs else nullcontext()
+            with ctx:
+                if prompt_type == PromptType.CATEGORIZER:
+                    response: "CategorizationResponse" = CategorizerModule()(items=items, categories=config.categories, item_type=config.item_type)
+                    return response.model_dump()
+                elif prompt_type == PromptType.CLUSTER_ANALYZER:
+                    response: "ClusterAnalysisResponse" = ClusterAnalyzerModule()(cluster_data=items[0])
+                    return response.model_dump()
+                elif prompt_type == PromptType.BINARY_SYNTHESIZER:
+                    response: "BinarySynthesisResponse" = BinarySynthesizerModule()(synthesis_input=items[0])
+                    return response.model_dump()
+                else:
+                    raise ValueError(f"Unsupported prompt type: {prompt_type}")
         except (litellm.exceptions.RateLimitError, httpx.HTTPStatusError) as e:
             log(f'''{e.__class__.__name__} was raised during LLM processing:
 
@@ -362,58 +569,86 @@ You can:
                 raise ValueError(f"Unsupported prompt type: {prompt_type}")
 
 
-    def _process_parallel(self, items: List[Any], prompt_type: PromptType, batch_size: int, config: Optional[ProcessConfig]=None) -> Dict[int, Any]:
-        """Process items in parallel batches."""
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+    # Items per categorizer call. Each assignment costs ~10-20 output
+    # tokens plus adapter scaffolding, so 150 stays comfortably inside even
+    # a 4-8k output cap; wider caps gain nothing from bigger chunks (per-
+    # call latency grows and a failed chunk loses more work).
+    _CATEGORIZER_CHUNK_SIZE = 150
 
-        import os
-        max_workers = min(os.cpu_count() * 4, 20, len(items) // batch_size + 1)
+    def _categorize_in_chunks(self, items: List[Any], config: ProcessConfig) -> Dict[str, Any]:
+        """Categorize sequentially in output-cap-safe chunks.
 
-        results = {}
+        One giant call used to send EVERY uncategorized item at once: a few
+        thousand first-run items (Rust/Go) overflow small output caps, the
+        parse error aborted the analysis before the category cache was
+        saved, and the failure repeated identically on every run of that
+        binary+model. Sequential chunks keep each response far under the
+        cap and respect the main-thread constraint — a parallel executor
+        here could reach log() -> replace_wait_box from worker threads,
+        the documented IDA deadlock vector.
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {}
+        Per-chunk semantics:
+          * items a SUCCESSFUL chunk omitted are filled as 'Others' (the
+            model saw them and skipped them);
+          * a FAILED chunk ({} — rate limit / transient error) contributes
+            nothing, so its items stay uncached and are retried on the
+            next run instead of being permanently cached as 'Others'.
 
-            for i in range(0, len(items), batch_size):
-                chunk = items[i:i + batch_size]
-                future = executor.submit(self._process_single, chunk, prompt_type, config)
-                futures[future] = i
-
-            for future in as_completed(futures):
-                chunk_result = future.result()
-                chunk_start = futures[future]
-
-                # Adjust indices for categorizer (use int consistently)
-                if prompt_type == PromptType.CATEGORIZER:
-                    for idx, cat_idx in chunk_result.items():
-                        original_idx = int(idx) + chunk_start
-                        results[original_idx] = cat_idx
-                else:
-                    results.update(chunk_result)
-
-        return results
-
-    def _process_sequential(self, items: List[Any], prompt_type: PromptType, batch_size: int, config: ProcessConfig) -> Dict[int, Any]:
-        """Process items sequentially in batches."""
-        results = {}
+        Returns the wrapped {"category_assignments": {str_idx: cat}} shape
+        with indices relative to the input list.
+        """
+        batch_size = self._CATEGORIZER_CHUNK_SIZE
         total_chunks = (len(items) + batch_size - 1) // batch_size
+        if total_chunks > 1:
+            log(f"[+] Categorizing {len(items)} items in {total_chunks} chunks of up to {batch_size}")
+        others_idx = config.categories.index("Others") if "Others" in config.categories else 0
+        assignments: Dict[str, Any] = {}
+        for start in range(0, len(items), batch_size):
+            chunk = items[start:start + batch_size]
+            if total_chunks > 1:
+                log(f"[+] Categorizer chunk {start // batch_size + 1}/{total_chunks} ({len(chunk)} items)")
+            result = self._process_single(chunk, PromptType.CATEGORIZER, config)
+            chunk_assignments = (result or {}).get("category_assignments")
+            if not chunk_assignments:
+                continue  # failed chunk: leave uncached for the next run
+            for idx_str, cat in chunk_assignments.items():
+                try:
+                    assignments[str(int(idx_str) + start)] = cat
+                except (TypeError, ValueError):
+                    continue
+            for offset in range(len(chunk)):
+                assignments.setdefault(str(offset + start), others_idx)
+        return {"category_assignments": assignments}
 
-        for i in range(0, len(items), batch_size):
-            chunk = items[i:i + batch_size]
-            chunk_num = i // batch_size + 1
-            log(f"[+]Processing chunk {chunk_num}/{total_chunks}")
+    def _preflight_connectivity(self) -> None:
+        """Fail fast with an actionable error before issuing LLM calls.
 
-            chunk_result = self._process_single(chunk, prompt_type, config)
+        Local backends must not require internet: a fully-offline Ollama
+        setup (the headline air-gapped use case) would otherwise hard-fail,
+        and TLS-intercepting proxies false-fail a raw-IP probe even with
+        working API access. Routing:
 
-            # Adjust indices for categorizer
-            if prompt_type == PromptType.CATEGORIZER:
-                for idx, cat_idx in chunk_result.items():
-                    original_idx = int(idx) + i
-                    results[original_idx] = cat_idx
-            else:
-                results.update(chunk_result)
+          * Ollama model -> probe the Ollama server itself, so failure says
+            "Ollama server unreachable at <base>" instead of a wrong
+            internet diagnosis.
+          * any other explicit api_base (vllm, llama.cpp, gateways) -> no
+            probe; the real call surfaces a specific error.
+          * hosted models -> the internet probe, memoized briefly so
+            back-to-back batch calls don't re-pay its timeouts.
+        """
+        from xrefer.llm.ollama import DEFAULT_API_BASE, is_ollama_model, server_reachable
 
-        return results
+        model_id = self.config.model_id if self.config else None
+        api_base = (self.config.api_base if self.config else None) or None
+        if is_ollama_model(model_id):
+            if not server_reachable(api_base):
+                base = api_base or DEFAULT_API_BASE
+                raise ConnectionError(f"Ollama server unreachable at {base} — is `ollama serve` running?")
+            return
+        if api_base:
+            return
+        if not _internet_reachable():
+            raise ConnectionError("No internet connectivity")
 
     def process_items(
         self,
@@ -442,54 +677,13 @@ You can:
             raise ValueError("Model not configured")
         if not items:
             raise ValueError("No items to process")
-        if not check_internet_connectivity():
-            raise ConnectionError("No internet connectivity")
+        self._preflight_connectivity()
 
         if prompt_type == PromptType.CLUSTER_ANALYZER:
             return self._process_single([items], prompt_type)
         if prompt_type == PromptType.BINARY_SYNTHESIZER:
             return self._process_single([items], prompt_type)
-        config = None
         if prompt_type == PromptType.CATEGORIZER:
             config = ProcessConfig(categories=categories or [], item_type=type)
-            return self._process_single(items, prompt_type, config)
-
-        if ignore_token_limit:
-            log(f"[+] Processing all {len(items)} items in single batch")
-            results = self._process_single(items, prompt_type, config)
-            # Convert to str keys for backward compatibility
-            if prompt_type == PromptType.CATEGORIZER:
-                return {str(k): v for k, v in results.items()}
-            return results
-
-        # Batched processing
-        # Simple heuristic: 50 items per batch (conservative, no token counting needed)
-        batch_size = 50
-        log(f"[+] Processing {len(items)} items in batches of {batch_size}")
-        # NOTE: In a perfect world, dspy would support **native** batch processing (/v1/batches)
-        # https://docs.litellm.ai/docs/batches
-        # unfortunately, we live in a imperfect world...
-
-        use_parallel = True
-
-        if use_parallel:
-            results = self._process_parallel(items, prompt_type, batch_size, config)
-        else:
-            results = self._process_sequential(items, prompt_type, batch_size, config)
-
-        # Fill in missed items for categorizer
-        if prompt_type == PromptType.CATEGORIZER:
-            all_indices = set(range(len(items)))
-            processed_indices = set(results.keys())
-            missed_indices = all_indices - processed_indices
-
-            if missed_indices:
-                log(f"[*] Found {len(missed_indices)} missed items, assigning to Others")
-                others_idx = config.categories.index("Others") if "Others" in config.categories else 0
-                for idx in missed_indices:
-                    results[idx] = others_idx
-
-            # Convert to str keys for backward compatibility
-            return {str(k): v for k, v in results.items()}
-
-        return results
+            return self._categorize_in_chunks(items, config)
+        raise ValueError(f"Unsupported prompt type: {prompt_type}")

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import html
+import json
 import os
 import platform
 import queue
@@ -20,12 +20,13 @@ import re
 import threading
 import unicodedata
 from collections import defaultdict
-from time import time
+from contextlib import contextmanager
+from time import monotonic, sleep, time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import networkx as nx
 import requests
-from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
 from tabulate import tabulate
 
 
@@ -54,12 +55,178 @@ def check_internet_connectivity(timeout: float = 3.0) -> bool:
     return False
 
 
-def enrich_string_data_core(str_indexes: List[int], entity_list: List[str], lookup: bool = True, max_threads: int = 50) -> List[Tuple[str, str, int, str, dict, list]]:
-    """
-    Enrich string information by searching in Git repositories.
+# --- grep.app code search -------------------------------------------------
+# grep.app was rebuilt on Vercel behind a bot challenge ("Vercel Security
+# Checkpoint", HTTP 429 + x-vercel-mitigated: challenge) that blocks the old
+# `GET https://grep.app/api/search?...&format=e` endpoint the original
+# enrichment relied on. The supported programmatic interface is now the
+# official **Grep MCP server** (stateless MCP-over-HTTP), which is NOT
+# challenged. We call its single `searchGitHub` tool and parse the formatted
+# text blocks it returns (one per repo: Repository / Path / URL / License +
+# numbered code Snippets). See project memory for the full analysis.
+_GREP_MCP_ENDPOINT = "https://mcp.grep.app"
+_GREP_MCP_TOOL = "searchGitHub"
+_GREP_MIN_QUERY_LEN = 30        # don't look up short / noisy strings
+# Values tuned against the live MCP endpoint (see project memory). Observed
+# behaviour: the backend has a heavy tail — a *successful* search returns in
+# <=3s (p99 ~3.0s) but a sizeable, load-varying fraction hangs to Vercel's
+# ~15s gateway timeout and 504s; retrying a hung query almost always succeeds
+# fast. So: a SHORT timeout to fail-fast on the hangs (well above the 3s
+# success p99) + generous retries for coverage (a lost lookup => an
+# UNCATEGORIZED string). Concurrency 8-12 is the sweet spot; >=16 induces
+# *more* hangs, so don't crank it.
+_GREP_MCP_MAX_THREADS = 12      # 8-12 optimal; higher induces more 504s
+_GREP_MCP_TIMEOUT = 8           # seconds; > success-p99 (~3s), << gateway 504 (~15s)
+_GREP_MCP_RETRIES = 4           # hangs are transient + recover fast; favour coverage
+_GREP_MCP_BACKOFF = 0.5         # linear backoff base between retries (s)
 
-    Performs parallel queries to grep.app API to find string usage in public repositories.
-    Enriches strings with repository context and matched code lines.
+_GREP_RE_REPO = re.compile(r"^Repository:\s*(.+)$", re.M)
+_GREP_RE_PATH = re.compile(r"^Path:\s*(.+)$", re.M)
+_GREP_RE_SNIPPET = re.compile(r"^--- Snippet \d+ \(Line (\d+)\) ---$", re.M)
+
+_GREP_UNCATEGORIZED = {"UNCATEGORIZED": {"path": "", "matched_lines": {}}}
+
+# One pooled HTTPS Session reused across all worker threads, so the many
+# searches reuse TCP/TLS connections instead of a fresh handshake per call.
+# requests.Session is thread-safe for concurrent .post(); the pool is sized to
+# the worker count to avoid "connection pool is full" churn. Lazily created.
+_grep_session: Optional[requests.Session] = None
+_grep_session_lock = threading.Lock()
+
+
+def _get_grep_session() -> requests.Session:
+    """Return the process-wide pooled Session for MCP calls (created once)."""
+    global _grep_session
+    if _grep_session is None:
+        with _grep_session_lock:
+            if _grep_session is None:
+                session = requests.Session()
+                adapter = HTTPAdapter(
+                    pool_connections=_GREP_MCP_MAX_THREADS,
+                    pool_maxsize=_GREP_MCP_MAX_THREADS,
+                )
+                session.mount("https://", adapter)
+                session.mount("http://", adapter)
+                _grep_session = session
+    return _grep_session
+
+
+def _extract_mcp_json(raw: str) -> Optional[dict]:
+    """Pull the JSON-RPC object out of a streamable-HTTP MCP response.
+
+    The Grep MCP server replies as an SSE stream (``event: message`` /
+    ``data: {json}``); we take the last ``data:`` payload. Falls back to
+    treating the whole body as plain JSON. Returns ``None`` if nothing parses.
+    """
+    data_payloads = [ln[len("data:"):].strip() for ln in raw.splitlines() if ln.startswith("data:")]
+    candidate = data_payloads[-1] if data_payloads else raw.strip()
+    try:
+        return json.loads(candidate)
+    except (ValueError, TypeError):
+        return None
+
+
+def _grep_mcp_search(query: str, match_case: bool = True, timeout: int = _GREP_MCP_TIMEOUT, retries: int = _GREP_MCP_RETRIES) -> list:
+    """Call the Grep MCP ``searchGitHub`` tool; return its ``content`` list
+    (each item a text block) or ``[]`` on error / no JSON-RPC result.
+
+    A literal, optionally case-sensitive code search (``useRegexp`` left at its
+    default of false, so a string with regex-special characters needs no
+    escaping). One JSON-RPC POST per query over the shared pooled session;
+    transient failures (504 hangs cut short by the timeout, or an unparseable
+    body) are retried with linear backoff. A genuine JSON-RPC ``error`` is NOT
+    retried.
+    """
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": _GREP_MCP_TOOL, "arguments": {"query": query, "matchCase": bool(match_case)}},
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "User-Agent": "xrefer",
+    }
+    session = _get_grep_session()
+    for attempt in range(retries + 1):
+        try:
+            response = session.post(_GREP_MCP_ENDPOINT, json=payload, headers=headers, timeout=timeout)
+            response.raise_for_status()
+            data = _extract_mcp_json(response.text)
+            if data is None:
+                raise requests.RequestException("unparseable MCP response")  # transient → retry
+            if "error" in data:
+                return []  # genuine RPC error (not transient) — don't retry
+            return data.get("result", {}).get("content", []) or []
+        except requests.RequestException:
+            if attempt < retries:
+                sleep(_GREP_MCP_BACKOFF * (attempt + 1))  # linear backoff before retrying
+            continue
+    return []
+
+
+def _parse_grep_result_block(text: str) -> Optional[Tuple[str, str, dict]]:
+    """Parse one ``searchGitHub`` text block into ``(repo, repo_path, matched_lines)``.
+
+    ``matched_lines`` is ``{lineno: code_line}`` reconstructed by numbering each
+    snippet's code lines from its ``--- Snippet N (Line L) ---`` start line
+    (the server gives only the first line number per snippet). Returns ``None``
+    when the block has no ``Repository:`` header.
+    """
+    repo_match = _GREP_RE_REPO.search(text)
+    if not repo_match:
+        return None
+    repo = repo_match.group(1).strip()
+    path_match = _GREP_RE_PATH.search(text)
+    path = path_match.group(1).strip() if path_match else ""
+
+    matched_lines: Dict[str, str] = {}
+    # split() with the capturing group yields: [prefix, line1, body1, line2, body2, ...]
+    parts = _GREP_RE_SNIPPET.split(text)
+    for i in range(1, len(parts) - 1, 2):
+        try:
+            start = int(parts[i])
+        except ValueError:
+            continue
+        body = parts[i + 1].strip("\n")
+        for offset, code_line in enumerate(body.splitlines()):
+            if code_line.strip():
+                matched_lines[str(start + offset)] = code_line
+    return repo, f"{repo}/{path}", matched_lines
+
+
+def _grep_mcp_repositories_from_content(content: list) -> dict:
+    """Convert an MCP ``searchGitHub`` ``content`` list into the legacy
+    ``{repo_name: {'path':..., 'matched_lines':...}}`` mapping, or the
+    ``UNCATEGORIZED`` sentinel when there are no usable results.
+    """
+    if not content:
+        return {k: dict(v) for k, v in _GREP_UNCATEGORIZED.items()}
+    # Server's explicit no-results reply.
+    if len(content) == 1 and "No results found" in content[0].get("text", ""):
+        return {k: dict(v) for k, v in _GREP_UNCATEGORIZED.items()}
+
+    repositories: Dict[str, dict] = {}
+    for item in content:
+        if item.get("type") != "text":
+            continue
+        parsed = _parse_grep_result_block(item.get("text", ""))
+        if not parsed:
+            continue
+        repo, repo_path, matched_lines = parsed
+        repositories[repo] = {"path": repo_path, "matched_lines": matched_lines}
+    return repositories or {k: dict(v) for k, v in _GREP_UNCATEGORIZED.items()}
+
+
+def enrich_string_data_core(str_indexes: List[int], entity_list: List[str], lookup: bool = True, max_threads: int = _GREP_MCP_MAX_THREADS) -> List[Tuple[str, str, int, str, dict, list]]:
+    """
+    Enrich string information by searching public GitHub code.
+
+    Performs parallel queries to the Grep MCP server (``searchGitHub`` tool —
+    the supported successor to the old grep.app HTTP API) to find string usage
+    in public repositories, enriching strings with repository context and
+    matched code lines.
 
     Args:
         str_indexes (List[int]): List of string indexes to process
@@ -76,7 +243,6 @@ def enrich_string_data_core(str_indexes: List[int], entity_list: List[str], look
             - matched_lines: Dictionary mapping line numbers to code lines
             - all_repos: List of all repositories where string was found
     """
-    url = "https://grep.app/api/search"
     total_strings = len(str_indexes)
     input_queue = queue.Queue()
     result_queue = queue.Queue()
@@ -87,83 +253,17 @@ def enrich_string_data_core(str_indexes: List[int], entity_list: List[str], look
     for str_index in str_indexes:
         input_queue.put(str_index)
 
-    def parse_snippet(snippet):
-        matches = {}
-        soup = BeautifulSoup(snippet, "html.parser")
-
-        for row in soup.find_all("tr"):
-            # Extract the line number
-            lineno_div = row.find("div", class_="lineno")
-            if not lineno_div:
-                continue
-            line_number = lineno_div.get_text(strip=True)
-
-            # Extract the code line HTML
-            code_pre = row.find("pre")
-            if not code_pre:
-                continue
-            code_line_html = code_pre.decode_contents()
-
-            # Replace <mark> tags with placeholders
-            code_line_html = re.sub(r"<mark[^>]*>", "", code_line_html)
-            code_line_html = code_line_html.replace("</mark>", "")
-
-            # Unescape HTML entities
-            code_line_html = html.unescape(code_line_html)
-
-            # We remove tags like <span> but keep their content and whitespace
-            code_line_text = re.sub(r"</?(?!mark\b)[^>]*>", "", code_line_html)
-            matches[line_number] = code_line_text
-
-        return matches
-
     def fetch_repositories(search_string):
+        """Look ``search_string`` up via the Grep MCP server.
+
+        Returns ``{repo_name: {'path': repo_path, 'matched_lines': {...}}}``,
+        or ``{'UNCATEGORIZED': {'path': '', 'matched_lines': {}}}`` for short
+        strings, no results, or any error.
         """
-        Fetch repositories from the API for the given string.
-
-        Args:
-            search_string (str): The string to search for in repositories.
-
-        Returns:
-            dict: A dictionary mapping repository names to details:
-                  {
-                      repo_name: {
-                          'path': repo_path,
-                          'matched_lines': matched_lines
-                      },
-                      ...
-                  }
-                  Returns {'UNCATEGORIZED': {'path': '', 'matched_lines': {}}} if no repositories are found or an error occurs.
-        """
-        if len(search_string) <= 30:
-            return {"UNCATEGORIZED": {"path": "", "matched_lines": {}}}
-
-        params = {
-            "q": search_string,
-            "page": 1,
-            "case": "true",  # Making the search case-sensitive
-            "format": "e",  # Extended result format
-        }
-
-        headers = {"User-Agent": "Mozilla/5.0"}
-
-        try:
-            response = requests.get(url, params=params, headers=headers, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            hits = data.get("hits", {}).get("hits", [])
-            if not hits:
-                return {"UNCATEGORIZED": {"path": "", "matched_lines": {}}}
-            repositories = {}
-            for hit in hits:
-                repo_name = hit["repo"]
-                path = hit["path"]
-                snippet = hit["content"]["snippet"]
-                matched_lines = parse_snippet(snippet)
-                repositories[repo_name] = {"path": f"{repo_name}/{path}", "matched_lines": matched_lines}
-            return repositories
-        except (requests.RequestException, ValueError):
-            return {"UNCATEGORIZED": {"path": "", "matched_lines": {}}}
+        if len(search_string) <= _GREP_MIN_QUERY_LEN:
+            return {k: dict(v) for k, v in _GREP_UNCATEGORIZED.items()}
+        content = _grep_mcp_search(search_string, match_case=True)
+        return _grep_mcp_repositories_from_content(content)
 
     def worker():
         """
@@ -280,6 +380,32 @@ def normalize_path(path: str) -> str:
     path = path.replace("\\", os.sep).replace("/", os.sep)
     normalized_path = os.path.normpath(path)
     return normalized_path
+
+
+def cap_artifact_entries(
+    per_type: List[Tuple[str, List[Tuple[str, int]]]],
+    cap: Optional[int],
+    overflow_color,
+    overflow_fmt: str = "(+{count} more)",
+) -> List[Tuple[str, int]]:
+    """Flatten per-type graph-node artifact entries, capping each type to ``cap``.
+
+    ``per_type`` is an ordered list of ``(type_key, [(display_text, color), ...])``
+    (e.g. imports/strings/capa/libs, in display order). When ``cap`` is a positive
+    int and a type has more than ``cap`` entries, only the first ``cap`` are kept
+    and a single ``overflow_fmt`` line (coloured ``overflow_color``) is appended
+    for that type. ``cap`` of ``None`` / ``<= 0`` means no cap — every entry passes
+    through, which is the default (show-all) behaviour. Pure and backend-agnostic:
+    the overflow colour is supplied by the caller so this stays free of IDA deps.
+    """
+    out: List[Tuple[str, int]] = []
+    for _key, items in per_type:
+        if cap is None or cap <= 0 or len(items) <= cap:
+            out.extend(items)
+        else:
+            out.extend(items[:cap])
+            out.append((overflow_fmt.format(count=len(items) - cap), overflow_color))
+    return out
 
 
 def wrap_substring_with_string(string: str, substring: str, substr_1: str, substr_2: Optional[str] = None, case: bool = False) -> str:
@@ -837,6 +963,36 @@ def find_cluster_analysis(analysis_data: Dict, cluster_id: str) -> Optional[Dict
     return None
 
 
+def sanitize_dirtree_name(name: str, max_len: int = 64) -> str:
+    """Sanitize a string for use as one component of an IDA dirtree
+    (Functions-window) folder path.
+
+    The dirtree uses ``/`` as its path separator, so a component must not
+    contain one; backslashes, control characters and stray surrounding
+    whitespace are also cleaned. Always returns a non-empty, length-bounded
+    string. Pure string logic — no IDA dependency, so it lives in core.
+
+    Args:
+        name: Proposed folder-component name (e.g. a cluster label).
+        max_len: Maximum length before truncation.
+
+    Returns:
+        A safe, non-empty folder-component name.
+    """
+    if not name:
+        return "unnamed"
+    # '/' and '\' are path separators in the dirtree — replace with a space.
+    cleaned = name.replace("/", " ").replace("\\", " ")
+    # Drop non-printable / control characters, then collapse whitespace runs.
+    cleaned = "".join(ch if ch.isprintable() else " " for ch in cleaned)
+    cleaned = " ".join(cleaned.split())
+    # Trailing dots/spaces read oddly in tree views; strip them.
+    cleaned = cleaned.strip().strip(".").strip()
+    if len(cleaned) > max_len:
+        cleaned = cleaned[:max_len].rstrip()
+    return cleaned or "unnamed"
+
+
 def sort_clusters(clusters, paths):
     """
     Sort clusters based on entry point reachability and parent/child relationships.
@@ -892,6 +1048,60 @@ def set_log_function(func) -> None:
     global _log_func
     _log_func = func
 
+
+class AnalysisCancelled(Exception):
+    """Raised when the user cancels a long-running analysis phase."""
+
+
+_cancel_check = None
+_cancellable_depth = 0
+
+
+def set_cancel_check(func) -> None:
+    """Set the cancellation probe used by long-running core phases.
+
+    Mirrors ``set_log_function``: the GUI frontend registers a main-thread
+    callable (IDA's ``user_cancelled``) at plugin init; headless runs keep
+    the default never-cancelled probe. Keeps the core/llm layers free of
+    IDA imports while sharing one cancellation site.
+    """
+    global _cancel_check
+    _cancel_check = func
+
+
+def check_cancelled() -> bool:
+    """True when the user pressed Cancel on the active wait box."""
+    if _cancel_check is None:
+        return False
+    try:
+        return bool(_cancel_check())
+    except Exception:
+        return False
+
+
+@contextmanager
+def cancellable_phase():
+    """Mark a stretch of main-thread work as user-cancellable.
+
+    While active, the GUI ``log`` stops re-asserting HIDECANCEL on its
+    wait-box updates (see ``in_cancellable_phase``), so the Cancel button
+    appears with the phase's first progress line and stays up. The work
+    itself must poll ``check_cancelled`` between units — an in-flight
+    synchronous LLM call cannot be interrupted; cancellation takes effect
+    between calls.
+    """
+    global _cancellable_depth
+    _cancellable_depth += 1
+    try:
+        yield
+    finally:
+        _cancellable_depth -= 1
+
+
+def in_cancellable_phase() -> bool:
+    """Whether a cancellable phase is active (wait box keeps its Cancel)."""
+    return _cancellable_depth > 0
+
 def log(string: str) -> None:
     """
     Log message with XRefer prefix.
@@ -904,6 +1114,55 @@ def log(string: str) -> None:
     """
     if _log_func is not None:
         _log_func(string)
+    else:
+        print(f"[XRefer] {string}")
+
+
+_progress_func = None
+
+
+def set_progress_function(func) -> None:
+    """Set the transient progress sink (e.g. the IDA wait-box updater).
+
+    Progress messages are high-frequency and ephemeral; the GUI registers a
+    box-only updater so they keep the wait box alive without flooding the
+    Output window the way routing them through log() would.
+    """
+    global _progress_func
+    _progress_func = func
+
+
+_PROGRESS_MIN_INTERVAL_S = 0.25
+_PROGRESS_PRINT_EVERY = 500
+_progress_state = {"last": 0.0, "count": 0}
+
+
+def log_progress(string: str, final: bool = False) -> None:
+    """Throttled progress reporting for hot loops.
+
+    Per-iteration call sites (per path-group, per leaf, per cluster) used to
+    route straight through log() — a print plus a wait-box replace each —
+    firing tens of thousands of times per analysis: seconds-to-minutes of
+    pure logging overhead, with real warnings drowned in the spray.
+
+    Emission policy: at most one update per ~0.25s (the wait box stays
+    alive at ~4Hz); of those, only every Nth goes to the full log channel
+    (Output trace without the flood), the rest hit the box-only sink.
+    ``final=True`` always emits on the full channel so the closing
+    "[total/total]" line lands.
+    """
+    now = monotonic()
+    if not final and now - _progress_state["last"] < _PROGRESS_MIN_INTERVAL_S:
+        return
+    _progress_state["last"] = now
+    _progress_state["count"] += 1
+    if final or _progress_state["count"] % _PROGRESS_PRINT_EVERY == 1:
+        log(string)
+    elif _progress_func is not None:
+        try:
+            _progress_func(string)
+        except Exception:
+            pass
     else:
         print(f"[XRefer] {string}")
 

@@ -5,8 +5,7 @@ Public API mirrors the `asciinet` wrapper but with NO JVM dependency.
     from ascii_graphs import graph_to_ascii
     print(graph_to_ascii(networkx_graph))
 
-Implementation status: SCAFFOLD. The modules below are stubs to be filled in
-1:1 from the Scala source in reference/ascii-graphs. See PORTING_PLAN.md.
+Ported 1:1 from the original Scala source (com.github.mdr.ascii).
 """
 from __future__ import annotations
 
@@ -47,7 +46,7 @@ def render_graph(graph):
     return _render(graph)
 
 
-def __getattr__(name):  # lazy re-export so the package imports before stubs exist
+def __getattr__(name):  # lazy re-export so importing the package doesn't eagerly pull submodules
     if name == "Graph":
         from xrefer._vendor.ascii_graphs.graph.graph import Graph
 

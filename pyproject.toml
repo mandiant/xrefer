@@ -19,7 +19,6 @@ dependencies = [
     # Pure-Python ASCII graph renderer (replaces asciinet/JVM) is now
     # vendored at plugins/xrefer/_vendor/ascii_graphs/ — no external
     # dependency needed; the package ships with the plugin tree.
-    "beautifulsoup4>=4.13.4",
     "dspy>=3.0.3",
     "flare-capa",
     "httpx",                   # imported directly in llm/processor.py (was transitive via dspy)

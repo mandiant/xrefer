@@ -14,15 +14,23 @@
 
 from typing import Optional
 
+import ida_kernwin
 import idaapi
 
 from xrefer import __version__
+from xrefer.core.helpers import set_cancel_check
 from xrefer.gui.action_handlers import *
 from xrefer.gui.helpers import *
 from xrefer.gui.view import XReferView
 
 initialized: bool = False
 plugin_instance = None
+
+# Route the core layer's cancellation probe to IDA's wait-box Cancel
+# button. Long-running phases poll check_cancelled() between units of
+# work (main-thread synchronous — the canonical IDA pattern). Headless
+# runs never register a probe and stay never-cancelled.
+set_cancel_check(ida_kernwin.user_cancelled)
 
 
 class XReferPlugin(idaapi.plugin_t):
@@ -60,15 +68,19 @@ class XReferPlugin(idaapi.plugin_t):
         plugin_instance = self
         if not initialized:
             initialized = True
-            register_menu_action("Edit/XRefer/Run Analysis/", "XRefer:start_analysis_default", "Default Entrypoint", StartHandler())
+            register_menu_action("Edit/XRefer/Run Analysis/", "XRefer:start_analysis_default", "Default Entrypoint (loads cache if present)", StartHandler())
             register_menu_action("Edit/XRefer/Run Analysis/", "XRefer:start_analysis_custom", "Custom Entrypoint", StartHandlerCustomEntrypoint())
             register_menu_action("Edit/XRefer/Run Analysis/", "XRefer:cluster_everything", "(Re-)run Cluster Analysis", ClusterEverythingHandler())
+            register_menu_action("Edit/XRefer/Run Analysis/", "XRefer:estimate_cluster_tokens", "Estimate Cluster Analysis Token Usage", EstimateClusterTokensHandler())
             register_menu_action("Edit/XRefer/", "XRefer:show_window", "Show Window", ShowWindowHandler())
             register_menu_action("Edit/XRefer/", "XRefer:dump_indirect_calls", "Dump Indirect Calls", DumpIndirectCallsHandler())
             register_menu_action("Edit/XRefer/", "XRefer:sync_imagebase", "Re-sync Imagebase", SyncImageBaseHandler())
             register_menu_action("Edit/XRefer/Rename Functions/", "XRefer:rename_rust", "Rename based on Rust compiler strings", RustRenameHandler())
             register_menu_action("Edit/XRefer/Rename Functions/", "XRefer:rename_cluster", "Apply cluster analysis prefixes", ClusterRenameHandler())
+            register_menu_action("Edit/XRefer/Organize Functions/", "XRefer:organize_folders", "Organize into Folders (library/user)", OrganizeFoldersHandler())
+            register_menu_action("Edit/XRefer/Organize Functions/", "XRefer:remove_all_folders", "Remove All Folders", RemoveAllFoldersHandler())
             register_menu_action("Edit/XRefer/", "XRefer:generate_html_report", "Generate HTML Report", GenerateHtmlReportHandler())
+            register_menu_action("Edit/XRefer/", "XRefer:view_attack_matrix", "View ATT&CK Matrix", ViewAttackMatrixHandler())
             register_menu_action("Edit/XRefer/Configure", "XRefer:Rust:configure", "Configure", XReferSettingsHandler())
             register_menu_action("Edit/XRefer/About", "XRefer:Rust:about", "About", AboutDialogHandler())
         idaapi.msg("[XRefer] Loaded\n")
@@ -88,15 +100,47 @@ class XReferPlugin(idaapi.plugin_t):
 
     def run(self, arg: int) -> None:
         """
-        Run the plugin when activated via hotkey.
+        Run the plugin when activated via hotkey (or Edit > Plugins).
 
-        This method is called when the plugin's hotkey is pressed. It displays
-        a message indicating the plugin version and how to access its menu.
+        The advertised hotkey used to just print "browse to the menu" — and
+        after an IDA restart the menu's Show Window is greyed (no view yet),
+        leaving "Run Analysis" as the only enabled path even though it
+        merely loads the cached analysis in seconds. Do the obvious thing
+        instead: show the view if it exists, load the cached analysis if
+        one is on disk, otherwise offer to start a fresh analysis.
 
         Args:
             arg (int): IDA argument value (unused).
         """
-        log(f"Binary Navigator v{__version__} is loaded. Browse to Edit -> XRefer.")
+        import os
+
+        from xrefer.core.settings import XReferSettingsManager
+
+        if self.xrefer_view is not None and self.xrefer_view.xrefer_obj.lang:
+            self.xrefer_view.create()
+            return
+
+        try:
+            analysis_path = XReferSettingsManager().load_settings()["paths"]["analysis"]
+            have_cache = bool(analysis_path) and os.path.exists(analysis_path)
+        except Exception:
+            have_cache = False
+
+        if have_cache:
+            # Existence-only check: a corrupt/mismatched cache falls through
+            # to a fresh full analysis inside load_analysis.
+            log("Loading existing XRefer analysis...")
+            self.start()
+            return
+
+        answer = ida_kernwin.ask_yn(
+            ida_kernwin.ASKBTN_YES,
+            "HIDECANCEL\nNo XRefer analysis exists for this IDB yet.\nRun the analysis now?",
+        )
+        if answer == ida_kernwin.ASKBTN_YES:
+            self.start()
+        else:
+            log(f"Binary Navigator v{__version__} is loaded. Browse to Edit -> XRefer.")
 
 
 class ContextHooks(idaapi.UI_Hooks):

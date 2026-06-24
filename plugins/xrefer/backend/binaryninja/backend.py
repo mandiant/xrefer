@@ -299,7 +299,9 @@ class BNBackend(BackEnd):
         for ref in data_refs:
             yield BinaryNinjaXref(ref, addr, XrefType.DATA_READ)
 
-    def get_xrefs_from(self, address: Address) -> Iterator[BinaryNinjaXref]:
+    def get_xrefs_from(self, address: Address, far_only: bool = False) -> Iterator[BinaryNinjaXref]:
+        # far_only accepted for interface parity and ignored: Binary Ninja's
+        # code/data ref queries do not produce fall-through refs.
         addr = int(address)
         code_dsts = list(self._bv.get_code_refs_from(addr))
         data_dsts = list(self._bv.get_data_refs_from(addr))

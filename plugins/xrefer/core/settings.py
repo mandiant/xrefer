@@ -24,6 +24,22 @@ SamplePaths = Dict[str, Dict[PathType, str]]  # (current_idb: {path_type: path})
 ExclusionData = Dict[str, List[str]]  # (category: [exclusion_items])
 
 
+def deep_merge_settings(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively merge ``overrides`` into ``base`` in place and return it.
+
+    Nested dicts are merged key-by-key (so an override of a single
+    ``analysis_options`` / ``paths`` key keeps the sibling keys); any other
+    value type replaces the base value outright. Used to apply ephemeral CLI
+    overrides on top of the loaded settings without disturbing unrelated keys.
+    """
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            deep_merge_settings(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
 class XReferSettingsManager:
     """
     Manages persistent storage and retrieval of XRefer settings.
@@ -63,13 +79,61 @@ class XReferSettingsManager:
             "llm_lookups": True,
             "git_lookups": False,
             "suppress_notifications": True,
-            "llm_model_id": "gemini/gemini-2.5-pro",
+            # Primary = HEAVY model (cluster analysis). Default to Gemini Flash
+            # (fast + large context) for the deeper analysis.
+            "llm_model_id": "gemini/gemini-flash-latest",
             "api_key": "",
+            # Base URL for local / self-hosted models (Ollama). Empty for
+            # hosted providers; applied only to ollama_* model ids.
+            "api_base": "",
+            # ── Optional second ("light") model for categorization ──────────
+            # The primary model above is the HEAVY model (cluster analysis).
+            # When use_light_model is on AND light_model_id is set, the bulk
+            # categorization task runs on this lighter/cheaper/local model
+            # instead. ON by default with Gemini Flash-Lite for the bulk
+            # tagging, reusing the primary key (same provider). Old saved
+            # settings that lack these keys get these defaults via
+            # migrate_settings; an explicit saved value is preserved.
+            # light_use_primary_key reuses the primary api_key for a hosted
+            # light model; uncheck it to give the light model its own key.
+            "use_light_model": True,
+            "light_model_id": "gemini/gemini-flash-lite-latest",
+            "light_api_key": "",
+            "light_api_base": "",
+            "light_use_primary_key": True,
             "enable_exclusions": True,
             "analysis_options": {
                 "cluster_batch_size": 30,
+                # Stage-1 cluster-analysis context strategy:
+                #   "auto"         - local (Ollama) models ALWAYS summarise
+                #                    bottom-up (small per-call payloads keep
+                #                    laptop memory bounded); commercial models
+                #                    send the full corpus when it fits the
+                #                    window, else fall back to hierarchical.
+                #   "full"         - always send the full cluster corpus; block
+                #                    on overflow. (Escape hatch for a rig that
+                #                    can eat the whole corpus; the A/B baseline.)
+                #   "hierarchical" - always summarise bottom-up everywhere.
+                #                    (The A/B lever vs "full".)
+                "cluster_context_mode": "auto",
+                # Hierarchical/local per-call token budget. This ALSO caps
+                # Ollama's num_ctx for the run, so it directly bounds the
+                # KV-cache memory: ~32k ≈ ~2 GB KV (F16) for a 12B model.
+                # Raise for fewer/larger calls if you have RAM headroom; lower
+                # to keep more memory free. Unused by the full-corpus path.
+                "local_max_call_tokens": 32768,
             },
-            "display_options": {"auto_size_graphs": True, "hide_llm_disclaimer": False, "show_help_banner": True, "default_panel_width": 779},
+            "display_options": {
+                "auto_size_graphs": True,
+                "hide_llm_disclaimer": False,
+                "show_help_banner": True,
+                "default_panel_width": 779,
+                # Graph node-detail (D) mode: when enabled, cap each artifact
+                # type (imports/strings/capa/libs) shown per node to this many,
+                # with a dim "(+N more)" overflow line. Off = show all (default).
+                "cap_graph_node_artifacts": False,
+                "graph_node_artifact_cap": 6,
+            },
             "use_default_paths": {"analysis": True, "capa": True, "trace": True, "xrefs": True, "categories": True, "exclusions": True},
             "paths": {
                 "analysis": self.resolve_default_path("analysis"),
@@ -218,9 +282,7 @@ class XReferSettingsManager:
         ((), "llm_origin"),
         ((), "llm_model"),
         # Temperature / reasoning-effort surface that was added then
-        # removed mid-development. See
-        # project_llm_settings_and_findings.md "What got reverted"
-        # for the rationale. Provider API defaults apply now.
+        # removed; the provider's API defaults apply now.
         (("analysis_options",), "llm_temperature"),
         (("analysis_options",), "llm_reasoning_effort"),
     )

@@ -59,7 +59,13 @@ FILE_FILTERS = {
 # Compatibility criteria for the LLM model dropdown. A model is shown only if
 # it satisfies ALL of:
 #   - chat-completion API (DSPy uses chat endpoints)
-#   - >=1M input tokens (cluster prompts get large on real binaries)
+#   - >=200k input tokens — a COARSE pre-filter only: it keeps tiny-context
+#     models (8k/32k/128k) out of the list, since cluster prompts get large on
+#     real binaries. It does NOT prove a given binary fits; that's decided per
+#     binary at analysis time by the token-budget gate, which renders the real
+#     request, compares it to the model's context window, and refuses to send
+#     when it would overflow (XRefer.analyze_clusters /
+#     ClusterAnalyzer.estimate_cluster_request).
 #   - >=16k output tokens (matches the codebase's per-provider max_tokens floor)
 #   - structured output capability (DSPy Predict + Pydantic OutputField needs
 #     either JSON-schema response_format or function-calling fallback)
@@ -73,14 +79,15 @@ FILE_FILTERS = {
 # merely re-list the same models, and of a few providers litellm reports as
 # single-key when they really need a host/endpoint (azure_ai / oci / databricks).
 # validate_environment (in _curated_llm_models) is the enforced auth gate on top.
-# Anthropic is included: Claude 4.x reports max_input_tokens=1_000_000, and that
-# 1M window is beta-gated (needs the anthropic-beta:context-1m-2025-08-07 header
-# AND API tier 4+). xrefer sends that header automatically for >=1M Claude models
-# from the LLM call path (LLMProcessor._build_lm_kwargs), so the dropdown's 1M
-# promise holds at runtime. Tier 4+ stays the user's responsibility.
-# dashscope (Alibaba Qwen) is the one non-big-4 direct single-key provider that
-# currently ships >=1M structured-output models, so it's allowed too.
-_LLM_MIN_INPUT_TOKENS = 1_000_000
+# Anthropic is included: standard Claude reports a 200k window and now qualifies
+# directly. Claude's larger 1M window is beta-gated (needs the
+# anthropic-beta:context-1m-2025-08-07 header AND API tier 4+); xrefer sends that
+# header automatically for >=1M Claude ids from the LLM call path
+# (LLMProcessor._build_lm_kwargs), so the wider window holds at runtime where
+# offered. Tier 4+ stays the user's responsibility.
+# dashscope (Alibaba Qwen) is the one non-big-4 direct single-key provider with
+# qualifying structured-output models, so it's allowed too.
+_LLM_MIN_INPUT_TOKENS = 200_000
 _LLM_MIN_OUTPUT_TOKENS = 16_000
 _LLM_ALLOWED_PROVIDERS = frozenset({"openai", "gemini", "xai", "anthropic", "dashscope"})
 
@@ -137,6 +144,46 @@ def _curated_llm_models() -> List[str]:
         seen.add(name)
         out.append(name)
     return sorted(out)
+
+
+def make_combo_searchable(combo) -> None:
+    """Give a QComboBox type-to-filter search over its items — handy for the
+    long curated-model list. Matches a typed substring anywhere in the item
+    (so "opus" finds "anthropic/claude-opus-4-5"), case-insensitively.
+
+    Leaves the combo editable with NoInsert, so a custom hand-typed model id
+    still works (typing only filters the list, never adds an item). Configures
+    the auto-created completer and is safe to call on an already-editable combo
+    — it won't recreate the line edit (which would drop existing handlers).
+    """
+    from qtpy.QtCore import Qt
+    from qtpy.QtWidgets import QComboBox, QCompleter
+
+    if not combo.isEditable():
+        combo.setEditable(True)
+    combo.setInsertPolicy(QComboBox.NoInsert)
+    completer = combo.completer()
+    if completer is not None:
+        completer.setCompletionMode(QCompleter.PopupCompletion)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        try:
+            completer.setFilterMode(Qt.MatchContains)
+        except Exception:
+            pass  # older Qt without setFilterMode keeps prefix matching
+        # Style the filter popup to match the dialog: theme-aware via QSS
+        # palette() roles (same approach as _build_dialog_qss), with an accent
+        # selection highlight and a little padding so it reads as "sleek"
+        # rather than the raw native list.
+        popup = completer.popup()
+        if popup is not None:
+            popup.setStyleSheet(
+                "QAbstractItemView {"
+                " background: palette(base); color: palette(text);"
+                " border: 1px solid palette(mid); outline: 0; padding: 3px; }"
+                "QAbstractItemView::item { padding: 5px 8px; border-radius: 4px; }"
+                "QAbstractItemView::item:selected {"
+                " background: palette(highlight); color: palette(highlighted-text); }"
+            )
 
 
 # Per-process scratch directory for the small SVG icon files referenced
@@ -884,21 +931,33 @@ class XReferSettingsDialog(QDialog):
         self.sidebar.setFixedWidth(SIDEBAR_WIDTH)
         self.sidebar.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.sidebar.setFocusPolicy(Qt.NoFocus)
-        self.sidebar.addItem(QListWidgetItem("General"))
+        self.sidebar.addItem(QListWidgetItem("LLM"))
+        self.sidebar.addItem(QListWidgetItem("Analysis"))
+        self.sidebar.addItem(QListWidgetItem("Display"))
+        self.sidebar.addItem(QListWidgetItem("Files"))
         self.sidebar.addItem(QListWidgetItem("Exclusions"))
 
         # Each page gets its own QScrollArea so cramped displays still
         # render every control — the previous fixed-size dialog would
         # have clipped controls on shorter screens. Margins on the
-        # page widget itself (set inside setup_general_tab /
-        # setup_exclusion_tab) give the breathing room.
-        general_page = QWidget()
+        # page widget itself (set inside each setup_*_tab method) give the
+        # breathing room.
+        llm_page = QWidget()
+        analysis_page = QWidget()
+        display_page = QWidget()
+        files_page = QWidget()
         exclusion_page = QWidget()
-        self.setup_general_tab(general_page)
+        self.setup_llm_tab(llm_page)
+        self.setup_analysis_tab(analysis_page)
+        self.setup_display_tab(display_page)
+        self.setup_files_tab(files_page)
         self.setup_exclusion_tab(exclusion_page)
 
         self.pages = QStackedWidget()
-        self.pages.addWidget(self._wrap_in_scroll(general_page))
+        self.pages.addWidget(self._wrap_in_scroll(llm_page))
+        self.pages.addWidget(self._wrap_in_scroll(analysis_page))
+        self.pages.addWidget(self._wrap_in_scroll(display_page))
+        self.pages.addWidget(self._wrap_in_scroll(files_page))
         self.pages.addWidget(self._wrap_in_scroll(exclusion_page))
 
         self.sidebar.currentRowChanged.connect(self.pages.setCurrentIndex)
@@ -958,15 +1017,9 @@ class XReferSettingsDialog(QDialog):
         sa.setFrameShape(QFrame.NoFrame)
         return sa
 
-    def setup_general_tab(self, tab) -> None:
-        """
-        Initialize the general settings tab.
-
-        Sets up UI elements for LLM configuration, paths, and general options.
-
-        Args:
-            tab: Tab widget to populate with settings controls
-        """
+    def setup_llm_tab(self, tab) -> None:
+        """LLM / model configuration: enable LLM, the primary (cluster-analysis)
+        model, and the optional separate categorization (lighter) model."""
         layout = QVBoxLayout(tab)
         # Page-level padding — without this the group-box cards sit
         # flush against the sidebar / scroll-area edges, which makes
@@ -974,8 +1027,8 @@ class XReferSettingsDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 16)
         layout.setSpacing(12)
 
-        # Options group
-        options_group = QGroupBox("Options")
+        # Model configuration group
+        options_group = QGroupBox("Model")
         options_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         options_layout = QVBoxLayout(options_group)
 
@@ -999,6 +1052,35 @@ class XReferSettingsDialog(QDialog):
         line_edit = self.llm_model_combo.lineEdit()
         if line_edit:
             line_edit.setPlaceholderText("Select or type a model id…")
+        make_combo_searchable(self.llm_model_combo)
+
+        # ── Local model (Ollama) ─────────────────────────────────────
+        # A checkbox reveals the API base field and switches the dropdown to
+        # models listed from the Ollama server. Initial state is inferred from
+        # the saved config (an ollama_* id or a non-empty api_base = local).
+        from xrefer.llm.ollama import DEFAULT_API_BASE, is_ollama_model
+        _api_base = self.settings.get("api_base", "") or ""
+        _is_local = is_ollama_model(self.settings.get("llm_model_id", "")) or bool(_api_base)
+        self.local_model_check = QCheckBox("Use a local model (Ollama)")
+        self.local_model_check.setToolTip(
+            "Run analysis against a local Ollama server instead of a hosted "
+            "provider. Models are listed from the server and need no API key, "
+            "but must support structured (JSON) output."
+        )
+        self.local_model_check.setChecked(_is_local)
+        self.local_model_check.setEnabled(self.settings["llm_lookups"])
+        self.local_model_check.toggled.connect(self.toggle_local_model)
+
+        self.api_base_label = QLabel("API Base URL:")
+        self.api_base_edit = QLineEdit(_api_base or (DEFAULT_API_BASE if _is_local else ""))
+        self.api_base_edit.setPlaceholderText(DEFAULT_API_BASE)
+        self.api_base_edit.setToolTip("Ollama server base URL (default http://localhost:11434).")
+        self.api_base_edit.setEnabled(self.settings["llm_lookups"])
+        self.api_base_edit.editingFinished.connect(self._on_api_base_changed)
+        self.api_base_label.setVisible(_is_local)
+        self.api_base_edit.setVisible(_is_local)
+        if _is_local:
+            self._populate_model_combo(True)
 
         # Refresh button: re-downloads litellm's model catalog so models
         # newer than the installed litellm version appear, then rebuilds
@@ -1016,7 +1098,161 @@ class XReferSettingsDialog(QDialog):
         self.api_key_edit.setEchoMode(QLineEdit.Password)
         self.api_key_edit.setToolTip("API key for the selected LLM provider")
 
+        # Pre-flight test: one minimal real request against the CURRENT
+        # (unsaved) field values. Without it, a wrong key or model id is
+        # only discovered minutes into the first analysis run.
+        self.test_llm_btn = QPushButton("Test")
+        self.test_llm_btn.setToolTip(
+            "Validate the model id / API key / server with one minimal "
+            "request, without saving. Tests the categorization model too "
+            "when one is enabled."
+        )
+        self.test_llm_btn.setEnabled(self.settings["llm_lookups"])
+        self.test_llm_btn.clicked.connect(self._test_llm_connection)
+
+        self.test_result_label = QLabel("")
+        self.test_result_label.setWordWrap(True)
+        self.test_result_label.setVisible(False)
+
+        model_row = QHBoxLayout()
+        model_row.setContentsMargins(0, 0, 0, 0)
+        model_row.setSpacing(6)
+        model_row.addWidget(self.llm_model_combo, 1)
+        model_row.addWidget(self.refresh_models_btn, 0)
+
+        key_row = QHBoxLayout()
+        key_row.setContentsMargins(0, 0, 0, 0)
+        key_row.setSpacing(6)
+        key_row.addWidget(self.api_key_edit, 1)
+        key_row.addWidget(self.test_llm_btn, 0)
+
+        llm_grid.addWidget(QLabel("LLM Model ID:"), 0, 0)
+        llm_grid.addLayout(model_row, 0, 1)
+        llm_grid.addWidget(self.local_model_check, 1, 1)
+        llm_grid.addWidget(self.api_base_label, 2, 0)
+        llm_grid.addWidget(self.api_base_edit, 2, 1)
+        llm_grid.addWidget(QLabel("API Key:"), 3, 0)
+        llm_grid.addLayout(key_row, 3, 1)
+        llm_grid.addWidget(self.test_result_label, 4, 1)
+
+        options_layout.addWidget(self.llm_checkbox)
+        options_layout.addLayout(llm_grid)
+
+        # ── Optional second ("light") model for categorization ───────────
+        # Progressive disclosure: by default the single model above does
+        # everything. Enabling this reveals a fully independent model config so
+        # the heavy cluster analysis (model above) and the bulk categorization
+        # can use different models / keys / local servers — any mix.
+        _use_light = bool(self.settings.get("use_light_model", False))
+        _light_model_id = self.settings.get("light_model_id", "") or ""
+        _light_api_base = self.settings.get("light_api_base", "") or ""
+        _light_same_key = bool(self.settings.get("light_use_primary_key", True))
+        _light_is_local = is_ollama_model(_light_model_id) or bool(_light_api_base)
+        _light_api_key = self.settings.get("light_api_key", "") or ""
+
+        self.use_light_model_check = QCheckBox(
+            "Use a separate model for categorization (lighter tasks)")
+        self.use_light_model_check.setToolTip(
+            "Off: one model does everything.\n"
+            "On: the model above runs the heavy cluster analysis, while a "
+            "second, independently-configured model runs the bulk "
+            "categorization (API / library tagging). Mix hosted + local freely."
+        )
+        self.use_light_model_check.setChecked(_use_light)
+        self.use_light_model_check.setEnabled(self.settings["llm_lookups"])
+        self.use_light_model_check.toggled.connect(self.toggle_use_light_model)
+        options_layout.addWidget(self.use_light_model_check)
+
+        self.light_container = QWidget()
+        light_grid = QGridLayout(self.light_container)
+        light_grid.setContentsMargins(18, 2, 0, 2)  # indent under the checkbox
+        light_grid.setColumnStretch(1, 1)
+
+        light_note = QLabel(
+            "Cluster analysis uses the model above; categorization uses this one.")
+        light_note.setWordWrap(True)
+        light_grid.addWidget(light_note, 0, 0, 1, 2)
+
+        self.light_model_combo = QComboBox()
+        self.light_model_combo.setEditable(True)
+        self.light_model_combo.setInsertPolicy(QComboBox.NoInsert)
+        _light_le = self.light_model_combo.lineEdit()
+        if _light_le:
+            _light_le.setPlaceholderText("Select or type a model id…")
+        self._fill_combo(self.light_model_combo, _light_is_local,
+                         _light_api_base or DEFAULT_API_BASE)
+        self.light_model_combo.setCurrentText(_light_model_id)
+        make_combo_searchable(self.light_model_combo)
+
+        self.light_refresh_btn = QPushButton("Refresh")
+        self.light_refresh_btn.setToolTip("Rebuild the categorization-model list")
+        self.light_refresh_btn.clicked.connect(self.refresh_light_model_list)
+
+        self.light_local_check = QCheckBox("Use a local model (Ollama)")
+        self.light_local_check.setToolTip(
+            "Run categorization against a local Ollama server. Models are listed "
+            "from the server and need no API key.")
+        self.light_local_check.setChecked(_light_is_local)
+        self.light_local_check.toggled.connect(self.toggle_light_local_model)
+
+        self.light_api_base_label = QLabel("API Base URL:")
+        self.light_api_base_edit = QLineEdit(
+            _light_api_base or (DEFAULT_API_BASE if _light_is_local else ""))
+        self.light_api_base_edit.setPlaceholderText(DEFAULT_API_BASE)
+        self.light_api_base_edit.setToolTip(
+            "Ollama server base URL (default http://localhost:11434).")
+        self.light_api_base_edit.editingFinished.connect(self._on_light_api_base_changed)
+        self.light_api_base_label.setVisible(_light_is_local)
+        self.light_api_base_edit.setVisible(_light_is_local)
+
+        self.light_same_key_check = QCheckBox("Use the main model's API key")
+        self.light_same_key_check.setToolTip(
+            "On (default): reuse the main model's API key for the categorization "
+            "model (same provider, different tier).\n"
+            "Off: give the categorization model its own API key below.")
+        self.light_same_key_check.setChecked(_light_same_key)
+        self.light_same_key_check.toggled.connect(self.toggle_light_same_key)
+
+        self.light_api_key_edit = QLineEdit(_light_api_key)
+        self.light_api_key_edit.setEchoMode(QLineEdit.Password)
+        self.light_api_key_edit.setToolTip("API key for the categorization model")
+
+        light_model_row = QHBoxLayout()
+        light_model_row.setContentsMargins(0, 0, 0, 0)
+        light_model_row.setSpacing(6)
+        light_model_row.addWidget(self.light_model_combo, 1)
+        light_model_row.addWidget(self.light_refresh_btn, 0)
+
+        light_grid.addWidget(QLabel("Model ID:"), 1, 0)
+        light_grid.addLayout(light_model_row, 1, 1)
+        light_grid.addWidget(self.light_local_check, 2, 1)
+        light_grid.addWidget(self.light_api_base_label, 3, 0)
+        light_grid.addWidget(self.light_api_base_edit, 3, 1)
+        light_grid.addWidget(self.light_same_key_check, 4, 1)
+        light_grid.addWidget(QLabel("API Key:"), 5, 0)
+        light_grid.addWidget(self.light_api_key_edit, 5, 1)
+
+        options_layout.addWidget(self.light_container)
+        self.light_container.setVisible(_use_light)
+        self._update_light_enabled()
+
+        layout.addWidget(options_group)
+        layout.addStretch(1)
+
+    def setup_analysis_tab(self, tab) -> None:
+        """Analysis behaviour: cluster-analysis tuning, string enrichment, and
+        the missing-file prompt option."""
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(20, 20, 20, 16)
+        layout.setSpacing(12)
+
         analysis_options = self.settings.get("analysis_options", {})
+
+        # Cluster analysis tuning
+        cluster_group = QGroupBox("Cluster analysis")
+        cluster_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        cluster_grid = QGridLayout(cluster_group)
+        cluster_grid.setColumnStretch(1, 1)
 
         self.cluster_batch_size_spin = QSpinBox()
         self.cluster_batch_size_spin.setRange(5, 60)
@@ -1032,21 +1268,55 @@ class XReferSettingsDialog(QDialog):
             "output budget shrinks as the batch grows). Default 30."
         )
 
-        model_row = QHBoxLayout()
-        model_row.setContentsMargins(0, 0, 0, 0)
-        model_row.setSpacing(6)
-        model_row.addWidget(self.llm_model_combo, 1)
-        model_row.addWidget(self.refresh_models_btn, 0)
+        # Stage-1 context strategy (full corpus vs bottom-up summarisation).
+        self.cluster_context_mode_combo = QComboBox()
+        for _val, _lbl in (
+            ("auto", "Auto (local: summarise; cloud: full when it fits)"),
+            ("full", "Full corpus (block if it overflows)"),
+            ("hierarchical", "Hierarchical (summarise bottom-up)"),
+        ):
+            self.cluster_context_mode_combo.addItem(_lbl, _val)
+        _mode = analysis_options.get("cluster_context_mode", "auto")
+        _mode_idx = self.cluster_context_mode_combo.findData(_mode)
+        self.cluster_context_mode_combo.setCurrentIndex(_mode_idx if _mode_idx >= 0 else 0)
+        self.cluster_context_mode_combo.setEnabled(self.settings["llm_lookups"])
+        self.cluster_context_mode_combo.setToolTip(
+            "Stage-1 cluster-analysis strategy.\n"
+            "• Auto (default): local (Ollama) models always summarise child "
+            "clusters bottom-up so each call stays small and laptop memory "
+            "stays bounded; commercial models send the whole corpus when it "
+            "fits the context window and summarise only when it doesn't.\n"
+            "• Full corpus: always send everything; block if it overflows.\n"
+            "• Hierarchical: always summarise bottom-up (also the A/B lever vs "
+            "Full on a model that fits the full corpus)."
+        )
 
-        llm_grid.addWidget(QLabel("LLM Model ID:"), 0, 0)
-        llm_grid.addLayout(model_row, 0, 1)
-        llm_grid.addWidget(QLabel("API Key:"), 1, 0)
-        llm_grid.addWidget(self.api_key_edit, 1, 1)
-        llm_grid.addWidget(QLabel("Cluster Batch Size:"), 2, 0)
-        llm_grid.addWidget(self.cluster_batch_size_spin, 2, 1)
+        # Hierarchical/local per-call token budget (also caps Ollama num_ctx).
+        self.local_max_call_tokens_spin = QSpinBox()
+        self.local_max_call_tokens_spin.setRange(4096, 1048576)
+        self.local_max_call_tokens_spin.setSingleStep(4096)
+        self.local_max_call_tokens_spin.setValue(int(analysis_options.get("local_max_call_tokens", 32768)))
+        self.local_max_call_tokens_spin.setEnabled(self.settings["llm_lookups"])
+        self.local_max_call_tokens_spin.setToolTip(
+            "Hierarchical/local per-call token budget. Also caps Ollama's "
+            "num_ctx, so it directly bounds KV-cache memory: ~32k ≈ ~2 GB (F16) "
+            "for a 12B model. Raise for fewer/larger calls if you have RAM "
+            "headroom; lower to keep more memory free. Ignored by the full-"
+            "corpus path. Default 32768."
+        )
 
-        options_layout.addWidget(self.llm_checkbox)
-        options_layout.addLayout(llm_grid)
+        cluster_grid.addWidget(QLabel("Cluster Batch Size:"), 0, 0)
+        cluster_grid.addWidget(self.cluster_batch_size_spin, 0, 1)
+        cluster_grid.addWidget(QLabel("Cluster Context Mode:"), 1, 0)
+        cluster_grid.addWidget(self.cluster_context_mode_combo, 1, 1)
+        cluster_grid.addWidget(QLabel("Local Max Call Tokens:"), 2, 0)
+        cluster_grid.addWidget(self.local_max_call_tokens_spin, 2, 1)
+        layout.addWidget(cluster_group)
+
+        # Enrichment and prompts
+        other_group = QGroupBox("Enrichment and prompts")
+        other_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        other_layout = QVBoxLayout(other_group)
 
         self.git_checkbox = QCheckBox("Enable Git lookups for strings")
         self.git_checkbox.setToolTip("Enable Git repository-based string categorization")
@@ -1056,11 +1326,18 @@ class XReferSettingsDialog(QDialog):
         self.prompt_checkbox.setToolTip("Disable prompts when Capa results or API trace files are missing")
         self.prompt_checkbox.setChecked(self.settings["suppress_notifications"])
 
-        options_layout.addWidget(self.git_checkbox)
-        options_layout.addWidget(self.prompt_checkbox)
-        layout.addWidget(options_group)
+        other_layout.addWidget(self.git_checkbox)
+        other_layout.addWidget(self.prompt_checkbox)
+        layout.addWidget(other_group)
 
-        # Add Display Options group
+        layout.addStretch(1)
+
+    def setup_display_tab(self, tab) -> None:
+        """Presentation / view options (graphs, banners, panel width)."""
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(20, 20, 20, 16)
+        layout.setSpacing(12)
+
         display_group = QGroupBox("Display Options")
         display_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         display_layout = QGridLayout(display_group)
@@ -1091,6 +1368,32 @@ class XReferSettingsDialog(QDialog):
         width_layout.addWidget(self.panel_width_spin)
         width_layout.addStretch()
 
+        # Graph node-detail (D) artifact cap: a checkbox reveals/enables a
+        # spinbox. Off = show every artifact (current behaviour); on = cap each
+        # type (imports/strings/capa/libs) per node.
+        self.cap_graph_artifacts = QCheckBox("Cap artifacts per type in graph nodes")
+        self.cap_graph_artifacts.setToolTip(
+            "In the graph node-detail view (press D), limit how many of each artifact type "
+            "(imports / strings / capa / libs) each node lists, with a dim '(+N more)' "
+            "overflow line. Unchecked = show all artifacts."
+        )
+        self.cap_graph_artifacts.setChecked(
+            self.settings["display_options"].get("cap_graph_node_artifacts", False)
+        )
+
+        cap_layout = QHBoxLayout()
+        cap_layout.addWidget(QLabel("Cap per type: "))
+        self.graph_artifact_cap_spin = QSpinBox()
+        self.graph_artifact_cap_spin.setRange(1, 50)
+        self.graph_artifact_cap_spin.setValue(
+            self.settings["display_options"].get("graph_node_artifact_cap", 6)
+        )
+        self.graph_artifact_cap_spin.setToolTip("Maximum of each artifact type shown per node when capping is on.")
+        self.graph_artifact_cap_spin.setEnabled(self.cap_graph_artifacts.isChecked())
+        self.cap_graph_artifacts.toggled.connect(self.graph_artifact_cap_spin.setEnabled)
+        cap_layout.addWidget(self.graph_artifact_cap_spin)
+        cap_layout.addStretch()
+
         # Create spacer columns to properly position the content
         display_layout.setColumnStretch(0, 1)  # Left content column
         display_layout.setColumnStretch(1, 1)  # Middle spacing
@@ -1100,17 +1403,29 @@ class XReferSettingsDialog(QDialog):
         # Add widgets to grid layout - using columns 0 and 2 to leave column 1 as spacing
         display_layout.addWidget(self.auto_size_graphs, 0, 0)
         display_layout.addWidget(self.hide_llm_disclaimer, 1, 0)
+        display_layout.addWidget(self.cap_graph_artifacts, 2, 0)
         display_layout.addWidget(self.show_help_banner, 0, 2)
         display_layout.addLayout(width_layout, 1, 2)
+        display_layout.addLayout(cap_layout, 2, 2)
 
         layout.addWidget(display_group)
+        layout.addStretch(1)
 
-        # Paths group
-        paths_group = QGroupBox("Paths")
+    def setup_files_tab(self, tab) -> None:
+        """File locations: the editable per-sample input/output paths, plus the
+        read-only global ``~/.xrefer`` application-data locations (reference)."""
+        from qtpy.QtCore import QUrl
+        from qtpy.QtGui import QDesktopServices, QFontDatabase
+
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(20, 20, 20, 16)
+        layout.setSpacing(12)
+
+        # ── Editable per-sample input/output paths ───────────────────────
+        paths_group = QGroupBox("Sample files")
         paths_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         paths_layout = QGridLayout(paths_group)
 
-        # Path configuration
         path_configs = [("analysis", "Analysis Path"), ("trace", "API Trace Path"), ("capa", "Capa Results Path"), ("xrefs", "Indirect XRefs Path"), ("categories", "Categories Cache Path")]
 
         self.path_widgets = {}
@@ -1118,14 +1433,8 @@ class XReferSettingsDialog(QDialog):
         for path_type, label in path_configs:
             paths_layout.addWidget(QLabel(label), row, 0)
 
-            # Path edit. The hover tooltip carries the full path so
-            # the user can read it even when the displayed text is
-            # clipped — important since these can run 80+ chars.
-            # ``setCursorPosition(len(...))`` pins the visible region
-            # to the end of the path, so the filename (the meaningful
-            # part) stays visible when the field can't show the whole
-            # thing. We re-pin on textChanged so browse / default
-            # toggles keep the same affordance.
+            # Path edit. The hover tooltip carries the full path and the cursor
+            # is pinned to the end so the filename stays visible when clipped.
             path_value = self.settings["paths"][path_type]
             path_edit = ReadOnlyLineEdit(path_value)
             font = path_edit.font()
@@ -1143,13 +1452,11 @@ class XReferSettingsDialog(QDialog):
                 path_edit.setReadOnly(True)
             paths_layout.addWidget(path_edit, row, 1)
 
-            # Default checkbox
             default_check = QCheckBox("Default")
             default_check.setChecked(self.settings["use_default_paths"][path_type])
             default_check.setToolTip("Use default path")
             paths_layout.addWidget(default_check, row, 2)
 
-            # Browse button
             browse_btn = QPushButton("Browse")
             browse_btn.setEnabled(not self.settings["use_default_paths"][path_type])
             browse_btn.setToolTip("Browse for file")
@@ -1163,6 +1470,102 @@ class XReferSettingsDialog(QDialog):
             row += 1
 
         layout.addWidget(paths_group)
+
+        # ── Read-only application data (the global ~/.xrefer directory) ──
+        # Palette-derived colours so the status dots track the active theme.
+        pal = self.palette()
+        accent = pal.color(QPalette.Highlight).name()
+        text = pal.color(QPalette.WindowText)
+        window = pal.color(QPalette.Window)
+        muted = QColor(
+            (text.red() + window.red()) // 2,
+            (text.green() + window.green()) // 2,
+            (text.blue() + window.blue()) // 2,
+        ).name()
+        mono = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+
+        sdir = self.settings_manager.settings_dir
+        # (display name, absolute path) for the global, shared xrefer data.
+        rows = [
+            ("Folder", sdir),
+            ("Settings", self.settings_manager.settings_file),
+            ("Exclusions", self.settings_manager.exclusion_file),
+            ("Categories", os.path.join(sdir, "xrefer_categories.json")),
+            ("Lock", self.settings_manager.lockfile),
+        ]
+
+        group = QGroupBox("Settings and Shared Data")
+        group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        group_layout = QVBoxLayout(group)
+        group_layout.setSpacing(12)
+
+        caption = QLabel(
+            "Where XRefer stores its settings and shared data on this machine. "
+            "Shown for reference — these can't be edited here."
+        )
+        caption.setWordWrap(True)
+        caption.setStyleSheet(f"color: {muted};")
+        group_layout.addWidget(caption)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(9)
+        grid.setColumnStretch(2, 1)
+
+        for r, (name, path) in enumerate(rows):
+            exists = os.path.exists(path)
+
+            dot = QLabel("●")  # ●
+            dot.setStyleSheet(f"color: {accent if exists else muted};")
+            dot.setFixedWidth(12)
+            dot.setAlignment(Qt.AlignCenter)
+            dot.setToolTip("Present on disk" if exists else "Not created yet")
+
+            name_label = QLabel(name)
+            name_label.setMinimumWidth(80)
+
+            field = ReadOnlyLineEdit(path)
+            field.setReadOnly(True)
+            field.setFont(mono)
+            field.setToolTip(path)
+            field.setCursorPosition(0)
+
+            copy_btn = QPushButton("Copy")
+            copy_btn.setFixedWidth(60)
+            copy_btn.setToolTip("Copy this path to the clipboard")
+            copy_btn.clicked.connect(lambda _checked=False, p=path: self._copy_location_path(p))
+
+            grid.addWidget(dot, r, 0)
+            grid.addWidget(name_label, r, 1)
+            grid.addWidget(field, r, 2)
+            grid.addWidget(copy_btn, r, 3)
+
+        group_layout.addLayout(grid)
+
+        # Footer: a small legend on the left, open-folder action on the right.
+        footer = QHBoxLayout()
+        legend = QLabel(
+            f'<span style="color:{accent}">●</span> present&nbsp;&nbsp;&nbsp;'
+            f'<span style="color:{muted}">●</span> not created yet'
+        )
+        footer.addWidget(legend)
+        footer.addStretch(1)
+        open_btn = QPushButton("Open Folder")
+        open_btn.setToolTip("Open the ~/.xrefer folder in your file manager")
+        open_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(self.settings_manager.settings_dir))
+        )
+        footer.addWidget(open_btn)
+        group_layout.addLayout(footer)
+
+        layout.addWidget(group)
+        layout.addStretch(1)
+
+    def _copy_location_path(self, text: str) -> None:
+        """Copy ``text`` to the system clipboard (Data Locations copy buttons)."""
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(text)
 
     def setup_exclusion_tab(self, tab) -> None:
         """
@@ -1240,13 +1643,72 @@ class XReferSettingsDialog(QDialog):
         self.exclusion_default_check.stateChanged.connect(lambda state: self.toggle_path_default("exclusions", state))
         self.exclusion_browse_btn.clicked.connect(lambda: self.browse_path("exclusions"))
 
+    def _test_llm_connection(self) -> None:
+        """Probe the CURRENT (unsaved) model config with a minimal real
+        request — primary model always, the light/categorization model too
+        when enabled. Synchronous on purpose: seconds at most, the same
+        main-thread posture as every other LLM call in the plugin, and the
+        result lands inline instead of minutes into a failed run.
+        """
+        from xrefer.llm.base import test_model_connection
+
+        checks = []
+        primary_model = self.llm_model_combo.currentText().strip()
+        primary_key = self.api_key_edit.text().strip()
+        primary_base = self.api_base_edit.text().strip() if self.local_model_check.isChecked() else ""
+        checks.append(("Model", primary_model, primary_key, primary_base))
+
+        if self.use_light_model_check.isChecked():
+            light_model = self.light_model_combo.currentText().strip()
+            if light_model:
+                light_base = self.light_api_base_edit.text().strip() if self.light_local_check.isChecked() else ""
+                if self.light_same_key_check.isChecked():
+                    light_key = primary_key
+                else:
+                    light_key = self.light_api_key_edit.text().strip()
+                checks.append(("Categorization model", light_model, light_key, light_base))
+
+        # This module stays importable without IDA (offscreen Qt
+        # prototyping); the wait box is best-effort chrome.
+        try:
+            import idaapi
+        except ImportError:
+            idaapi = None
+
+        results = []
+        if idaapi:
+            idaapi.show_wait_box("HIDECANCEL\nTesting model connection...")
+        try:
+            for label, model_id, api_key, api_base in checks:
+                if idaapi and len(checks) > 1:
+                    idaapi.replace_wait_box(f"HIDECANCEL\nTesting {label.lower()}...")
+                ok, msg = test_model_connection(model_id, api_key=api_key, api_base=api_base)
+                results.append((label, ok, msg))
+        finally:
+            if idaapi:
+                idaapi.hide_wait_box()
+
+        all_ok = all(ok for _, ok, _ in results)
+        lines = [f"{'✓' if ok else '✗'} {label}: {msg}" for label, ok, msg in results]
+        # Green/red picked to stay readable on both dark and light themes.
+        self.test_result_label.setStyleSheet(f"color: {'#3fb950' if all_ok else '#f85149'}; font-size: 9pt;")
+        self.test_result_label.setText("\n".join(lines))
+        self.test_result_label.setVisible(True)
+
     def toggle_llm_options(self, state):
         """Toggle LLM-related controls based on checkbox state"""
         enabled = state == Qt.Checked
         self.llm_model_combo.setEnabled(enabled)
         self.refresh_models_btn.setEnabled(enabled)
         self.api_key_edit.setEnabled(enabled)
+        self.test_llm_btn.setEnabled(enabled)
         self.cluster_batch_size_spin.setEnabled(enabled)
+        self.cluster_context_mode_combo.setEnabled(enabled)
+        self.local_max_call_tokens_spin.setEnabled(enabled)
+        self.local_model_check.setEnabled(enabled)
+        self.api_base_edit.setEnabled(enabled)
+        self.use_light_model_check.setEnabled(enabled)
+        self._update_light_enabled()
 
     def refresh_model_list(self) -> None:
         """Re-download litellm's model catalog and rebuild the dropdown.
@@ -1269,29 +1731,168 @@ class XReferSettingsDialog(QDialog):
         typed = combo.currentText()
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            try:
-                import litellm
-                url = getattr(
-                    litellm,
-                    "model_cost_map_url",
-                    "https://raw.githubusercontent.com/BerriAI/litellm/main/"
-                    "model_prices_and_context_window.json",
-                )
-                fresh = litellm.get_model_cost_map(url)
-                if isinstance(fresh, dict) and fresh:
-                    litellm.model_cost = fresh
-            except Exception as exc:
-                print(f"[XRefer] Model list refresh: catalog fetch failed "
-                      f"({exc}); using cached catalog")
-            models = _curated_llm_models()
+            if self.local_model_check.isChecked():
+                # Local mode: list installed models straight from the Ollama
+                # server (litellm's catalog has none of them).
+                from xrefer.llm.ollama import list_models
+                models = list_models(self.api_base_edit.text())
+                print(f"[XRefer] Local models from Ollama: {len(models)}")
+            else:
+                try:
+                    import litellm
+                    url = getattr(
+                        litellm,
+                        "model_cost_map_url",
+                        "https://raw.githubusercontent.com/BerriAI/litellm/main/"
+                        "model_prices_and_context_window.json",
+                    )
+                    fresh = litellm.get_model_cost_map(url)
+                    if isinstance(fresh, dict) and fresh:
+                        litellm.model_cost = fresh
+                except Exception as exc:
+                    print(f"[XRefer] Model list refresh: catalog fetch failed "
+                          f"({exc}); using cached catalog")
+                models = _curated_llm_models()
+                print(f"[XRefer] Model list refreshed: {len(models)} compatible models")
             combo.blockSignals(True)
             combo.clear()
             combo.addItems(models)
             combo.setCurrentText(typed)  # preserve the user's selection
             combo.blockSignals(False)
-            print(f"[XRefer] Model list refreshed: {len(models)} compatible models")
         finally:
             QApplication.restoreOverrideCursor()
+
+    def toggle_local_model(self, checked: bool) -> None:
+        """Reveal the API base field + switch the model dropdown source when
+        'Use a local model (Ollama)' is toggled."""
+        self.api_base_label.setVisible(checked)
+        self.api_base_edit.setVisible(checked)
+        if checked and not self.api_base_edit.text().strip():
+            from xrefer.llm.ollama import DEFAULT_API_BASE
+            self.api_base_edit.setText(DEFAULT_API_BASE)
+        # The key isn't needed for local models (kept editable for a secured
+        # server); hint that in the placeholder.
+        self.api_key_edit.setPlaceholderText(
+            "(not required for local models)" if checked else "")
+        self._populate_model_combo(checked)
+
+    def _on_api_base_changed(self) -> None:
+        """Re-list local models when the base URL changes (local mode only)."""
+        if self.local_model_check.isChecked():
+            self._populate_model_combo(True)
+
+    def _populate_model_combo(self, local: bool) -> None:
+        """Fill the model dropdown from the right source — installed Ollama
+        models when local, the curated hosted catalog otherwise — preserving
+        the current text so a saved id stays selected even if absent."""
+        combo = self.llm_model_combo
+        typed = combo.currentText()
+        if local:
+            from xrefer.llm.ollama import list_models
+            models = list_models(self.api_base_edit.text())
+        else:
+            models = _curated_llm_models()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(models)
+        combo.setCurrentText(typed)
+        combo.blockSignals(False)
+
+    # ── Shared combo population (used by the light-model section) ─────────
+    def _fill_combo(self, combo, local: bool, api_base_text: str) -> None:
+        """Populate ``combo`` from the right source — installed Ollama models
+        when ``local``, else the curated hosted catalog — preserving the typed
+        text so a saved id stays selected."""
+        typed = combo.currentText()
+        if local:
+            from xrefer.llm.ollama import list_models
+            models = list_models(api_base_text)
+        else:
+            models = _curated_llm_models()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(models)
+        combo.setCurrentText(typed)
+        combo.blockSignals(False)
+
+    def _refresh_combo(self, combo, local: bool, api_base_text: str) -> None:
+        """Re-fetch the model catalog (litellm) or re-list Ollama models, then
+        repopulate ``combo``. Synchronous (IDA's Qt loop is single-threaded);
+        falls back to the bundled catalog when offline."""
+        typed = combo.currentText()
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            if local:
+                from xrefer.llm.ollama import list_models
+                models = list_models(api_base_text)
+            else:
+                try:
+                    import litellm
+                    url = getattr(
+                        litellm, "model_cost_map_url",
+                        "https://raw.githubusercontent.com/BerriAI/litellm/main/"
+                        "model_prices_and_context_window.json",
+                    )
+                    fresh = litellm.get_model_cost_map(url)
+                    if isinstance(fresh, dict) and fresh:
+                        litellm.model_cost = fresh
+                except Exception as exc:
+                    print(f"[XRefer] Model list refresh failed ({exc}); using cached catalog")
+                models = _curated_llm_models()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(models)
+            combo.setCurrentText(typed)
+            combo.blockSignals(False)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    # ── Light (categorization) model handlers ────────────────────────────
+    def toggle_use_light_model(self, checked: bool) -> None:
+        """Reveal / hide the separate categorization-model config."""
+        self.light_container.setVisible(checked)
+        self._update_light_enabled()
+
+    def toggle_light_local_model(self, checked: bool) -> None:
+        """Reveal the light API-base field + switch its dropdown source."""
+        self.light_api_base_label.setVisible(checked)
+        self.light_api_base_edit.setVisible(checked)
+        if checked and not self.light_api_base_edit.text().strip():
+            from xrefer.llm.ollama import DEFAULT_API_BASE
+            self.light_api_base_edit.setText(DEFAULT_API_BASE)
+        self._fill_combo(self.light_model_combo, checked, self.light_api_base_edit.text())
+        self._update_light_key_enabled()
+
+    def _on_light_api_base_changed(self) -> None:
+        if self.light_local_check.isChecked():
+            self._fill_combo(self.light_model_combo, True, self.light_api_base_edit.text())
+
+    def refresh_light_model_list(self) -> None:
+        self._refresh_combo(self.light_model_combo, self.light_local_check.isChecked(),
+                            self.light_api_base_edit.text())
+
+    def toggle_light_same_key(self, checked: bool) -> None:
+        self._update_light_key_enabled()
+
+    def _update_light_key_enabled(self) -> None:
+        """The light API-key field is only relevant when the section is active,
+        a separate key is wanted, and the model isn't local."""
+        on = self.llm_checkbox.isChecked() and self.use_light_model_check.isChecked()
+        local = self.light_local_check.isChecked()
+        same = self.light_same_key_check.isChecked()
+        self.light_api_key_edit.setEnabled(on and not same and not local)
+        self.light_api_key_edit.setPlaceholderText(
+            "(uses the main model's key)" if same
+            else ("(not required for local models)" if local else ""))
+
+    def _update_light_enabled(self) -> None:
+        """Enable the light-model controls only when LLM lookups AND the
+        separate-model toggle are both on."""
+        on = self.llm_checkbox.isChecked() and self.use_light_model_check.isChecked()
+        for w in (self.light_model_combo, self.light_refresh_btn, self.light_local_check,
+                  self.light_api_base_edit, self.light_same_key_check):
+            w.setEnabled(on)
+        self._update_light_key_enabled()
 
     def toggle_path_default(self, path_type, state):
         """Toggle path edit read-only state based on Default checkbox"""
@@ -1342,9 +1943,20 @@ class XReferSettingsDialog(QDialog):
             "suppress_notifications": self.prompt_checkbox.isChecked(),
             "llm_model_id": self.llm_model_combo.currentText(),
             "api_key": self.api_key_edit.text(),
+            "api_base": self.api_base_edit.text().strip() if self.local_model_check.isChecked() else "",
+            # Optional separate "light" model for categorization.
+            "use_light_model": self.use_light_model_check.isChecked(),
+            "light_model_id": self.light_model_combo.currentText(),
+            "light_api_base": self.light_api_base_edit.text().strip() if self.light_local_check.isChecked() else "",
+            "light_use_primary_key": self.light_same_key_check.isChecked(),
+            # Store the light key only when a separate one is wanted (else reuse
+            # the primary key at config-resolve time).
+            "light_api_key": "" if self.light_same_key_check.isChecked() else self.light_api_key_edit.text(),
             "enable_exclusions": self.enable_exclusion_checkbox.isChecked(),
             "analysis_options": {
                 "cluster_batch_size": self.cluster_batch_size_spin.value(),
+                "cluster_context_mode": self.cluster_context_mode_combo.currentData() or "auto",
+                "local_max_call_tokens": self.local_max_call_tokens_spin.value(),
             },
             # Add display options
             "display_options": {
@@ -1352,6 +1964,8 @@ class XReferSettingsDialog(QDialog):
                 "hide_llm_disclaimer": self.hide_llm_disclaimer.isChecked(),
                 "show_help_banner": self.show_help_banner.isChecked(),
                 "default_panel_width": self.panel_width_spin.value(),
+                "cap_graph_node_artifacts": self.cap_graph_artifacts.isChecked(),
+                "graph_node_artifact_cap": self.graph_artifact_cap_spin.value(),
             },
             "use_default_paths": {"exclusions": self.exclusion_default_check.isChecked()},
             "paths": {"exclusions": self.exclusion_path_edit.text()},
@@ -1384,7 +1998,10 @@ class XReferSettingsDialog(QDialog):
             # Repopulate tables if either exclusions changed or exclusions state changed
             if exclusions_changed or exclusions_state_changed:
                 plugin_instance.xrefer_view.xrefer_obj.clear_affected_function_tables()
-                plugin_instance.xrefer_view.update(True)
+            # Repaint the current view so display-only changes (e.g. the graph
+            # artifact cap, panel width) take effect immediately instead of
+            # waiting for the next keystroke.
+            plugin_instance.xrefer_view.update(True)
 
         self.accept()
 

@@ -6,11 +6,11 @@ Once the plugin has been installed, loaded and your IDB is open, go to `Edit->XR
 
 ![config.png](../images/config.png)
 
-XRefer will run without any external data sources however depending on the scenario, external data may improve the results. If you are able to provide the results file (JSON) from capa and/or a sandbox trace from either VMRay or CAPE sandbox, that will always be recommended. You can also write and add your own custom trace parser (for example for TTD traces) to XRefer. A bulk of the functionality around clustering will not be available if a Gemini API key is not setup. Currently, XRefer is only allowing and recommending `gemini-2.5-pro` model, however that can and will likely change in the future. After setting up the key and enabling LLM lookups, go to `Edit->XRefer->Run Analysis` and choose between `Default` and `Custom` entry points. For a normal executable the default is the recommended option to go with. For DLLs/libraries however you can choose which export seems the most interesting and go with it.
+XRefer will run without any external data sources however depending on the scenario, external data may improve the results. If you are able to provide the results file (JSON) from capa and/or a sandbox trace from either VMRay or CAPE sandbox, that will always be recommended. You can also write and add your own custom trace parser (for example for TTD traces) to XRefer. A bulk of the functionality around clustering requires an LLM. XRefer supports hosted providers — Gemini, OpenAI, Anthropic, xAI and Qwen (DashScope) — as well as fully local models via [Ollama](https://ollama.com) (enable "Use a local model" in the Configure dialog; no API key needed). The defaults are `gemini/gemini-flash-latest` for the deep cluster analysis and `gemini/gemini-flash-lite-latest` for the high-volume categorization; any model from the dropdown (or a custom id) works, and the **Test** button next to the API key validates your model/key/server with one minimal request before you commit to a run. Note on data handling: with a hosted provider, extracted artifacts (strings, API names, cluster summaries) are sent to that provider's API; a local Ollama model keeps everything on your machine. After setting up the model and enabling LLM lookups, go to `Edit->XRefer->Run Analysis` and choose between `Default` and `Custom` entry points. For a normal executable the default is the recommended option to go with. For DLLs/libraries however you can choose which export seems the most interesting and go with it.
 
 *Note 1: If you choose the wrong export in a DLL for analysis i.e. a function that barely has any execution paths, the path analysis will be somewhat slower. This is because XRefer conducts a BFS search to establish paths between entrypoints and artifact containing functions. If the function you have selected really does not lead anywhere, XRefer's BFS will try and exhaust all nodes in trying to establish paths between functions where none exist and this will be slower than the path analysis of an actually interesting export.*
 
-*Note 2: When any LLM lookups are performed (Artifact Categorization, Interesting Artifacts Analysis, Cluster Analysis etc), due to the single-threaded nature of IDA Python, IDA will seem to hang. No interaction is required at this point, please wait and let the lookups complete and IDA will be back to normal. A work around for this has yet to be implemented.*
+*Note 2: When LLM lookups run (artifact categorization, cluster analysis), IDA's single-threaded Python keeps the UI blocked for the duration of each call. The wait box shows per-call timing and an estimate of the remaining time, and the per-batch phases can be cancelled between calls via the wait box's Cancel button — partial results are kept.*
 
 When the LLM lookups are enabled, for convenient browsing XRefer also categorizes the artifacts (strings, libs, capa, APIs and API calls) it extracts e.g. `File and Path I/O`, `Network I/O` etc. This cache is stored locally on the system at `/ida_user_dir/xrefer/xrefer_categories.json` and keeps building up as you analyze more samples. Which means your first few runs are likely going to be your slowest, after which most common artifacts will have their categories already stored locally. 
 
@@ -35,11 +35,15 @@ The base/home view is where the context-aware navigation comes in. This view cha
 Click on `+` icons in the base view to expand/collapse tables and click on arrows `→` before API artifacts to expand their corresponding API calls (if ingested during analysis).
 
 ![expansions.png](../images/expansions.png)
-#### Global Search
+#### Search and Filtering
 
-You can quickly search through all the artifacts in one go by pressing `S` and typing the search term in the base view.
+You can quickly search through the current function's artifacts by pressing `S` and typing the search term in the base view.
 
 ![search 1.png](../images/search.png)
+
+To search across the *whole binary* instead, press `Shift+S` from the base view. This artifact search matches every import, library, string and capa rule as you type, grouped per type with each row listing its referencing addresses (strings with no resolvable code reference fall back to their storage address). From a result row, `X` opens the full cross-reference listing, `G` opens the artifact's path graph, and double-clicking an address jumps to it in the disassembly.
+
+The long reading views — the full API trace, the orphan artifacts view and the cluster table — also support a lightweight type-to-filter: press `S` inside them and type to narrow the rows (in the cluster table, whole cluster blocks are kept or dropped, with ancestors of a match retained). Backspace edits the filter, the first `ESC` clears it and the next one exits.
 
 As a rule of thumb, the `ESC` key will always act like a back button and return you to the previous state in your navigation history. In this instance pressing `ESC` will exit the search mode and bring you back to the base view.
 
@@ -115,7 +119,7 @@ Once the cluster analysis has been performed, you can add prefix labels to funct
 
 | Prefix       | Description                                                                                                            |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------- |
-| \<cluster\>_ | Single-cluster functions using Gemini-suggested prefixes specific to their cluster's role                              |
+| \<cluster\>_ | Single-cluster functions using LLM-suggested prefixes specific to their cluster's role                                 |
 | xutil_       | Utility functions that serve multiple clusters (e.g., memory operations, string handling, logging, runtime operations) |
 | xint_        | Intermediate nodes that connect functions within or between clusters but aren't strictly part of any cluster           |
 | xunc_        | Functions that don't belong to any cluster                                                                             |
