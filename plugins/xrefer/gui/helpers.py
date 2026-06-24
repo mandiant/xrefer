@@ -364,7 +364,8 @@ class CollapseIndicator(QtWidgets.QWidget):
         self.reposition()
 
 
-from xrefer.core.helpers import convert_int_to_hex, create_table_from_rows, enrich_string_data_core, find_cluster_analysis, get_visible_width, render_markdown_segments, sort_clusters, strip_cluster_citations, word_wrap_text, set_log_function
+from xrefer.core.clusters import cluster_filter_match_ids, cluster_subtree_matches
+from xrefer.core.helpers import convert_int_to_hex, create_table_from_rows, enrich_string_data_core, find_cluster_analysis, get_visible_width, in_cancellable_phase, render_markdown_segments, set_progress_function, sort_clusters, strip_cluster_citations, word_wrap_text, set_log_function
 
 
 def render_markdown_report_lines(md: str, width: int = 85, indent: str = "") -> List[str]:
@@ -419,11 +420,12 @@ def render_markdown_report_lines(md: str, width: int = 85, indent: str = "") -> 
     return lines
 
 
-def enrich_string_data(str_indexes: List[int], entity_list: List[str], lookup: bool = True, max_threads: int = 50) -> List[Tuple[str, str, int, str, dict, list]]:
+def enrich_string_data(str_indexes: List[int], entity_list: List[str], lookup: bool = True, max_threads: int = 12) -> List[Tuple[str, str, int, str, dict, list]]:
     """
-    Enrich string information by searching in Git repositories.
+    Enrich string information by searching public GitHub code.
 
-    Performs parallel queries to grep.app API to find string usage in public repositories.
+    Performs parallel queries to the Grep MCP server (the supported successor to
+    the old grep.app HTTP API) to find string usage in public repositories.
     Enriches strings with repository context and matched code lines.
 
     Args:
@@ -536,6 +538,17 @@ def set_xref_coverage_color(line: str, xref_str: str, covered: bool = False) -> 
     return line
 
 
+def _update_wait_box(string: str) -> None:
+    """Box-only progress sink (no Output print) — the high-frequency half
+    of core's log_progress. During a cancellable phase the update must not
+    re-assert HIDECANCEL, or a progress line would strip the Cancel button
+    the phase relies on."""
+    if in_cancellable_phase():
+        idaapi.replace_wait_box(string)
+    else:
+        idaapi.replace_wait_box(f"HIDECANCEL\n{string}")
+
+
 def log(string: str) -> None:
     """
     Log message to IDA's output window with XRefer prefix.
@@ -546,9 +559,15 @@ def log(string: str) -> None:
         string (str): Message to log
     """
     print(f"[XRefer] {string}")
-    idaapi.replace_wait_box(f"HIDECANCEL\n{string}")
+    _update_wait_box(string)
 
-    set_log_function(log)
+
+# Route the core layer's logging and progress sinks through the IDA
+# implementations at import time (module level, not inside log() — the old
+# in-body registration only took effect after the first GUI log call and
+# re-registered on every call).
+set_log_function(log)
+set_progress_function(_update_wait_box)
 
 def log_elapsed_time(msg: str, start_time: float) -> None:
     """
@@ -1094,7 +1113,7 @@ def calculate_first_column_width(clusters, analysis_data):
     return max_width + 15  # minimum space for arrow
 
 
-def create_cluster_rows(cluster, analysis, column_width, paths, library_ids: Optional[Set[int]] = None):
+def create_cluster_rows(cluster, analysis, column_width, paths, library_ids: Optional[Set[int]] = None, match_ids: Optional[Set[int]] = None):
     """
     Create properly aligned rows for a cluster with visual indicators for entry points.
     Dynamically arranges description and function list in parallel, with properly colored separator.
@@ -1107,6 +1126,8 @@ def create_cluster_rows(cluster, analysis, column_width, paths, library_ids: Opt
         library_ids: Optional set of cluster IDs to skip during subcluster
             recursion (used by ``draw_cluster_hierarchy`` to hide library
             clusters). ``None`` is equivalent to no filtering.
+        match_ids: When not None, subcluster blocks render only when
+            their subtree contains a matched id (per-view filter).
 
     Returns:
         List[List[str]]: Formatted rows for display
@@ -1234,10 +1255,12 @@ def create_cluster_rows(cluster, analysis, column_width, paths, library_ids: Opt
     # trimmed direct subclusters so user-code nested under library
     # ancestors still surfaces.
     for subcluster in _lifted_descendants(cluster.subclusters, library_ids):
+        if match_ids is not None and not cluster_subtree_matches(subcluster, match_ids):
+            continue
         # Add exactly one empty row before each subcluster
         rows.append(["", ""])
 
-        sub_rows = create_cluster_rows(subcluster, analysis, column_width, paths, library_ids=library_ids)
+        sub_rows = create_cluster_rows(subcluster, analysis, column_width, paths, library_ids=library_ids, match_ids=match_ids)
         # Remove the trailing empty row that comes with sub_rows to avoid accumulation
         if sub_rows and not sub_rows[-1][0] and not sub_rows[-1][1]:
             sub_rows.pop()
@@ -1248,7 +1271,7 @@ def create_cluster_rows(cluster, analysis, column_width, paths, library_ids: Opt
     return rows
 
 
-def draw_cluster_hierarchy(clusters, analysis, paths, hide_library: bool = False):
+def draw_cluster_hierarchy(clusters, analysis, paths, hide_library: bool = False, flt: str = "", name_resolver=None):
     """
     Draw all clusters in a hierarchical table format with proper sorting.
 
@@ -1260,6 +1283,13 @@ def draw_cluster_hierarchy(clusters, analysis, paths, hide_library: bool = False
             recursively) marked ``is_library`` is omitted. When False,
             only the leading boot/CRT prefix at each EP is omitted —
             middle/tail library clusters are kept.
+        flt: Per-view filter text. When non-empty, only cluster blocks
+            whose subtree contains a match render (ancestors of matches
+            stay so the tree remains rooted). Matching is computed HERE,
+            against the same trim set the renderer uses — text inside a
+            hidden library block must neither match nor resurrect it.
+        name_resolver: Optional address→function-name callable for the
+            filter (the view passes idc.get_func_name).
 
     Returns:
         List[str]: Formatted lines ready for display
@@ -1282,6 +1312,13 @@ def draw_cluster_hierarchy(clusters, analysis, paths, hide_library: bool = False
     # Sort clusters
     sorted_clusters = sort_clusters(visible_clusters, paths)
 
+    match_ids = None
+    if flt:
+        match_ids = cluster_filter_match_ids(clusters, analysis, flt, name_resolver=name_resolver, excluded_ids=library_ids)
+        sorted_clusters = [c for c in sorted_clusters if cluster_subtree_matches(c, match_ids)]
+        if not sorted_clusters:
+            return ["    NO CLUSTERS MATCH — backspace edits, ESC clears the filter"]
+
     # Calculate required column width based on all clusters
     column_width = calculate_first_column_width(sorted_clusters, analysis)
 
@@ -1295,7 +1332,7 @@ def draw_cluster_hierarchy(clusters, analysis, paths, hide_library: bool = False
         if first_non_ep_cluster and cluster.parent_cluster_id is None and not any(ep in cluster.nodes for ep in paths):
             first_non_ep_cluster = False
 
-        cluster_rows = create_cluster_rows(cluster, analysis, column_width, paths, library_ids=library_ids)
+        cluster_rows = create_cluster_rows(cluster, analysis, column_width, paths, library_ids=library_ids, match_ids=match_ids)
         all_rows.extend(cluster_rows)
 
         # Add spacing between primary clusters
@@ -1455,7 +1492,8 @@ def help_text() -> List[str]:
  GLOBAL KEYS (available in every view):
  [ESC]      Go back one view, or (at home) switch focus back to IDA
  [ENTER]    Return to the home view (per-function tables)
- [H]        Show / hide this help
+ [H]        Show / hide this help (except while typing a search filter,
+            where 'h' goes into the filter text)
  [N]        Rename the function / reference under the cursor
  (MOUSE)    Click = expand row / open cluster / show call details;
             Double-click = select artifact or jump to address; Hover = tooltip
@@ -1464,8 +1502,10 @@ def help_text() -> List[str]:
 
  HOME VIEW (initial state — per-function cross-reference tables):
  [S]    Search / filter the current view (then type to filter)
+ [Shift+S] Search artifacts across the WHOLE binary (imports, libs, strings, capa)
  [T]    Trace API calls; press again to cycle function -> path -> full scope
  [C]    Cluster relationship graph
+ [K]    ATT&CK matrix (kill-chain coverage of the clusters)
  [O]    Show orphan artifacts (no path to an entry point)
  [X]    Cross-reference listing for the artifact under the cursor
  [G]    Artifact path graph for the artifact under the cursor
@@ -1489,11 +1529,22 @@ def help_text() -> List[str]:
 
  ----------------------------------------
 
+ ARTIFACT SEARCH ([Shift+S] from home — binary-wide):
+ Type to filter every import, library, string and capa rule in the
+ binary; rows list each artifact's referencing addresses
+ [X]    Cross-references for the artifact under the cursor
+ [G]    Artifact path graph for the artifact under the cursor
+ (MOUSE) Double-click an address to jump to it; click ▸/▾ to fold a table
+ [ESC/ENTER] Exit to the home view
+
+ ----------------------------------------
+
  TRACE SCOPES (after pressing [T] in home view):
  [T]    Cycle scope: function -> path -> full -> function
           - function: API calls in the current function
           - path:     calls along paths reaching this function
           - full:     all recorded calls in the trace
+ [S]    Filter the rows (full trace; type to narrow, ESC clears)
  [U]    Toggle exclusions on / off
  [ESC/ENTER] Return to home view
 
@@ -1501,20 +1552,37 @@ def help_text() -> List[str]:
 
  CLUSTERS & CLUSTER GRAPHS (after pressing [C] in home view):
  [C]    Toggle between cluster table and cluster relationship graph
+ [S]    Filter cluster blocks in the table (type to narrow; ancestors of
+        matches stay; ESC clears)
  [L]    Show / hide library clusters
  [R]    Toggle cluster description / full report view
  [J]    Toggle cluster sync (follow the IDA cursor across clusters)
  [G]    Pin / unpin the cluster graph
  [M]    Intermediate paths through the cursor function
  [A]    While in intermediate-paths view: scope this cluster <-> all clusters
+ [K]    ATT&CK matrix for these clusters (scoped to the current cluster)
  [V]    Neighborhood: clusters reachable from the cursor function
  [ESC]  Step back through visited clusters;  [ENTER] returns home
+
+ ----------------------------------------
+
+ ATT&CK MATRIX (after pressing [K] from the home or a cluster view):
+ Kill-chain coverage built from the clusters' MITRE ATT&CK mappings:
+ a per-tactic coverage strip, then techniques grouped by tactic, each
+ with a rationale and the cluster(s) that ground it.
+ [K]    Exit the matrix
+ [G]    Open the ATT&CK heat-grid popup (Navigator-style, cells shaded by coverage)
+ [L]    Show / hide library clusters (binary-wide view)
+ (MOUSE) Click a cluster.id.xxxx to open that cluster;
+            click a T#### id to open its attack.mitre.org page
+ [ESC/ENTER] Return to the previous view / home
 
  ----------------------------------------
 
  ARTIFACT PATH GRAPH (after pressing [G] on an artifact):
  [G]    Pin / unpin the graph
  [S]    Toggle simplified / normal graph representation
+ [D]    Node detail: show / hide each node's direct artifacts in the box
  [V]    Neighborhood: clusters reachable from the cursor function
  (MOUSE) Hover / click / double-click nodes for details or navigation
  [ESC/ENTER] Return to home view
@@ -1523,6 +1591,7 @@ def help_text() -> List[str]:
 
  NEIGHBORHOOD VIEW (after pressing [V]):
  Shows the cursor function centered, with adjacent clusters around it
+ [G]    Pin / unpin the neighborhood graph (survives navigation)
  [V]    Exit the neighborhood view
  [M]    Intermediate paths through the cursor function
  [ESC/ENTER] Return to the previous view / home
@@ -1530,6 +1599,7 @@ def help_text() -> List[str]:
  ----------------------------------------
 
  ORPHAN ARTIFACTS (after pressing [O] in home view):
+ [S]    Filter the rows (type to narrow, ESC clears)
  [E]    Expand / collapse table sections
  [O]    Exit the orphans view
  [ESC/ENTER] Return to home view
@@ -1556,7 +1626,7 @@ def help_text() -> List[str]:
  ----------------------------------------
 
  MOUSE INTERACTIONS:
-  - Click: expand a row ([+]/[-]), open a cluster id, or show call details (->/v)
+  - Click: expand/collapse a section (click the ▸/▾ header row), open a cluster id, or expand call details (→)
   - Double-click: select / deselect an artifact, or jump to an address
   - Hover: tooltip with details
   - Right-click: copy / export actions (e.g. copy strings)

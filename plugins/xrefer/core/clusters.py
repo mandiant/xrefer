@@ -21,6 +21,12 @@ from networkx import NetworkXError
 from xrefer.backend import Address, BackEnd
 from xrefer.core.helpers import find_cluster_analysis, log
 
+# Per-cluster frequent-node-cleanup narration (six lines per touched
+# cluster) buried real warnings in the Output window. The cleanup logs a
+# one-line summary by default; flip this for the full per-cluster trace
+# when debugging cluster decomposition.
+DEBUG_CLUSTER_CLEANUP = False
+
 
 class FunctionalCluster:
     """
@@ -169,7 +175,18 @@ class FunctionalCluster:
 
             return f"{centered_addr}\n{centered_name}"
 
-        def format_node_label(node: int) -> str:
+        # Resolve "real intermediate" membership once: every node on any
+        # intermediate path that is not a member, a cluster reference or the
+        # root. is_real_intermediate answers per node with a full scan over
+        # intermediate_paths; this graph build asks per edge endpoint, so the
+        # per-call scans dominated large-cluster rendering.
+        path_nodes: Set[int] = set()
+        for paths in self.intermediate_paths.values():
+            for path in paths:
+                path_nodes.update(path)
+        real_intermediates = path_nodes - self.nodes - set(self.cluster_refs) - {self.root_node}
+
+        def _format_node_label_uncached(node: int) -> str:
             """
             Format label for a node, handling cluster references and function nodes.
             """
@@ -199,12 +216,23 @@ class FunctionalCluster:
             label = format_function_label(node)
 
             # Add intermediate marker only for true intermediates
-            if self.is_real_intermediate(node):
+            if node in real_intermediates:
                 lines = label.split("\n")
                 width = max(len(line) for line in lines)
                 marker = center_text("(i)", width)
                 label = f"{label}\n{marker}"
 
+            return label
+
+        # Labels are requested once per edge endpoint; memoize so each node
+        # pays its backend name lookup / analysis scan only once per build.
+        label_cache: Dict[int, str] = {}
+
+        def format_node_label(node: int) -> str:
+            label = label_cache.get(node)
+            if label is None:
+                label = _format_node_label_uncached(node)
+                label_cache[node] = label
             return label
 
         g = nx.DiGraph()
@@ -233,7 +261,7 @@ class FunctionalCluster:
                         # If intermediate nodes are not included, skip edges that introduce real intermediates
                         if not include_intermediate:
                             # If either node is a real intermediate node, skip this edge
-                            if self.is_real_intermediate(curr) or self.is_real_intermediate(next_node):
+                            if curr in real_intermediates or next_node in real_intermediates:
                                 continue
 
                         # Skip if we've already processed this edge
@@ -252,7 +280,7 @@ class FunctionalCluster:
         candidate_nodes.update(self.cluster_refs.keys())
 
         for node in candidate_nodes:
-            if not include_intermediate and self.is_real_intermediate(node):
+            if not include_intermediate and node in real_intermediates:
                 # Skip intermediate nodes if not including them
                 continue
             node_label = format_node_label(node)
@@ -260,6 +288,194 @@ class FunctionalCluster:
                 g.add_node(node_label)
 
         return g
+
+
+def cluster_ids(clusters: List["FunctionalCluster"]) -> Set[int]:
+    """All cluster ids (top-level + nested subclusters) in ``clusters``."""
+    ids: Set[int] = set()
+
+    def _walk(c: "FunctionalCluster") -> None:
+        ids.add(c.id)
+        for sub in c.subclusters:
+            _walk(sub)
+
+    for c in clusters:
+        _walk(c)
+    return ids
+
+
+def cluster_filter_match_ids(clusters: List["FunctionalCluster"], analysis: Optional[Dict], flt: str, name_resolver=None, excluded_ids: Optional[Set[int]] = None) -> Set[int]:
+    """IDs of clusters whose own table block matches ``flt`` (case-
+    insensitive substring).
+
+    The searchable text mirrors what the cluster table renders for a
+    block: the ``[NNNN]`` id (plus the canonical ``cluster.id.NNNN``
+    citation token), the label / description / relationships from
+    ``analysis``, and the member nodes as 0x-hex addresses plus their
+    function names — full and the 13-char rendered truncation — when a
+    ``name_resolver`` is provided (the GUI passes one; headless callers
+    may omit it).
+
+    ``excluded_ids`` are clusters the renderer is trimming (hidden
+    library / boot-prefix blocks): their own text must not match — a hit
+    inside an invisible block would keep ancestors that show no visible
+    match — but recursion continues through them, because lifted
+    descendants still render and must stay searchable.
+    """
+    matched: Set[int] = set()
+    flt = (flt or "").lower()
+    if not flt:
+        return matched
+    excluded = excluded_ids or set()
+
+    def _visit(cluster: "FunctionalCluster") -> None:
+        if cluster.id not in excluded:
+            parts = [f"[{cluster.id_str}]"]
+            # The citation token stays searchable, but substrings of its
+            # constant prefix ("cluster", "id.") would match every block
+            # — include it only when the filter discriminates.
+            if flt not in "cluster.id.":
+                parts.append(f"cluster.id.{cluster.id_str}")
+            data = find_cluster_analysis(analysis or {}, cluster.id)
+            if data:
+                parts.extend(str(data.get(key) or "") for key in ("label", "description", "relationships"))
+            for node in cluster.nodes:
+                parts.append(f"0x{int(node):x}")
+                if name_resolver is not None:
+                    name = str(name_resolver(node) or "")
+                    parts.append(name)
+                    if len(name) > 13:
+                        # The table renders long names as name[:11] + ".."
+                        # — typing the on-screen form must match too.
+                        parts.append(f"{name[:11]}..")
+            if flt in " ".join(parts).lower():
+                matched.add(cluster.id)
+        for sub in cluster.subclusters:
+            _visit(sub)
+
+    for cluster in clusters or []:
+        _visit(cluster)
+    return matched
+
+
+def cluster_subtree_matches(cluster: "FunctionalCluster", match_ids: Set[int]) -> bool:
+    """True when the cluster or any descendant is in ``match_ids``.
+
+    The block filter keeps/drops whole cluster blocks; ancestors of a
+    match are kept so the match stays rooted in the rendered tree.
+    """
+    if cluster.id in match_ids:
+        return True
+    return any(cluster_subtree_matches(sub, match_ids) for sub in cluster.subclusters)
+
+
+def compute_closures(clusters: List["FunctionalCluster"]) -> List[List["FunctionalCluster"]]:
+    """Partition top-level clusters into independent **closures** — maximal
+    groups that are linked and therefore must be analyzed together.
+
+    A closure is a connected component of the link graph whose nodes are
+    top-level clusters and whose edges come from ``cluster_refs`` (a node in
+    one cluster "replaced by" another cluster — the analysis of the first
+    genuinely needs the second's context). Subclusters are never separate
+    nodes: each maps to its top-level root, so a subcluster's ref pulls the
+    whole top-level cluster into the component — i.e. a cluster is never split
+    from its subclusters. Within a returned closure every ``cluster_ref``
+    resolves to a cluster also in that closure, so it is self-contained (no
+    dangling cross-references).
+
+    Returns a list of closures, each a list of top-level FunctionalClusters,
+    in a deterministic order (by the smallest cluster id in the closure).
+    A cluster with no links forms its own singleton closure.
+    """
+    # Map every cluster id (top-level or nested) to its top-level root id.
+    id_to_root: Dict[int, int] = {}
+    root_obj: Dict[int, "FunctionalCluster"] = {}
+
+    def _map(c: "FunctionalCluster", root_id: int) -> None:
+        id_to_root[c.id] = root_id
+        for sub in c.subclusters:
+            _map(sub, root_id)
+
+    for top in clusters:
+        root_obj[top.id] = top
+        _map(top, top.id)
+
+    graph = nx.Graph()
+    graph.add_nodes_from(root_obj.keys())  # isolated clusters are singletons
+
+    def _edges(c: "FunctionalCluster") -> None:
+        src_root = id_to_root[c.id]
+        for ref_id in c.cluster_refs.values():
+            tgt_root = id_to_root.get(ref_id)
+            if tgt_root is not None and tgt_root != src_root:
+                graph.add_edge(src_root, tgt_root)
+        for sub in c.subclusters:
+            _edges(sub)
+
+    for top in clusters:
+        _edges(top)
+
+    closures: List[List["FunctionalCluster"]] = []
+    for component in nx.connected_components(graph):
+        closures.append([root_obj[rid] for rid in sorted(component)])
+    closures.sort(key=lambda cl: min(c.id for c in cl))
+    return closures
+
+
+def bottomup_waves(clusters: List["FunctionalCluster"]) -> List[List["FunctionalCluster"]]:
+    """Order the subcluster **containment** hierarchy leaves-first, in waves.
+
+    Returns a list of waves; each wave is a list of unique clusters whose
+    subclusters all appear in EARLIER waves. Wave 0 is the leaf clusters (no
+    subclusters). A cluster shared by several parents (the ``subcluster_cache``
+    DAG in ``decompose_into_clusters``) appears EXACTLY ONCE — in the earliest
+    wave its own children allow — so it is analysed and summarised a single
+    time and both parents reuse that summary. Within a wave, no cluster is an
+    ancestor or descendant of another, so they can be analysed together.
+
+    This is the schedule hierarchical bottom-up stage-1 walks: each cluster is
+    analysed with full detail for its OWN functions plus its already-summarised
+    children, so a call's size is bounded by local fan-out (which
+    ``branching_threshold`` already caps) rather than the whole binary — the
+    property that lets a big binary fit a small/local model on a laptop.
+
+    Deterministic: clusters within a wave are ordered by id, waves by depth.
+    Containment is acyclic by construction; a defensive guard still emits any
+    stuck remainder rather than looping forever.
+    """
+    # Collect every unique cluster (top-level + nested) keyed by id.
+    by_id: Dict[int, "FunctionalCluster"] = {}
+
+    def _collect(c: "FunctionalCluster") -> None:
+        if c.id in by_id:
+            return
+        by_id[c.id] = c
+        for sub in c.subclusters:
+            _collect(sub)
+
+    for c in clusters:
+        _collect(c)
+
+    done: Set[int] = set()
+    remaining: Set[int] = set(by_id.keys())
+    waves: List[List["FunctionalCluster"]] = []
+
+    while remaining:
+        ready = [
+            cid for cid in remaining
+            if all(sub.id in done for sub in by_id[cid].subclusters)
+        ]
+        if not ready:
+            # Containment should be acyclic, so this never fires in practice;
+            # if a cycle ever slipped in, emit the rest in id order as one
+            # final wave so the scheduler terminates instead of spinning.
+            ready = sorted(remaining)
+        ready.sort()
+        waves.append([by_id[cid] for cid in ready])
+        done.update(ready)
+        remaining.difference_update(ready)
+
+    return waves
 
 
 class ClusterManager:
@@ -382,8 +598,9 @@ class ClusterManager:
             log("No nodes found exceeding frequency threshold")
             return
 
-        log(f"Found {len(nodes_to_remove)} nodes appearing in >{frequency_threshold} clusters:")
-        log(f"Frequent nodes: {', '.join(f'0x{node:x}' for node in sorted(nodes_to_remove))}\n")
+        log(f"Found {len(nodes_to_remove)} nodes appearing in >{frequency_threshold} clusters")
+        if DEBUG_CLUSTER_CLEANUP:
+            log(f"Frequent nodes: {', '.join(f'0x{node:x}' for node in sorted(nodes_to_remove))}\n")
 
         def clean_cluster(cluster: "FunctionalCluster", depth: int = 0) -> None:
             """
@@ -400,7 +617,8 @@ class ClusterManager:
             cluster_type = "Cluster" if depth == 0 else "Subcluster"
 
             if remaining_size < min_cluster_size:
-                log(f"{indent}{cluster_type} {cluster.id} preserved - would have only {remaining_size} nodes (current: {original_size})")
+                if DEBUG_CLUSTER_CLEANUP:
+                    log(f"{indent}{cluster_type} {cluster.id} preserved - would have only {remaining_size} nodes (current: {original_size})")
             else:
                 # Store pre-cleanup state
                 pre_cleanup_nodes = set(cluster.nodes)
@@ -436,20 +654,20 @@ class ClusterManager:
                 final_size = len(cluster.nodes)
                 removed_nodes = pre_cleanup_nodes - cluster.nodes
 
-                log(f"{indent}{cluster_type} {cluster.id}:")
-                log(f"{indent}  Nodes: {original_size} → {final_size} ({len(removed_nodes)} removed)")
-                log(f"{indent}  Removed nodes: {', '.join(f'0x{n:x}' for n in sorted(removed_nodes))}")
-
-                if root_changed:
-                    log(f"{indent}  Root node changed: 0x{old_root:x} → 0x{cluster.root_node:x}")
-
+                if DEBUG_CLUSTER_CLEANUP:
+                    log(f"{indent}{cluster_type} {cluster.id}:")
+                    log(f"{indent}  Nodes: {original_size} → {final_size} ({len(removed_nodes)} removed)")
+                    log(f"{indent}  Removed nodes: {', '.join(f'0x{n:x}' for n in sorted(removed_nodes))}")
+                    if root_changed:
+                        log(f"{indent}  Root node changed: 0x{old_root:x} → 0x{cluster.root_node:x}")
+                    log("")  # Empty line for readability
+                # A cluster losing every valid node is a real warning, not
+                # narration — always surfaced.
                 if hasattr(cluster, "marked_for_removal"):
-                    log(f"{indent}  ⚠️ Cluster marked for removal - no valid nodes remain")
-
-                log("")  # Empty line for readability
+                    log(f"{indent}  ⚠️ {cluster_type} {cluster.id} marked for removal - no valid nodes remain")
 
             # Process subclusters
-            if cluster.subclusters:
+            if cluster.subclusters and DEBUG_CLUSTER_CLEANUP:
                 log(f"{indent}Processing {len(cluster.subclusters)} subclusters of {cluster_type} {cluster.id}:")
 
             for subcluster in cluster.subclusters:
@@ -459,11 +677,8 @@ class ClusterManager:
             original_subcluster_count = len(cluster.subclusters)
             cluster.subclusters = [sub for sub in cluster.subclusters if not hasattr(sub, "marked_for_removal")]
 
-            if original_subcluster_count != len(cluster.subclusters):
+            if original_subcluster_count != len(cluster.subclusters) and DEBUG_CLUSTER_CLEANUP:
                 log(f"{indent}Removed {original_subcluster_count - len(cluster.subclusters)} empty subclusters from {cluster_type} {cluster.id}")
-
-        log("\nStarting cluster cleanup:")
-        log("=" * 50)
 
         # Clean all clusters
         original_cluster_count = len(clusters)
@@ -473,11 +688,8 @@ class ClusterManager:
         # Remove empty root clusters
         clusters[:] = [cluster for cluster in clusters if not hasattr(cluster, "marked_for_removal")]
 
-        log("\nCleanup Summary:")
-        log("=" * 50)
-        log(f"Original clusters: {original_cluster_count}")
-        log(f"Final clusters: {len(clusters)}")
-        log(f"Clusters removed: {original_cluster_count - len(clusters)}")
+        log(f"Frequent-node cleanup: {original_cluster_count} -> {len(clusters)} clusters "
+            f"({original_cluster_count - len(clusters)} removed)")
 
     @staticmethod
     def decompose_into_clusters(

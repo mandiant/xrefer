@@ -1,4 +1,4 @@
-"""Port of com.github.mdr.ascii.java.GraphLayouter (GraphLayouter.java). STUB."""
+"""Port of com.github.mdr.ascii.java.GraphLayouter (GraphLayouter.java)."""
 from __future__ import annotations
 
 

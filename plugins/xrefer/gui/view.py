@@ -18,7 +18,7 @@ import re
 import traceback
 import weakref
 from collections import OrderedDict, defaultdict
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple, Union
 
 import ida_bytes
 import ida_funcs
@@ -35,11 +35,12 @@ from qtpy import QtCore, QtGui, QtWidgets
 
 from xrefer._vendor import ascii_graphs
 from xrefer.core.analyzer import ApiCall, XRefer
-from xrefer.core.helpers import (find_cluster_analysis, get_addr_from_text, longest_line_length, parse_cluster_id, remove_non_displayable, strip_color_codes,
-                                 word_wrap_text, wrap_substring_with_string)
+from xrefer.core.helpers import (cap_artifact_entries, find_cluster_analysis, get_addr_from_text, longest_line_length, parse_cluster_id, remove_non_displayable,
+                                 strip_color_codes, word_wrap_text, wrap_substring_with_string)
+from xrefer.core.mitre import aggregate_mitre_matrix, mitre_attack_url
 from xrefer.core.settings import XReferSettingsManager
-from xrefer.gui.action_handlers import (ClusterEverythingHandler, CopyAllStringsHandler, CopyDirectIndirectStringsHandler, CopyDirectStringsHandler,
-                                        CopyOrphanStringsHandler, CopyUncategorizedStringsHandler, PeekViewToggleHandler)
+from xrefer.gui.action_handlers import (ClusterEverythingHandler, EstimateClusterTokensHandler, CopyAllStringsHandler, CopyDirectIndirectStringsHandler, CopyDirectStringsHandler,
+                                        CopyOrphanStringsHandler, CopySelectedArtifactsHandler, CopyUncategorizedStringsHandler, PeekViewToggleHandler, ViewAttackMatrixHandler)
 from xrefer.gui.help import ContextHelp
 from xrefer.gui.helpers import (CollapseEventFilter, CollapseIndicator, FocusEventFilter, KeyEventFilter, colorize_api_call, create_cluster_relationship_graph,
                                 create_colored_table_from_cols, create_xrefs_table_colored, draw_cluster_hierarchy, find_cluster_analysis,
@@ -93,6 +94,8 @@ class XReferView(idaapi.simplecustviewer_t):
         self.context_help = ContextHelp()
         self.cell_regex: re.Pattern = re.compile(
             r"(?:^ {4,8}|[│┐└]\x02\x18\x20{3})"  # Match either standard indent or vertical line pattern
+            r"(?:[☐☑]\x20)?"  # Optional selection checkbox (T2)
+            r"(?:(?:imp|lib)\x20)?"  # Optional imp/lib type tag in the merged table (T2)
             r"\x01[^\x10]"  # Start of color code. Exclude CREFTAIL for address
             r"(?:\x20{0,4}(?:[→↓]\x20)?)?"  # Optional arrow with spaces
             r"(.+?)"  # The actual content (non-greedy)
@@ -153,6 +156,20 @@ class XReferView(idaapi.simplecustviewer_t):
             "ORPHAN STRINGS",
             "ORPHAN CAPA RULES",
         ]
+        # Artifact-search result tables (Shift+S), in display order. Same
+        # registration trick as the orphan tables: membership in
+        # table_states + get_parent_table is all the expand/collapse
+        # machinery needs. Keyed by EntityType id for building.
+        self.search_table_to_type: "OrderedDict[str, int]" = OrderedDict(
+            [
+                ("MATCHING IMPORTS", 2),
+                ("MATCHING LIBRARIES", 1),
+                ("MATCHING STRINGS", 3),
+                ("MATCHING CAPA RULES", 4),
+            ]
+        )
+        for _search_table in self.search_table_to_type:
+            self.table_states[_search_table] = 1
         # Maps orphan table name -> EntityType id (1=lib, 2=import,
         # 3=string, 4=capa) so the renderer can pick the right color
         # tag and source list. The merged imports+libraries table is
@@ -175,6 +192,9 @@ class XReferView(idaapi.simplecustviewer_t):
         self.rebase_hook: Optional[RebaseHook] = None
         self.func_ea: Optional[int] = None
         self.state_machine: XReferStateMachine = XReferStateMachine()
+        # Selections live on the core object (persisted with the DB);
+        # the state machine mutates that same dict in place.
+        self.state_machine.adopt_selected_refs(self.xrefer_obj.selected_refs)
         self.table_index_offset: int = len(self.table_names) - 1  # default starts from direct xrefs (last entry)
         self.table_count: int = len(self.table_names)
         # 8 spaces aligns expanded-table row content with the heading text that
@@ -202,6 +222,30 @@ class XReferView(idaapi.simplecustviewer_t):
         self._is_collapsed = False
         self._from_double_click = False
         self._explicit_cluster_click = False
+        # EXPERIMENT: "node detail" mode for the artifact-path graph. When on,
+        # each function node also lists its direct artifacts (imports/strings/
+        # capa/libs) inside the box — like the hover tooltip, but in-node. A
+        # render flag (NOT a state) so it composes with the simplified/pinned
+        # graph states instead of multiplying them; toggled by D in graph views
+        # and folded into the graph cache key. Default off (it enlarges nodes).
+        self.graph_node_artifacts = False
+        # Per-artifact colour map for "node detail" mode, keyed by the same
+        # graph cache_key: {displayed_artifact_text: SCOLOR}. Used to re-colour
+        # each artifact by type AFTER the (colour-blind) ASCII layout. Kept
+        # parallel to graph_cache (not inside it) because graph_cache is
+        # serialized to the .xrefer DB and must keep its existing tuple shape.
+        self._graph_artifact_colors: Dict[Any, Dict[str, int]] = {}
+        # Cursor-independent ASCII layouts of the cluster graphs (see
+        # _cluster_ascii_lines). View-local on purpose: unlike graph_cache it
+        # is never serialized into the .xrefer DB, so a reload can't
+        # resurrect layouts with stale function names.
+        self._cluster_ascii_cache: Dict[Any, List[str]] = {}
+        self._cluster_ascii_token: Any = None
+        # Scroll target applied AFTER the next redraw (see
+        # _apply_post_redraw_jump). Key handlers that restore a position
+        # (ESC/K go_back) stash it here instead of Jumping pre-redraw,
+        # where the draw handlers' trailing Jump(0,0) wiped it.
+        self._pending_jump: Optional[Tuple[int, int, int]] = None
 
         if self.xrefer_obj.lang:
             self.create()
@@ -345,6 +389,18 @@ class XReferView(idaapi.simplecustviewer_t):
             log(traceback.format_exc())
             self.cleanup()
 
+        # Surface what happened to the just-run cluster analysis: a 'blocked'
+        # budget dialog if it was skipped for window overflow, or a failure
+        # dialog if it failed / completed partially — instead of letting the
+        # initial-analysis flow swallow it. Outside the try/except above so a
+        # dialog hiccup can't trigger view cleanup.
+        try:
+            from xrefer.gui.token_estimate import show_budget_block_if_pending, show_cluster_failure_if_pending
+            show_budget_block_if_pending(getattr(self, "xrefer_obj", None))
+            show_cluster_failure_if_pending(getattr(self, "xrefer_obj", None))
+        except Exception:
+            pass
+
     def show_custom_window(self) -> None:
         """
         Show custom docked window without using the default IDA tab view.
@@ -374,7 +430,8 @@ class XReferView(idaapi.simplecustviewer_t):
 
             # Get current function EA and update view
             current_ea = idc.get_screen_ea()
-            func_ea = idc.get_name_ea_simple(idc.get_func_name(current_ea))
+            fn = ida_funcs.get_func(ida_idaapi.ea_t(int(current_ea)))
+            func_ea = fn.start_ea if fn else idaapi.BADADDR
             if func_ea is not None:
                 self.update(True)
 
@@ -421,6 +478,14 @@ class XReferView(idaapi.simplecustviewer_t):
                 tooltip = "Cluster all functions with non-excluded artifacts"
                 label = "(Re-)run Cluster Analysis"
                 register_popup_action(form, popup, menu_path, menu_id, label, ClusterEverythingHandler(), tooltip)
+                menu_id = "XRefer:estimate_cluster_tokens"
+                tooltip = "Estimate the cluster-analysis request + max response tokens against the model's context window"
+                label = "Estimate Cluster Analysis Token Usage"
+                register_popup_action(form, popup, menu_path, menu_id, label, EstimateClusterTokensHandler(), tooltip)
+                menu_id = "XRefer:view_attack_matrix"
+                tooltip = "Open the ATT&CK matrix heat-grid for the analyzed clusters' MITRE mappings"
+                label = "View ATT&CK Matrix"
+                register_popup_action(form, popup, menu_path, menu_id, label, ViewAttackMatrixHandler(), tooltip)
                 menu_id = "XRefer:toggle_peek"
                 tooltip = "Enable peeking of downstream cross-references of a clicked function in disassembly/pseudocode view"
                 label = "Enable Peek View"
@@ -431,6 +496,7 @@ class XReferView(idaapi.simplecustviewer_t):
                 register_popup_action(form, popup, copy_menu_path, "XRefer:copy_direct_indirect_strings", "Copy directly and indirectly referenced strings to clipboard", CopyDirectIndirectStringsHandler(), "Copy strings reached through direct or indirect cross-references")
                 register_popup_action(form, popup, copy_menu_path, "XRefer:copy_orphan_strings", "Copy orphan strings to clipboard", CopyOrphanStringsHandler(), "Copy strings with no resolved use site reachable from an entry point")
                 register_popup_action(form, popup, copy_menu_path, "XRefer:copy_uncategorized_strings", "Copy uncategorized strings to clipboard", CopyUncategorizedStringsHandler(), "Copy simple strings that carry no language-derived category")
+                register_popup_action(form, popup, "XRefer/", "XRefer:copy_selected_artifacts", "Copy selected artifacts to clipboard", CopySelectedArtifactsHandler(), "Copy every artifact selected (double-click) across all functions, type-prefixed")
 
         class RebaseHook(ida_idp.IDB_Hooks):
             def __init__(self, xrefer_view: "XReferView"):
@@ -439,7 +505,39 @@ class XReferView(idaapi.simplecustviewer_t):
 
             def allsegs_moved(self, info) -> int:
                 self.xrefer_view.xrefer_obj.sync_image_base(False)
+                # Cached cluster layouts and the func->cluster map embed
+                # pre-rebase addresses.
+                self.xrefer_view._invalidate_cluster_render_caches()
                 self.xrefer_view.update(True)
+                return 0
+
+            def closebase(self) -> int:
+                # Persist user selections made since the last analysis-event
+                # save — save_analysis fires on analysis events, almost never
+                # after the user finishes ticking artifacts. Dirty-gated so
+                # an untouched session never pays the rewrite.
+                try:
+                    obj = self.xrefer_view.xrefer_obj
+                    if getattr(obj, "selected_refs_dirty", False) and obj.lang:
+                        obj.save_analysis()
+                        obj.selected_refs_dirty = False
+                except Exception:
+                    pass
+                return 0
+
+            def renamed(self, *args) -> int:
+                # Cached cluster-graph layouts embed function names; drop
+                # them when a cluster member is renamed so the next render
+                # picks up the new name. Non-cluster renames are ignored
+                # (they never appear in those layouts).
+                try:
+                    ea = int(args[0])
+                except (IndexError, TypeError, ValueError):
+                    return 0
+                view = self.xrefer_view
+                if view.xrefer_obj.clusters and ea in view._func_to_cluster_ids():
+                    view._cluster_ascii_cache = {}
+                    view._cluster_ascii_token = None
                 return 0
 
         # Setup hooks if they don't exist
@@ -650,12 +748,29 @@ class XReferView(idaapi.simplecustviewer_t):
         except Exception as err:
             return False
 
+        # ATT&CK matrix: clicking a technique id opens its MITRE page.
+        if self.state_machine.current_state == self.state_machine.attack_matrix:
+            url = mitre_attack_url(word)
+            if url:
+                try:
+                    QtGui.QDesktopServices.openUrl(QtCore.QUrl(url))
+                except Exception:
+                    pass
+                return True
+
         # Handle cluster navigation
-        if self.state_machine.current_state in (self.state_machine.cluster_graphs, self.state_machine.pinned_cluster_graphs, self.state_machine.clusters, self.state_machine.base):
+        if self.state_machine.current_state in (self.state_machine.cluster_graphs, self.state_machine.pinned_cluster_graphs, self.state_machine.clusters, self.state_machine.base, self.state_machine.attack_matrix):
             cluster_manager = self.state_machine.cluster_manager
 
+            # Leaving the clusters TABLE by mouse: remember the row so the
+            # ESC return path can land back on it (keyboard flows store it
+            # in OnKeydown; clicks bypass that).
+            if self.state_machine.current_state == self.state_machine.clusters:
+                lineno, x, y = self.GetPos()
+                self.state_machine.store_cursor_position(self.state_machine.clusters, lineno, x, y)
+
             # If in cluster graph states, store current position before switching
-            if self.state_machine.current_state not in (self.state_machine.base, self.state_machine.clusters):
+            if self.state_machine.current_state not in (self.state_machine.base, self.state_machine.clusters, self.state_machine.attack_matrix):
                 lineno, x, y = self.GetPos()
                 if current := cluster_manager.get_current_cluster():
                     # Save cursor for the old cluster
@@ -675,6 +790,14 @@ class XReferView(idaapi.simplecustviewer_t):
 
                 cluster = self.xrefer_obj.find_cluster_by_id(cluster_id)
                 if cluster:
+                    # A chip click navigates to a concrete cluster — if the
+                    # intermediate sub-view is open, close its bookkeeping
+                    # first (the draw dispatch short-circuits to the spider
+                    # while the flag is set, so the click would be a visual
+                    # no-op and the one-pop M/ESC undo would later pop the
+                    # wrong cluster).
+                    if self.state_machine.intermediate_view_func_ea is not None:
+                        self.state_machine.discard_intermediate_view()
                     # Prepare to navigate to that cluster
                     if current := cluster_manager.get_current_cluster():
                         parent_id = current.cluster_id
@@ -700,23 +823,23 @@ class XReferView(idaapi.simplecustviewer_t):
                     self.update(True)
                     return True
 
-        # Handle table expansions
+        # Expand / collapse: click anywhere on a heading or category row (each
+        # starts with a ▸/▾ chevron) to toggle it. The label is parsed by
+        # stripping color codes + chevron + the trailing "(N)" count, so it
+        # works wherever on the row the click landed.
         try:
-            if word in ("[+]", "[-]"):
-                line: str = self.GetCurrentLine()
-                key: str = line[6:-2].strip()
-                self.table_states[key] = not self.table_states[key]
-                self.update(True)
-                return True
-
-            elif "(-)" in word or "(+)" in word:
-                line: str = self.GetCurrentLine()
-                key: str = line[14:-2].strip()
+            clean = strip_color_codes(self.GetCurrentLine()).strip()
+            if clean[:1] in ("▸", "▾"):
+                label = self._strip_count_suffix(clean[1:].strip())
+                if label in self.table_states:
+                    self.table_states[label] = not self.table_states[label]
+                    self.update(True)
+                    return True
                 table_name: Optional[str] = self.get_parent_table()
-                if table_name:
-                    self.subtable_states[table_name][key] = not self.subtable_states[table_name][key]
-                self.update(True)
-                return True
+                if table_name and label in self.subtable_states.get(table_name, {}):
+                    self.subtable_states[table_name][label] = not self.subtable_states[table_name][label]
+                    self.update(True)
+                    return True
         except Exception:
             pass
 
@@ -738,6 +861,14 @@ class XReferView(idaapi.simplecustviewer_t):
             self._from_double_click = False
 
         except Exception as err:
+            # Selection toggling only applies where the cursor function's
+            # own selectable table is rendered (base/search). Elsewhere —
+            # the binary-wide artifact search especially, whose only
+            # advertised double-click is navigation — a non-address
+            # double-click must not silently toggle a persisted selection
+            # on whatever function the view was opened from.
+            if self.state_machine.current_state not in (self.state_machine.base, self.state_machine.search):
+                return True
             line: str = self.GetCurrentLine()
             xref_cell, xref_item = self.extract_cell_item(line)
 
@@ -745,6 +876,8 @@ class XReferView(idaapi.simplecustviewer_t):
                 try:
                     e_index: int = self.xrefer_obj.reverse_entity_lookup_index[xref_item]
                     self.state_machine.update_selected_refs(self.func_ea, e_index)
+                    # Save-on-close persists selections only when ticked.
+                    self.xrefer_obj.selected_refs_dirty = True
 
                     if e_index in self.state_machine.get_selected_refs(self.func_ea):
                         self.select_cell(xref_cell)
@@ -769,13 +902,85 @@ class XReferView(idaapi.simplecustviewer_t):
         Returns:
             bool: True to indicate event was handled
         """
+        # While a modal dialog is open (e.g. the token-estimate box with its
+        # model-search completer), the xrefer view must not process keys. IDA
+        # can still route OnKeydown here even with the dialog up, which would
+        # scroll the view behind it and steal arrow keys from the completer.
+        # Report them as handled so nothing moves underneath the dialog.
+        try:
+            if QtWidgets.QApplication.activeModalWidget() is not None:
+                return True
+        except Exception:
+            pass
+
         # Store current position before state change
         lineno, x, y = self.GetPos()
         self.state_machine.store_cursor_position(self.state_machine.current_state, lineno, x, y)
 
+        self._pending_jump = None  # only this keypress's handlers may stash
+
+        # Filter typing is resolved BEFORE the key-dispatch table, so a
+        # globally-bound shortcut (N rename, etc.) can never hijack — or
+        # crash on — a keystroke that was meant as filter text. Two filter
+        # surfaces share this rule:
+        #   • the per-view filter (S over the full trace / orphans / cluster
+        #     table): every printable key is text; ESC is two-stage (clear,
+        #     then exit); X/G/K/T are text too, not actions.
+        #   • the search / artifact-search STATES: every printable key is
+        #     text EXCEPT ESC/ENTER (exit through their handlers) and X/G,
+        #     which stay context pivots — resolved after dispatch so they
+        #     fall back to text when the caret is not on a resolvable row.
+        sm = self.state_machine
+        in_view_filter = sm.view_filter_active and sm.current_state in (sm.trace_scope_full, sm.orphans, sm.clusters)
+        in_search_state = sm.current_state in (sm.search, sm.artifact_search)
+        if in_view_filter:
+            if vkey == 27:  # ESC
+                # One ESC leaves filter mode and lands on the normal view —
+                # full table, verbose ribbon, a real resting state; a SECOND
+                # ESC then walks back out of the view through the usual
+                # handler. (Previously ESC cleared the text but stayed in
+                # filter mode, so the next ESC both deactivated AND exited in
+                # one press — the "normal view" rest stop got skipped.)
+                sm.view_filter_active = False
+                sm.search_filter = ""
+                self.update(True)
+                return True
+            else:
+                before = sm.search_filter
+                self.handle_search_input(vkey, shift)
+                if sm.search_filter != before:
+                    self.update(True)
+                return True  # always swallowed; never reaches a global handler
+        elif in_search_state and vkey not in (27, 13, ord("X"), ord("G")):
+            before = sm.search_filter
+            self.handle_search_input(vkey, shift)
+            if sm.search_filter != before:
+                self.update(True)
+            return True  # printable filter text; X/G/ESC/ENTER fall through
+
         state_before_handling_key = self.state_machine.current_state
         should_update = self.handle_key_specific_actions(vkey, shift)
         state_after_handling_key = self.state_machine.current_state
+
+        # Leaving the filtered view by any key/transition retires the filter
+        # — unless the transition lands on a filterable view OR on a
+        # cluster-context side trip the analyst returns FROM (a chip/J pivot
+        # into a cluster graph, K into the ATT&CK matrix): keeping the filter
+        # alive there means the ESC return re-renders the same filtered table
+        # at the stored row, continuing the triage loop. The flag is dormant
+        # in those non-filterable states (no filter render, no key routing),
+        # and base entry's reset_state retires it for good.
+        _filter_keep = (
+            sm.trace_scope_full, sm.orphans, sm.clusters,
+            sm.cluster_graphs, sm.pinned_cluster_graphs, sm.attack_matrix,
+        )
+        if (
+            sm.view_filter_active
+            and state_after_handling_key is not state_before_handling_key
+            and state_after_handling_key not in _filter_keep
+        ):
+            sm.view_filter_active = False
+            sm.search_filter = ""
 
         # Check if we're entering or exiting graph view
         is_graph_before = state_before_handling_key in (
@@ -804,15 +1009,53 @@ class XReferView(idaapi.simplecustviewer_t):
         elif is_graph_before and not is_graph_after:
             self.in_graph_view = False
 
-        if state_after_handling_key == self.state_machine.search:
-            if state_before_handling_key == self.state_machine.search:
+        # X/G are the only printable keys that reach dispatch in the
+        # search / artifact-search states (every other character was typed
+        # pre-dispatch). They pivot when the caret sits on a resolvable
+        # row; otherwise the key is filter text. "Claimed" includes
+        # same-state handling — X/G on a zero-xref row logs and stays put,
+        # and that keystroke must not ALSO leak into the filter text
+        # (live-IDA finding: 'socket' became 'socketx' on a guarded pivot).
+        if state_after_handling_key in (self.state_machine.search, self.state_machine.artifact_search):
+            if state_before_handling_key == state_after_handling_key and not should_update:
                 self.handle_search_input(vkey, shift)
                 should_update = True
 
         if should_update:
             self.update(True)
+            self._apply_post_redraw_jump(state_before_handling_key, state_after_handling_key)
 
         return True
+
+    def _apply_post_redraw_jump(self, state_before, state_after) -> None:
+        """Re-apply the intended scroll position AFTER a redraw.
+
+        The long reading views' draw handlers end in Jump(0,0) — right for
+        fresh entries (menu actions, double-click), which bypass OnKeydown
+        and must open at the top — but it wiped two kinds of position:
+        same-state toggles (L hide-library, R report) threw the analyst
+        back to row 0 of a long table/matrix, and ESC/K go_back restores
+        ran BEFORE the redraw and were clobbered. Handlers stash an
+        explicit target in _pending_jump; same-state toggles fall back to
+        the position stored at the top of OnKeydown. The allowlist is
+        deliberately tight — search-state typing and other same-state
+        redraws render filtered/shifting content where a stale position
+        would mislead. Restores clamp to the new line count (toggled
+        content can be shorter than where the cursor was).
+        """
+        sm = self.state_machine
+        target = self._pending_jump
+        self._pending_jump = None
+        if target is None:
+            if state_before is state_after and state_after in (sm.clusters, sm.attack_matrix):
+                target = sm.get_cursor_position(state_after)
+        if not target:
+            return
+        lineno, x, y = target
+        try:
+            self.Jump(min(int(lineno), max(self.Count() - 1, 0)), x, y)
+        except Exception:
+            pass
 
     def OnHint(self, lineno: int) -> Optional[str]:
         """
@@ -856,9 +1099,19 @@ class XReferView(idaapi.simplecustviewer_t):
                 if xref_item:
                     try:
                         e_index: int = self.xrefer_obj.reverse_entity_lookup_index[xref_item]
-                        matched_lines = self.xrefer_obj.entities[e_index][4]
-                        all_repos = self.xrefer_obj.entities[e_index][5]
-                        tooltip = self.generate_str_tooltip(matched_lines, all_repos)
+                        # Indirect rows: list the callee functions this artifact
+                        # is reached through (the indirection's "through what").
+                        via_tip = self._indirect_via_tooltip(e_index)
+                        str_tip = None
+                        try:
+                            matched_lines = self.xrefer_obj.entities[e_index][4]
+                            all_repos = self.xrefer_obj.entities[e_index][5]
+                            str_tip = self.generate_str_tooltip(matched_lines, all_repos)
+                        except Exception:
+                            str_tip = None
+                        # OnHint must return an IDA hint tuple (num_lines, text)
+                        # to display; merge the two (each already that shape).
+                        tooltip = self._combine_tooltips(via_tip, str_tip)
                     except Exception as err:
                         tooltip = None
 
@@ -897,6 +1150,7 @@ class XReferView(idaapi.simplecustviewer_t):
             ord("G"): self.handle_key_g,
             ord("H"): self.handle_key_h,
             ord("J"): self.handle_key_j,
+            ord("K"): self.handle_key_k,
             ord("L"): self.handle_key_l,
             ord("M"): self.handle_key_m,
             ord("N"): self.handle_key_n,
@@ -936,8 +1190,15 @@ class XReferView(idaapi.simplecustviewer_t):
         Returns:
             bool: True if boundary scan was initiated, False otherwise
         """
+        # Gate on a non-empty selection BEFORE the transition, mirroring
+        # the L key. Entering the boundary view with nothing selected
+        # rendered a ribbonless "NO BOUNDARY METHODS FOUND" panel and
+        # overwrote the cached last-boundary results with that placeholder.
+        scan_entities = self.state_machine.get_selected_refs(self.func_ea)
+        if not scan_entities:
+            log("No artifacts selected — double-click artifacts to select, then press B")
+            return False
         if self.state_machine.start_boundary_results():
-            scan_entities = self.state_machine.get_selected_refs(self.func_ea)
             boundary_methods: List[int] = self.xrefer_obj.run_boundary_scan(scan_entities)
             self.state_machine.boundary_methods = boundary_methods
             return True
@@ -955,6 +1216,12 @@ class XReferView(idaapi.simplecustviewer_t):
             bool: True if cluster view state was changed
         """
         if self.state_machine.current_state == self.state_machine.base:
+            # Gate BEFORE the state transition: entering a cluster view with
+            # no cluster data would re-render (and previously re-crash) on
+            # every cross-function cursor move via screen_ea_changed.
+            if not self.xrefer_obj.clusters:
+                log("No cluster data — run Edit > XRefer > Run Analysis > (Re-)run Cluster Analysis first (requires an LLM configured under Edit > XRefer > Configure)")
+                return False
             # Enter cluster table view
             return self.state_machine.start_cluster_graphs()
         elif self.state_machine.current_state == self.state_machine.cluster_graphs:
@@ -978,7 +1245,13 @@ class XReferView(idaapi.simplecustviewer_t):
         Returns:
             bool: True if focus mode was entered, False otherwise
         """
-        if self.state_machine.current_state != self.state_machine.call_focus:
+        # Gate on base (start_call_focus' only arm), and BEFORE the side
+        # effects. From any other state the transition is doomed, but the
+        # old `!= call_focus` guard still set address_filter and scrolled a
+        # long reading view to line 0 first — losing the analyst's place for
+        # nothing and leaving a stale address_filter behind. P is advertised
+        # only in base.
+        if self.state_machine.current_state == self.state_machine.base:
             word: str = self.GetCurrentWord()
             if word.startswith("0x"):
                 try:
@@ -993,17 +1266,27 @@ class XReferView(idaapi.simplecustviewer_t):
 
     def handle_key_d(self, shift: bool) -> bool:
         """
-        Handle 'd' key press for exclusions.
+        Handle 'd' key press.
 
-        Adds currently selected items to appropriate exclusions.
+        Context-sensitive:
+            * In the artifact-path graph states (graph / pinned / simplified /
+              pinned-simplified), toggles "node detail" — whether each function
+              node lists its direct artifacts inside the box.
+            * In ``base``, adds the currently selected items to exclusions.
 
         Args:
             shift (bool): Whether shift key is pressed
 
         Returns:
-            bool: True if exclusions was successful, False if not in appropriate state
+            bool: True if handled, False if not in an appropriate state
         """
-        if self.state_machine.current_state != self.state_machine.base:
+        sm = self.state_machine
+        if sm.current_state in (sm.graph, sm.pinned_graph, sm.simplified_graph, sm.pinned_simplified_graph):
+            # EXPERIMENT: flip in-node artifact rendering for the paths graph.
+            self.graph_node_artifacts = not self.graph_node_artifacts
+            return True
+
+        if sm.current_state != sm.base:
             return False
 
         self.handle_exclusions()
@@ -1049,12 +1332,25 @@ class XReferView(idaapi.simplecustviewer_t):
         """
         current_state = self.state_machine.current_state
 
+        if current_state == self.state_machine.attack_matrix:
+            # G opens the Navigator-style heat-grid popup for the matrix.
+            self.open_attack_matrix_popup()
+            return True
+
         if current_state == self.state_machine.cluster_graphs:
             # Pin cluster graph
             return self.state_machine.toggle_pinned_cluster_graph()
         elif current_state == self.state_machine.pinned_cluster_graphs:
             # Unpin cluster graph
             return self.state_machine.toggle_unpinned_cluster_graph()
+
+        if current_state == self.state_machine.neighborhood_graph:
+            # Pin the neighborhood graph so it survives cursor moves, just
+            # like the other graph views (G was a dead key here and the
+            # pinned state, though fully built, was unreachable).
+            return self.state_machine.toggle_pinned_neighborhood_graph()
+        elif current_state == self.state_machine.pinned_neighborhood_graph:
+            return self.state_machine.toggle_unpinned_neighborhood_graph()
 
         # Handle regular graph pinning (existing logic)
         if current_state in (self.state_machine.graph, self.state_machine.pinned_graph, self.state_machine.simplified_graph, self.state_machine.pinned_simplified_graph):
@@ -1066,7 +1362,18 @@ class XReferView(idaapi.simplecustviewer_t):
             line: str = self.GetCurrentLine()
             _, xref_item = self.extract_cell_item(line)
             if xref_item:
-                e_index: int = self.xrefer_obj.reverse_entity_lookup_index[xref_item]
+                try:
+                    e_index: int = self.xrefer_obj.reverse_entity_lookup_index[xref_item]
+                except KeyError:
+                    # Decorated non-entity line (heading, hint, footer) —
+                    # in the typing surfaces the keystroke must fall
+                    # through to the filter, not eject the state.
+                    return False
+                if not self.xrefer_obj.entity_xrefs.get(e_index):
+                    # Storage-only / orphan artifact: there is no path to
+                    # draw. Pivoting would render against a missing key.
+                    log(f"No code cross-references recorded for '{xref_item}'")
+                    return True
                 self.state_machine.selected_index = e_index
 
                 return self.state_machine.start_graph()
@@ -1087,6 +1394,43 @@ class XReferView(idaapi.simplecustviewer_t):
         """
         return self.state_machine.start_help()
 
+    def handle_key_k(self, shift: bool) -> bool:
+        """Handle 'k' key — toggle the ATT&CK matrix view.
+
+        Opens a kill-chain matrix built from the per-cluster MITRE ATT&CK
+        mappings: a coverage strip plus tactic-grouped techniques, each
+        linking back to the cluster(s) that ground it. Binary-wide from the
+        home / cluster-table views; scoped to the active cluster when opened
+        from a cluster graph. Pressing K again (or ESC) returns to the prior
+        view. No-op until cluster analysis exists.
+        """
+        sm = self.state_machine
+        current = sm.current_state
+
+        if current == sm.attack_matrix:
+            success, cursor_pos = sm.go_back()
+            if cursor_pos:
+                # Applied after the redraw — a pre-redraw Jump is wiped by
+                # the landing view's trailing Jump(0,0).
+                self._pending_jump = cursor_pos
+            return True
+
+        if current not in (sm.base, sm.clusters, sm.cluster_graphs, sm.pinned_cluster_graphs):
+            return False
+        if not self.xrefer_obj.clusters or not self.xrefer_obj.cluster_analysis:
+            # Say why instead of silently swallowing the keypress.
+            log("ATT&CK matrix needs cluster analysis — run Edit > XRefer > Run Analysis > (Re-)run Cluster Analysis first")
+            return False
+
+        # Scope to the active cluster when opened from a cluster graph;
+        # otherwise present the whole binary.
+        scope_id = None
+        if current in (sm.cluster_graphs, sm.pinned_cluster_graphs):
+            if cur := sm.cluster_manager.get_current_cluster():
+                scope_id = cur.cluster_id
+        sm.attack_matrix_scope_cluster_id = scope_id
+        return sm.start_attack_matrix()
+
     def handle_key_j(self, shift: bool) -> bool:
         """
         Handle 'j' key press for cluster sync and navigation.
@@ -1105,15 +1449,26 @@ class XReferView(idaapi.simplecustviewer_t):
 
         # If in cluster view, toggle sync
         if current_state in (self.state_machine.cluster_graphs, self.state_machine.pinned_cluster_graphs):
+            # Sync toggling is meaningless inside the focused
+            # intermediate-paths sub-view, and doing it there would
+            # silently unpin (the next cursor move then tears the view to
+            # base) or accrue a stack push beneath the sub-view. Leave J
+            # inert until the sub-view is closed.
+            if self.state_machine.intermediate_view_func_ea is not None:
+                return False
             if not self.state_machine.cluster_sync_enabled:
-                result = self.find_function_in_clusters(self.func_ea)
+                cur = self.state_machine.cluster_manager.get_current_cluster()
+                cur_id = cur.cluster_id if cur else None
+                result = self.find_function_in_clusters(self.func_ea, cur_id)
 
                 if result:
                     cluster_id, is_intermediate = result
-                    if not is_intermediate:
+                    # Push only when the cursor's cluster differs from the
+                    # one already on top — J on a function already shown
+                    # otherwise double-stacks the same cluster (J,J ->
+                    # [A,A]), so the later ESC redraws it with no effect.
+                    if not is_intermediate and cluster_id != cur_id:
                         self.state_machine.cluster_manager.push_cluster(cluster_id)
-                    # if current := self.state_machine.cluster_manager.get_current_cluster():
-                    #     current.simplified = not is_intermediate
 
             self.state_machine.toggle_cluster_sync()
             return True
@@ -1167,6 +1522,12 @@ class XReferView(idaapi.simplecustviewer_t):
         """
         if self.state_machine.toggle_hide_library_clusters():
             return True
+        # Gate BEFORE the transition: entering the view with nothing to show
+        # used to call a state-machine transition that was never defined
+        # (AttributeError on a fresh session's very first L press).
+        if not self.last_boundary_scan_results:
+            log("No boundary scan results yet — select artifacts and press B first")
+            return False
         return self.state_machine.start_last_boundary_results()
 
     def handle_key_o(self, shift: bool) -> bool:
@@ -1259,7 +1620,14 @@ class XReferView(idaapi.simplecustviewer_t):
         current = sm.current_state
 
         if sm.intermediate_view_func_ea is not None:
-            return self._exit_intermediate_view_with_undo()
+            if current in (sm.cluster_graphs, sm.pinned_cluster_graphs):
+                return self._exit_intermediate_view_with_undo()
+            # The sub-view flag lingered from a cluster-graph visit the
+            # user then left (e.g. via V into the neighborhood). There is
+            # no live sub-view to close here; discard the stale bookkeeping
+            # so M can open the sub-view fresh from this state instead of
+            # silently no-opping (M is advertised here).
+            sm.discard_intermediate_view()
 
         # Open path. Eligible source states are those where the banner
         # hint advertises M.
@@ -1346,7 +1714,12 @@ class XReferView(idaapi.simplecustviewer_t):
         current = sm.current_state
 
         if current in (sm.neighborhood_graph, sm.pinned_neighborhood_graph):
-            sm.go_back()
+            # Mirror the ESC / K-matrix exits: restore the caller's cursor
+            # row on the way back instead of dropping to row 0 (the landing
+            # view's draw ends in Jump(0,0)).
+            _success, cursor_pos = sm.go_back()
+            if cursor_pos:
+                self._pending_jump = cursor_pos
             return True
 
         eligible = (
@@ -1413,7 +1786,8 @@ class XReferView(idaapi.simplecustviewer_t):
                 if new_name:
                     if idaapi.set_name(xref_to_func_ea, new_name):
                         idaapi.refresh_idaview_anyway()
-                        func_ea: int = idc.get_name_ea_simple(idc.get_func_name(ida_idaapi.ea_t(addr)))
+                        _fn = ida_funcs.get_func(ida_idaapi.ea_t(int(addr)))
+                        func_ea: int = _fn.start_ea if _fn else idaapi.BADADDR
                         self.xref_coverage_dict[func_ea] = self.generate_xref_coverage_dict(func_ea)
                         return True
         except:
@@ -1466,6 +1840,21 @@ class XReferView(idaapi.simplecustviewer_t):
         Returns:
             bool: True if handled, False if not
         """
+        # Shift+S from home: binary-wide artifact search. Falls through to
+        # the plain-S behaviors when the transition is not available.
+        if shift and self.state_machine.start_artifact_search():
+            self.state_machine.search_filter = ""
+            self.Jump(0, 0)
+            return True
+
+        # Per-view filter for the long reading views (the search STATE is a
+        # base-view mode; these get a lightweight filter layered onto the
+        # current state instead).
+        if self.state_machine.current_state in (self.state_machine.trace_scope_full, self.state_machine.orphans, self.state_machine.clusters):
+            self.state_machine.view_filter_active = True
+            self.state_machine.search_filter = ""
+            return True
+
         if self.state_machine.start_search():
             self.Jump(0, 0)
             return True
@@ -1553,10 +1942,15 @@ class XReferView(idaapi.simplecustviewer_t):
         if xref_item:
             try:
                 e_index: int = self.xrefer_obj.reverse_entity_lookup_index[xref_item]
-                self.state_machine.selected_index = e_index
-                return self.state_machine.start_xref_listing()
             except KeyError:
                 return False
+            if not self.xrefer_obj.entity_xrefs.get(e_index):
+                # Storage-only / orphan artifact (reachable from the
+                # binary-wide search): the listing has nothing to render.
+                log(f"No code cross-references recorded for '{xref_item}'")
+                return True
+            self.state_machine.selected_index = e_index
+            return self.state_machine.start_xref_listing()
 
         return False
 
@@ -1572,8 +1966,9 @@ class XReferView(idaapi.simplecustviewer_t):
         Returns:
             bool: True if navigation occurred
         """
-        self.state_machine.to_base()
-        return True
+        # Return the real transition result: a no-op (already in base, or a
+        # state without a to_base arm) must not force a pointless redraw.
+        return bool(self.state_machine.to_base())
 
     def handle_key_escape(self, shift: bool) -> bool:
         """
@@ -1609,12 +2004,21 @@ class XReferView(idaapi.simplecustviewer_t):
 
                 # Check if we should try to go back to relationship graph
                 if not cluster_manager.get_current_cluster():  # History is empty
-                    if len(self.xrefer_obj.clusters) == 1 and not self.xrefer_obj.clusters[0].subclusters:
+                    top_clusters = self.xrefer_obj.clusters or []
+                    if len(top_clusters) == 1 and not top_clusters[0].subclusters:
                         # Single cluster with no subclusters - go back in state machine
                         success, cursor_pos = self.state_machine.go_back()
                         if cursor_pos:
-                            self.Jump(*cursor_pos)
+                            self._pending_jump = cursor_pos
                         return success
+                    elif self.state_machine.return_to_clusters_table():
+                        # Entered from the clusters TABLE: the triage loop
+                        # (table -> click cluster -> ESC -> next cluster)
+                        # returns to the table at the stored row, not to
+                        # the relationship overview. OnKeydown redraws and
+                        # applies the stashed position afterwards.
+                        self._pending_jump = self.state_machine.get_cursor_position(self.state_machine.clusters)
+                        return True
                     else:
                         # Multiple clusters - restore relationship graph position
                         if pos := cluster_manager.get_relationship_pos():
@@ -1628,6 +2032,19 @@ class XReferView(idaapi.simplecustviewer_t):
                 self.update(True)
                 return True
 
+        # The trace-scope cycle steps back one scope per ESC
+        # (full -> path -> function -> base), deterministically — the
+        # cyclic history T builds (it wraps full -> function) can't be
+        # walked one-step-at-a-time by go_back, so handle it explicitly.
+        if self.state_machine.current_state in (
+            self.state_machine.trace_scope_function,
+            self.state_machine.trace_scope_path,
+            self.state_machine.trace_scope_full,
+        ):
+            if self.state_machine.step_back_trace_scope():
+                self.update(True)
+                return True
+
         # Otherwise try default escape handling
         if len(self.state_machine.state_history) <= 1:
             set_focus_to_code()
@@ -1636,8 +2053,9 @@ class XReferView(idaapi.simplecustviewer_t):
             success, cursor_pos = self.state_machine.go_back()
 
             if cursor_pos:
-                lineno, x, y = cursor_pos
-                self.Jump(lineno, x, y)  # Restore cursor position
+                # Applied after the redraw — a pre-redraw Jump is wiped by
+                # the landing view's trailing Jump(0,0).
+                self._pending_jump = cursor_pos
             if success:
                 return True
             return False
@@ -1811,11 +2229,15 @@ class XReferView(idaapi.simplecustviewer_t):
         boundary_methods = self.state_machine.boundary_methods
         entity_list = self.state_machine.get_selected_refs(self.func_ea)
 
-        if not len(boundary_methods):
+        if not boundary_methods:
+            # Render the message but do NOT cache it as the last scan — a
+            # fruitless scan must not clobber a previous real result that L
+            # re-shows. Keep the ribbon so the panel has a label and an ESC
+            # affordance rather than a near-blank line.
             self.ClearLines()
-            self.last_boundary_scan_results = ["NO BOUNDARY METHODS FOUND"]
+            self.print_ribbon()
             self.AddLine("")
-            self.AddLine("    %s" % self.last_boundary_scan_results[0])
+            self.AddLine("    NO BOUNDARY METHODS FOUND")
             self.Refresh()
             return
 
@@ -1859,13 +2281,16 @@ class XReferView(idaapi.simplecustviewer_t):
         """
         Draw results from last boundary method scan.
 
-        Displays cached results from previous boundary scan or exits
-        if no previous results exist.
+        Displays cached results from a previous boundary scan; with none
+        (near-unreachable now that the L key gates on results existing),
+        renders a hint instead of transitioning — switching states from
+        inside the draw dispatcher would fire reset_state mid-flight.
+        ESC still exits via the state history.
         """
+        self.ClearLines()
         if not self.last_boundary_scan_results:
-            self.state_machine.end_last_boundary_results()
+            self.AddLine("    No boundary scan results yet — select artifacts and press B first (ESC to go back)")
         else:
-            self.ClearLines()
             for line in self.last_boundary_scan_results:
                 self.AddLine("    %s" % line)
 
@@ -1873,18 +2298,17 @@ class XReferView(idaapi.simplecustviewer_t):
         """Draw the orphan-artifacts view.
 
         One table per entity type (imports, libraries, strings, capa
-        rules), each rendered with the same colored heading + ``[-]`` /
-        ``[+]`` expand markers and ``(-)`` / ``(+)`` per-group sub-toggle
-        used by the per-function xref tables, so the layout is visually
-        identical to the rest of xrefer. Every row carries the artifact
-        name in the first column followed by every address that
-        references it (``self.entity_xrefs[idx]``), matching the
-        address-after-name layout of the regular xrefs tables.
+        rules), each rendered with the same colored heading + ``▾`` / ``▸``
+        chevron disclosure and per-group sub-toggle used by the per-function
+        xref tables, so the layout is visually identical to the rest of
+        xrefer. Every row carries the artifact name in the first column
+        followed by every address that references it
+        (``self.entity_xrefs[idx]``), matching the address-after-name layout
+        of the regular xrefs tables.
 
-        Expand/collapse keys re-use ``self.table_states`` and
-        ``self.subtable_states``, so ``[+]`` / ``[-]`` clicks, ``(+)`` /
-        ``(-)`` clicks, and the ``E`` shortcut all work without any
-        bespoke wiring.
+        Expand/collapse re-uses ``self.table_states`` and
+        ``self.subtable_states``, so clicking a ▾/▸ header row and the ``E``
+        shortcut all work without any bespoke wiring.
         """
         self.ClearLines()
         self.print_ribbon()
@@ -1918,6 +2342,10 @@ class XReferView(idaapi.simplecustviewer_t):
         # Build and render the orphan tables. The merged imports+libraries
         # table spans two entity types, so it is built specially; the rest
         # map 1:1 to a single type.
+        flt = ""
+        if self.state_machine.view_filter_active:
+            flt = self.state_machine.search_filter.lower()
+        drawn = 0
         for table_name in self.orphan_table_names:
             if table_name == self.merged_orphan_name:
                 built = self._build_merged_orphan_table(orphan_groups)
@@ -1927,13 +2355,137 @@ class XReferView(idaapi.simplecustviewer_t):
                 if not indices:
                     continue
                 built = self._build_orphan_table(table_name, type_id, indices)
+            if built is not None and flt:
+                built = self._filter_built_table(built, flt)
             if built is None:
                 continue
-            self._draw_orphan_table(table_name, built)
+            drawn += 1
+            # While filtering, open the matched groups so the results show
+            # without a manual expand — mirrors the home-view search.
+            self._draw_orphan_table(table_name, built, force_expand=bool(flt))
+        if flt and not drawn:
+            self.AddLine(f"{INDENT}No rows match '{flt}' — backspace edits, ESC clears")
 
-    def _build_orphan_table(self, table_name: str, type_id: int, entity_indices: List[int]) -> Optional[Dict[str, Any]]:
+    @staticmethod
+    def _highlight_filter_match(line: str, flt: str) -> str:
+        """Wrap the matched filter substring with the highlight color, the
+        same visual the home-view search uses (print_xref_item). Operates on
+        the colored line; a match split by color codes simply isn't wrapped
+        (the row still shows), so this degrades gracefully."""
+        if not flt:
+            return line
+        return wrap_substring_with_string(line, flt, "\x04")
+
+    @classmethod
+    def _filter_built_table(cls, built: Dict[str, Any], flt: str) -> Optional[Dict[str, Any]]:
+        """Row-level substring filter over a built table: group sub-headers
+        survive only when their group still has matching rows; None when the
+        whole table is empty (the caller skips it, heading included). Kept
+        rows get the match highlighted, matching the home-view search."""
+        rows: "OrderedDict[str, List[str]]" = OrderedDict()
+        for group, lines in built["rows"].items():
+            kept = [cls._highlight_filter_match(ln, flt) for ln in lines if flt in strip_color_codes(ln).lower()]
+            if kept:
+                rows[group] = kept
+        if not rows:
+            return None
+        out = dict(built)
+        out["rows"] = rows
+        return out
+
+    # Caps for the artifact-search rendering: rows per result table and
+    # addresses per row. Both exist to keep per-keystroke redraws snappy
+    # and the table width sane on binaries with thousands of artifacts;
+    # overflow is stated, never silent.
+    SEARCH_MAX_ROWS = 300
+    SEARCH_MAX_ADDRS = 16
+
+    def draw_artifact_search(self) -> None:
+        """Draw the binary-wide artifact search view (Shift+S from home).
+
+        Substring-filters every entity in the binary — imports,
+        libraries, strings, capa matches — against the typed text
+        (name and category), grouped per type with the same colored
+        tables and chevron disclosure as the orphans view. Rows carry
+        the referencing addresses (strings with no resolvable code xref
+        fall back to their storage address); X / G / double-click pivot
+        into the xref listing / path graph / disassembly. Pure
+        in-memory scan — no IDA queries per keystroke.
+        """
+        self.ClearLines()
+        self.print_ribbon()
+
+        INDENT = "    "
+        flt = self.state_machine.search_filter.lower()
+
+        if not flt:
+            self.AddLine(f"{INDENT}{ida_lines.COLSTR('ARTIFACT SEARCH', ida_lines.SCOLOR_DATNAME)}")
+            self.AddLine("")
+            for text in (
+                "Type to search every import, library, string and capa match in the binary.",
+                "X: xref listing   G: path graph   double-click: navigate   ESC: home",
+            ):
+                self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_DSTR}{text}\x02{ida_lines.SCOLOR_DSTR}")
+            self.Refresh()
+            return
+
+        exclusions_on = self.xrefer_obj.settings.get("enable_exclusions", False)
+        excluded = self.xrefer_obj.excluded_entities if exclusions_on else set()
+        matches: Dict[int, List[int]] = {1: [], 2: [], 3: [], 4: []}
+        for idx, entity in enumerate(self.xrefer_obj.entities):
+            type_id = entity[2]
+            if type_id not in matches or idx in excluded:
+                continue
+            if flt in str(entity[1] or "").lower() or flt in str(entity[0] or "").lower():
+                matches[type_id].append(idx)
+
+        total = sum(len(v) for v in matches.values())
+        header = f"{ida_lines.COLSTR(str(total), ida_lines.SCOLOR_VOIDOP)} ARTIFACT(S) MATCH"
+        self.AddLine(f"{INDENT}{ida_lines.COLSTR(header, ida_lines.SCOLOR_DATNAME)}")
+        self.AddLine("")
+
+        if not total:
+            self.AddLine(f"{INDENT}No artifacts match '{flt}' — backspace edits, ESC exits")
+            self.Refresh()
+            return
+
+        for table_name, type_id in self.search_table_to_type.items():
+            indices = matches[type_id]
+            if not indices:
+                continue
+            indices.sort(key=lambda i: (self.xrefer_obj.entities[i][1] or "").lower())
+            built = self._build_orphan_table(table_name, type_id, indices[: self.SEARCH_MAX_ROWS], max_addrs=self.SEARCH_MAX_ADDRS)
+            if built is None:
+                continue
+            # Highlight the matched substring in each row, matching the
+            # home-view search look (the rows already passed the name/
+            # category match, so every one has something to highlight).
+            built = {**built, "rows": OrderedDict(
+                (group, [self._highlight_filter_match(ln, flt) for ln in lines])
+                for group, lines in built["rows"].items()
+            )}
+            # Search results render expanded — the analyst asked for these
+            # rows, so collapsing them behind chevrons would hide the answer.
+            # force_expand keeps it non-destructive (the orphans view's saved
+            # expand/collapse layout is untouched).
+            self._draw_orphan_table(table_name, built, force_expand=True)
+            # The overflow note belongs to the rows; force_expand always
+            # shows them, so the note always belongs here on overflow.
+            if len(indices) > self.SEARCH_MAX_ROWS:
+                note = f"+{len(indices) - self.SEARCH_MAX_ROWS} more — refine the filter"
+                self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_VOIDOP}{note}\x02{ida_lines.SCOLOR_VOIDOP}")
+                self.AddLine("")
+
+        self.Refresh()
+
+    def _build_orphan_table(self, table_name: str, type_id: int, entity_indices: List[int], max_addrs: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """Group entities by ``entity[0]`` (namespace / category) and
         produce a colored table ready to render.
+
+        ``max_addrs`` caps the per-row address list (binary-wide search
+        rows can carry hundreds of use sites — a common import would blow
+        the table width); the overflow collapses into a ``(+N more)``
+        cell, with X / the xref listing as the complete view.
 
         Returns ``{"heading": [head_line, sep_line], "rows": OrderedDict[group: List[str]]}``
         in the same shape as ``self.xrefer_obj.table_data[func_ea][...]``,
@@ -1956,6 +2508,8 @@ class XReferView(idaapi.simplecustviewer_t):
             # navigate to where the string lives.
             if not addrs and type_id == 3:
                 addrs = sorted(string_storage.get(idx, set()))
+            if max_addrs is not None and len(addrs) > max_addrs:
+                addrs = addrs[:max_addrs] + [f"(+{len(addrs) - max_addrs} more)"]
             row.extend(addrs)
             groups.setdefault(category, []).append(row)
 
@@ -2022,44 +2576,84 @@ class XReferView(idaapi.simplecustviewer_t):
         heading = (imp_built or lib_built)["heading"]
         return {"heading": heading, "rows": sorted_rows}
 
-    def _draw_orphan_table(self, table_name: str, built: Dict[str, Any]) -> None:
+    def _draw_orphan_table(self, table_name: str, built: Dict[str, Any], force_expand: bool = False) -> None:
         """Render a single orphan table honouring the top-level expand
         state in ``self.table_states[table_name]`` and the per-group
-        state in ``self.subtable_states[table_name]``."""
+        state in ``self.subtable_states[table_name]``.
+
+        ``force_expand`` (set while a filter is active) renders the table
+        and every group open without mutating the stored states, so the
+        matches are visible immediately — the home-view search does the
+        same — and the analyst's pre-filter expand/collapse layout is
+        restored intact once the filter clears.
+        """
         self.current_table = table_name
-        is_expanded = bool(self.table_states.get(table_name, 1))
-        # Top-level heading line with [+] / [-] marker — same format as
-        # draw_function_context_table_heading.
-        fmt = "[-] %s" if is_expanded else "[+] %s"
+        is_expanded = force_expand or bool(self.table_states.get(table_name, 1))
+        # Top-level heading: ▾/▸ chevron + artifact count — same idiom as the
+        # function context tables (T1/T2). Markers/labels are parsed back via
+        # strip_color_codes + chevron, so click-toggle and E work here too.
+        total = sum(len(r) for r in built.get("rows", {}).values() if r)
+        fmt = "▾ %s" if is_expanded else "▸ %s"
         head_text = built["heading"][0] if built["heading"] else table_name
-        self.AddLine(ida_lines.COLSTR(fmt % head_text, ida_lines.SCOLOR_DATNAME))
+        hline = ida_lines.COLSTR(fmt % head_text, ida_lines.SCOLOR_DATNAME)
+        if total:
+            hline += "  " + ida_lines.COLSTR(f"({total})", ida_lines.SCOLOR_VOIDOP)
+        self.AddLine(hline)
 
         if not is_expanded:
             self.AddLine("")
             return
 
-        # Separator line with the "----" continuation that visually
-        # extends the dash from the [-] marker on the line above.
+        # Separator line with the "----" continuation under the heading.
         if len(built["heading"]) > 1:
             sep = built["heading"][1]
             self.AddLine(ida_lines.COLSTR(f"    ----{sep}", ida_lines.SCOLOR_DATNAME))
 
         subtable_states: Dict[str, bool] = self.subtable_states.setdefault(table_name, {})
         for group_key, group_rows in built["rows"].items():
-            sub_expanded = subtable_states.setdefault(group_key, False)
+            stored = subtable_states.setdefault(group_key, False)
+            sub_expanded = force_expand or stored
             if sub_expanded:
-                self.AddLine(ida_lines.COLSTR("    %s %s" % (ida_lines.COLSTR("(-)", ida_lines.SCOLOR_DATNAME), group_key), ida_lines.SCOLOR_ASMDIR))
+                self.AddLine(self._category_line("▾", group_key, len(group_rows)))
                 # Rows are already colored via create_xrefs_table_colored;
                 # AddLine directly so we don't drag in print_xref_item's
                 # per-function coverage-coloring path (it dereferences
-                # ``xref_coverage_dict[self.func_ea]`` which isn't
-                # populated for the orphans view).
+                # ``xref_coverage_dict[self.func_ea]`` which isn't populated
+                # for the orphans view).
                 for line in group_rows:
                     self.AddLine(f"{self.indent}{line}")
             else:
-                self.AddLine(ida_lines.COLSTR("    %s %s" % (ida_lines.COLSTR("(+)", ida_lines.SCOLOR_DATNAME), group_key), ida_lines.SCOLOR_ASMDIR))
+                self.AddLine(self._category_line("▸", group_key, len(group_rows)))
 
         self.AddLine("")
+
+    def _emit_no_cluster_data_state(self, indent: str) -> None:
+        """Explain why there is no cluster data and what to do about it.
+
+        Replaces the bare "NO CLUSTER ANALYSIS AVAILABLE" dead end. The
+        diagnosis is derived from state already on hand, in order of
+        specificity: a budget-blocked run, an unconfigured/disabled LLM,
+        or an analysis that simply has not been run yet. Menu paths name
+        the real registered actions.
+        """
+
+        def line(text: str, tag: int = ida_lines.SCOLOR_DSTR) -> None:
+            self.AddLine(f"{indent}\x01{tag}{text}\x02{tag}")
+
+        line("No cluster analysis available.", ida_lines.SCOLOR_DATNAME)
+        self.AddLine("")
+        if getattr(self.xrefer_obj, "cluster_token_budget_exceeded", None):
+            line("The last run was blocked: the estimated request exceeds the model's context window.")
+            line("Pick a larger-context model in Edit > XRefer > Configure, or check sizing via")
+            line("Edit > XRefer > Run Analysis > Estimate Cluster Analysis Token Usage.")
+        elif not getattr(self.xrefer_obj, "llm_lookups", False):
+            line("LLM lookups are disabled or not configured.")
+            line("Set a model and API key in Edit > XRefer > Configure, then run")
+            line("Edit > XRefer > Run Analysis > (Re-)run Cluster Analysis.")
+        else:
+            line("Cluster analysis has not produced data yet.")
+            line("Run Edit > XRefer > Run Analysis > (Re-)run Cluster Analysis,")
+            line("or check the Output window for errors from the last run.")
 
     def draw_clusters(self) -> None:
         """Draw clusters view with comprehensive headers."""
@@ -2068,6 +2662,15 @@ class XReferView(idaapi.simplecustviewer_t):
 
         LINE_WIDTH = 85  # Consistent width for all text blocks
         INDENT = "    "  # Standard 4-space indent
+
+        # This view is reachable without cluster data (first run with no
+        # LLM configured, chip clicks, pinned variants) — never crash on
+        # clusters=None, diagnose instead.
+        if not self.xrefer_obj.clusters:
+            self._emit_no_cluster_data_state(INDENT)
+            self.Jump(0, 0)
+            self.Refresh()
+            return
 
         # Count total clusters and functions, respecting the
         # hide-library toggle so the header reflects what is shown.
@@ -2087,52 +2690,67 @@ class XReferView(idaapi.simplecustviewer_t):
         for cluster in self.xrefer_obj.clusters:
             count_cluster_stats(cluster)
 
-        # Add main heading with statistics
+        # Quiet stat header — the ribbon already names this view, so no
+        # ALL-CAPS title / arrows / full-width rule.
         header = (
-            f"FUNCTION CLUSTERS DISCOVERED → "
-            f"{ida_lines.COLSTR(str(total_clusters), ida_lines.SCOLOR_VOIDOP)} "
-            f"(CONTAINING {ida_lines.COLSTR(str(len(total_functions)), ida_lines.SCOLOR_VOIDOP)} "
-            f"UNIQUE FUNCTIONS)"
+            ida_lines.COLSTR(str(total_clusters), ida_lines.SCOLOR_VOIDOP)
+            + ida_lines.COLSTR(" clusters · ", ida_lines.SCOLOR_DSTR)
+            + ida_lines.COLSTR(str(len(total_functions)), ida_lines.SCOLOR_VOIDOP)
+            + ida_lines.COLSTR(" functions", ida_lines.SCOLOR_DSTR)
         )
-        self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_DATNAME}{header}\x02{ida_lines.SCOLOR_DATNAME}")
-        self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_DATNAME}{'=' * LINE_WIDTH}\x02{ida_lines.SCOLOR_DATNAME}")
+        self.AddLine(f"{INDENT}{header}")
         self.AddLine("")
 
-        if self.print_llm_disclaimer():
-            # Add separator matching disclaimer width
-            self.AddLine(f"{INDENT}{'-' * LINE_WIDTH}")
-            self.AddLine("")
+        # Per-view filter (S): blocks are kept/dropped whole — a cluster
+        # block renders when it or any descendant matches, so wrapped
+        # descriptions don't get shredded line-by-line and matches stay
+        # rooted under their ancestors.
+        flt = ""
+        if self.state_machine.view_filter_active:
+            flt = self.state_machine.search_filter.lower()
+
+        if not flt:
+            self.print_llm_disclaimer()
 
         # Get cluster analysis data
         cluster_analysis = self.xrefer_obj.cluster_analysis
         if not cluster_analysis:
-            self.AddLine(f"{INDENT}NO CLUSTER ANALYSIS AVAILABLE")
+            self._emit_no_cluster_data_state(INDENT)
+            self.Jump(0, 0)
+            self.Refresh()
             return
 
-        # Add binary information with proper alignment
-        binary_cat = cluster_analysis.get("binary_category", "Unknown")
-        if isinstance(binary_cat, enum.Enum):
-            binary_cat = binary_cat.name
+        # While the analyst is typing, the binary summary gives way to the
+        # table — every redraw jumps to the top, so matches must be visible
+        # without scrolling past a screenful of prose.
+        if not flt:
+            # Add binary information with proper alignment
+            binary_cat = cluster_analysis.get("binary_category", "Unknown")
+            if isinstance(binary_cat, enum.Enum):
+                binary_cat = binary_cat.name
 
-        # Print category on one line
-        self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_DNAME}Binary Category: \x02{ida_lines.SCOLOR_DNAME}\x01{ida_lines.SCOLOR_VOIDOP}{binary_cat}\x02{ida_lines.SCOLOR_VOIDOP}")
+            # Print category on one line
+            self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_DNAME}Binary Category: \x02{ida_lines.SCOLOR_DNAME}\x01{ida_lines.SCOLOR_VOIDOP}{binary_cat}\x02{ida_lines.SCOLOR_VOIDOP}")
 
-        # Report (markdown) or plain description, per the R toggle
-        showing_report = self.state_machine.cluster_manager.is_showing_report()
-        binary_desc = cluster_analysis.get(
-            "binary_report" if showing_report else "binary_description", "Not available"
-        )
-        self._emit_binary_summary_body(binary_desc, showing_report, INDENT, LINE_WIDTH)
+            # Report (markdown) or plain description, per the R toggle
+            showing_report = self.state_machine.cluster_manager.is_showing_report()
+            binary_desc = cluster_analysis.get(
+                "binary_report" if showing_report else "binary_description", "Not available"
+            )
+            self._emit_binary_summary_body(binary_desc, showing_report, INDENT, LINE_WIDTH)
+            self.AddLine("")
 
-        self.AddLine(f"{INDENT}(Press R to toggle between binary description and report)")
-        self.AddLine("")
-
-        # Get formatted lines from helper
+        # Get formatted lines from helper. The filter match set is
+        # computed inside, against the same library-trim set the
+        # renderer applies — keeping matcher and visible blocks in
+        # lockstep by construction.
         lines = draw_cluster_hierarchy(
             self.xrefer_obj.clusters,
             cluster_analysis,
             self.xrefer_obj.paths,
             hide_library=self.state_machine.hide_library_clusters,
+            flt=flt,
+            name_resolver=lambda ea: idc.get_func_name(int(ea)) or "",
         )
 
         # Add lines to view
@@ -2141,6 +2759,198 @@ class XReferView(idaapi.simplecustviewer_t):
 
         self.Jump(0, 0)
         self.Refresh()
+
+    def draw_attack_matrix(self) -> None:
+        """Draw the ATT&CK matrix view.
+
+        Aggregates the per-cluster MITRE ATT&CK mappings into a binary-wide
+        (or cluster-scoped) kill-chain matrix: a coverage strip listing every
+        tactic with a bar scaled to its technique count, then the techniques
+        grouped by tactic in kill-chain order. Each technique shows a single
+        representative rationale and the cluster(s) that ground it as
+        clickable ``cluster.id.NNNN`` tokens; the technique id is clickable
+        too (opens its attack.mitre.org page).
+        """
+        self.ClearLines()
+        self.print_ribbon()
+
+        LINE_WIDTH = 85
+        INDENT = "    "
+        BAR_CELLS = 10
+
+        def col(text: str, tag: int) -> str:
+            return ida_lines.COLSTR(text, tag)
+
+        sm = self.state_machine
+        scope_id = sm.attack_matrix_scope_cluster_id
+
+        cluster_analysis = self.xrefer_obj.cluster_analysis
+        if not cluster_analysis:
+            self._emit_no_cluster_data_state(INDENT)
+            self.Jump(0, 0)
+            self.Refresh()
+            return
+
+        hide_library = sm.hide_library_clusters
+        matrix = aggregate_mitre_matrix(
+            self.xrefer_obj.clusters,
+            cluster_analysis,
+            scope_cluster_id=scope_id,
+            hide_library=hide_library if scope_id is None else False,
+        )
+
+        # ---- Header ----------------------------------------------------
+        if scope_id is not None:
+            header = (
+                f"ATT&CK MATRIX → cluster.id.{scope_id:04d}  "
+                f"{col(str(matrix.technique_count), ida_lines.SCOLOR_VOIDOP)} TECHNIQUE(S) / "
+                f"{col(str(matrix.tactic_count), ida_lines.SCOLOR_VOIDOP)} TACTIC(S)"
+            )
+        else:
+            header = (
+                f"ATT&CK MATRIX → "
+                f"{col(str(matrix.technique_count), ida_lines.SCOLOR_VOIDOP)} TECHNIQUES ACROSS "
+                f"{col(str(matrix.tactic_count), ida_lines.SCOLOR_VOIDOP)} TACTICS"
+            )
+        self.AddLine(f"{INDENT}{col(header, ida_lines.SCOLOR_DATNAME)}")
+        self.AddLine(f"{INDENT}{col('=' * LINE_WIDTH, ida_lines.SCOLOR_DATNAME)}")
+        self.AddLine("")
+
+        self.print_llm_disclaimer()
+
+        # Summary subline + interaction hint.
+        if scope_id is not None:
+            sub = f"Scope: cluster.id.{scope_id:04d} — press K or ESC to return to all clusters"
+        else:
+            uncovered = len(matrix.uncovered_tactics)
+            sub = (
+                f"Grounded in {matrix.clusters_with_techniques} of {matrix.total_clusters} "
+                f"clusters · {uncovered} tactic(s) not observed · Enterprise matrix"
+            )
+            if hide_library:
+                sub += " · library clusters hidden (L)"
+        self.AddLine(f"{INDENT}{col(sub, ida_lines.SCOLOR_DSTR)}")
+        if scope_id is None:
+            hint = "(K/ESC exit · G grid · L hide library · click cluster.id.xxxx · T#### → MITRE)"
+        else:
+            hint = "(K/ESC exit · G grid · click cluster.id.xxxx · T#### → MITRE)"
+        self.AddLine(f"{INDENT}{col(hint, ida_lines.SCOLOR_AUTOCMT)}")
+        self.AddLine("")
+
+        if matrix.is_empty:
+            self.AddLine(f"{INDENT}{col('No MITRE ATT&CK techniques were mapped for these clusters.', ida_lines.SCOLOR_DSTR)}")
+            self.AddLine(f"{INDENT}{col('(Techniques are produced during cluster analysis when artifacts support them.)', ida_lines.SCOLOR_AUTOCMT)}")
+            self.Jump(0, 0)
+            self.Refresh()
+            return
+
+        # ---- Kill-chain coverage strip ---------------------------------
+        self.AddLine(f"{INDENT}{col('KILL-CHAIN COVERAGE', ida_lines.SCOLOR_DATNAME)}")
+        self.AddLine(f"{INDENT}{col('-' * LINE_WIDTH, ida_lines.SCOLOR_AUTOCMT)}")
+        max_n = matrix.max_tactic_count or 1
+        label_w = max((len(t) for t, _ in matrix.coverage), default=10)
+        for tactic, count in matrix.coverage:
+            filled = int(round(count / max_n * BAR_CELLS)) if max_n else 0
+            if count > 0 and filled == 0:
+                filled = 1
+            filled = min(filled, BAR_CELLS)
+            label = tactic.ljust(label_w)
+            count_str = str(count) if count else "·"
+            if count > 0:
+                self.AddLine(
+                    f"{INDENT}  {col(label, ida_lines.SCOLOR_DNAME)}  "
+                    f"{col('█' * filled, ida_lines.SCOLOR_VOIDOP)}"
+                    f"{col('░' * (BAR_CELLS - filled), ida_lines.SCOLOR_AUTOCMT)}  "
+                    f"{col(count_str, ida_lines.SCOLOR_VOIDOP)}"
+                )
+            else:
+                self.AddLine(
+                    f"{INDENT}  {col(label, ida_lines.SCOLOR_AUTOCMT)}  "
+                    f"{col('░' * BAR_CELLS, ida_lines.SCOLOR_AUTOCMT)}  "
+                    f"{col(count_str, ida_lines.SCOLOR_AUTOCMT)}"
+                )
+        self.AddLine("")
+
+        # ---- Techniques by tactic --------------------------------------
+        self.AddLine(f"{INDENT}{col('TECHNIQUES BY TACTIC', ida_lines.SCOLOR_DATNAME)}")
+        self.AddLine(f"{INDENT}{col('-' * LINE_WIDTH, ida_lines.SCOLOR_AUTOCMT)}")
+
+        id_w = 11
+        body_indent = INDENT + "  " + " " * id_w  # aligns under the technique name
+        rat_width = max(20, LINE_WIDTH - len(body_indent))
+        name_avail = LINE_WIDTH - len(INDENT) - 2 - id_w
+        for group in matrix.tactics:
+            self.AddLine("")
+            self.AddLine(f"{INDENT}{col(group.tactic, ida_lines.SCOLOR_DNAME)}")
+            for t in group.techniques:
+                name = t.name or ""
+                if len(name) > name_avail:
+                    name = name[: name_avail - 2] + ".."
+                id_col = t.id.ljust(id_w)
+                self.AddLine(
+                    f"{INDENT}  {col(id_col, ida_lines.SCOLOR_VOIDOP)}{col(name, ida_lines.SCOLOR_DSTR)}"
+                )
+                rat = t.representative_rationale
+                if rat:
+                    for wrapped in word_wrap_text(rat, rat_width):
+                        self.AddLine(f"{body_indent}{col(wrapped, ida_lines.SCOLOR_AUTOCMT)}")
+                # Cluster chips — binary-wide only (the scoped view already
+                # names its cluster in the header).
+                if scope_id is None and t.cluster_ids:
+                    chip_lines = self._pack_cluster_chips(t.cluster_ids, rat_width - 2)
+                    for i, chip_line in enumerate(chip_lines):
+                        prefix = col("↳ ", ida_lines.SCOLOR_SYMBOL) if i == 0 else "  "
+                        self.AddLine(f"{body_indent}{prefix}{col(chip_line, ida_lines.SCOLOR_DEMNAME)}")
+
+        self.Jump(0, 0)
+        self.Refresh()
+
+    def _pack_cluster_chips(self, cluster_ids: List[int], width: int) -> List[str]:
+        """Pack ``cluster.id.NNNN`` tokens into lines no wider than ``width``,
+        keeping each token whole so it stays clickable."""
+        tokens = [f"cluster.id.{cid:04d}" for cid in cluster_ids]
+        lines: List[str] = []
+        cur = ""
+        for tok in tokens:
+            cand = tok if not cur else f"{cur}   {tok}"
+            if len(cand) > width and cur:
+                lines.append(cur)
+                cur = tok
+            else:
+                cur = cand
+        if cur:
+            lines.append(cur)
+        return lines
+
+    def open_attack_matrix_popup(self) -> None:
+        """Open the Qt heat-grid popup for the current ATT&CK matrix.
+
+        Aggregates the same matrix the TUI view shows (honoring the current
+        cluster scope and the hide-library toggle) and hands it to the
+        modal popup. Defensive — a popup failure must never crash the view.
+        """
+        try:
+            cluster_analysis = self.xrefer_obj.cluster_analysis
+            if not cluster_analysis:
+                return
+            sm = self.state_machine
+            scope_id = sm.attack_matrix_scope_cluster_id
+            matrix = aggregate_mitre_matrix(
+                self.xrefer_obj.clusters,
+                cluster_analysis,
+                scope_cluster_id=scope_id,
+                hide_library=sm.hide_library_clusters if scope_id is None else False,
+            )
+            from xrefer.gui.attack_matrix_popup import show_attack_matrix_popup
+
+            suffix = f"cluster.id.{scope_id:04d}" if scope_id is not None else None
+            try:
+                base_name = idaapi.get_root_filename() or None
+            except Exception:
+                base_name = None
+            show_attack_matrix_popup(matrix, title_suffix=suffix, base_name=base_name)
+        except Exception as e:
+            log(f"[-] Error opening ATT&CK matrix popup: {str(e)}")
 
     def _emit_binary_summary_body(self, binary_desc: str, showing_report: bool, indent: str, line_width: int) -> None:
         """Emit the binary report (markdown) or plain description.
@@ -2616,6 +3426,13 @@ class XReferView(idaapi.simplecustviewer_t):
         LINE_WIDTH = 85
         INDENT = "    "
 
+        # Reachable without cluster data (first run with no LLM configured,
+        # pinned variants, sync redraws) — diagnose instead of crashing on
+        # clusters=None below.
+        if not self.xrefer_obj.clusters:
+            self._emit_no_cluster_data_state(INDENT)
+            return
+
         # Count total clusters and subclusters
         total_clusters = 0
         unique_functions = set()
@@ -2647,25 +3464,24 @@ class XReferView(idaapi.simplecustviewer_t):
             self.draw_individual_cluster_graph(current_view.cluster_id)
             return
 
-        # Add main heading with enhanced statistics
+        # Quiet stat header (ribbon names the view) + compact cursor context
+        # instead of the full View/Function/Status/Adjacent banner.
         header = (
-            f"CLUSTER GRAPH VIEW → {ida_lines.COLSTR(str(total_clusters), ida_lines.SCOLOR_VOIDOP)} "
-            f"DISCOVERED CLUSTERS, {ida_lines.COLSTR(str(len(unique_functions)), ida_lines.SCOLOR_NUMBER)} FUNCTIONS"
+            ida_lines.COLSTR(str(total_clusters), ida_lines.SCOLOR_VOIDOP)
+            + ida_lines.COLSTR(" clusters · ", ida_lines.SCOLOR_DSTR)
+            + ida_lines.COLSTR(str(len(unique_functions)), ida_lines.SCOLOR_VOIDOP)
+            + ida_lines.COLSTR(" functions", ida_lines.SCOLOR_DSTR)
         )
-        self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_DATNAME}{header}\x02{ida_lines.SCOLOR_DATNAME}")
-        self.AddLine(f"{INDENT}\x01{ida_lines.SCOLOR_DATNAME}{'=' * LINE_WIDTH}\x02{ida_lines.SCOLOR_DATNAME}")
-        for line in self._build_cluster_context_banner(None):
-            self.AddLine(line)
+        self.AddLine(f"{INDENT}{header}")
         self.AddLine("")
+        self._emit_compact_cluster_context(self.func_ea)
 
-        if self.print_llm_disclaimer():
-            self.AddLine(f"{INDENT}{'-' * LINE_WIDTH}")
-            self.AddLine("")
+        self.print_llm_disclaimer()
 
         # Get cluster analysis data
         cluster_analysis = self.xrefer_obj.cluster_analysis
         if not cluster_analysis:
-            self.AddLine(f"{INDENT}NO CLUSTER ANALYSIS AVAILABLE")
+            self._emit_no_cluster_data_state(INDENT)
             return
 
         # Print binary analysis with enhanced formatting
@@ -2684,19 +3500,28 @@ class XReferView(idaapi.simplecustviewer_t):
             "binary_report" if showing_report else "binary_description", "Not available"
         )
         self._emit_binary_summary_body(binary_desc, showing_report, INDENT, LINE_WIDTH)
-
-        self.AddLine(f"{INDENT}(Press R to toggle between binary description and report)")
         self.AddLine("")
 
-        try:
+        def build_layout() -> Optional[List[str]]:
             graph = create_cluster_relationship_graph(
                 self.xrefer_obj.clusters,
                 self.xrefer_obj.cluster_analysis,
                 paths=self.xrefer_obj.paths,
                 hide_library=self.state_machine.hide_library_clusters,
             )
-
             if not graph:
+                return None
+            # For single node case, add some padding to make it visible
+            if len(graph.nodes()) == 1:
+                return ["", "", *ascii_graphs.graph_to_ascii(graph).splitlines(), "", ""]
+            return ascii_graphs.graph_to_ascii(graph).splitlines()
+
+        try:
+            # Layout is cursor-independent and cached per library-visibility
+            # toggle; only the colorization below runs per redraw.
+            graph_lines = self._cluster_ascii_lines(("overview", self.state_machine.hide_library_clusters), build_layout)
+
+            if graph_lines is None:
                 self.AddLine(f"{INDENT}FAILED TO CREATE CLUSTER GRAPH")
                 return
 
@@ -2705,12 +3530,6 @@ class XReferView(idaapi.simplecustviewer_t):
             self.AddLine("")
 
             try:
-                # For single node case, add some padding to make it visible
-                if len(graph.nodes()) == 1:
-                    graph_lines = ["", "", *ascii_graphs.graph_to_ascii(graph).splitlines(), "", ""]
-                else:
-                    graph_lines = ascii_graphs.graph_to_ascii(graph).splitlines()
-
                 for line in graph_lines:
                     colored_line = self._format_cluster_graph_line(line)
                     self.AddLine(f"{INDENT}    {colored_line}")
@@ -2806,6 +3625,65 @@ class XReferView(idaapi.simplecustviewer_t):
         data = find_cluster_analysis(analysis, cluster_id) or {}
         return (data.get("label") or "").strip()
 
+    def _invalidate_cluster_render_caches(self) -> None:
+        """Drop every view-side cache derived from cluster data: the ASCII
+        layouts of the cluster graphs, the func→cluster-ids map, the
+        intermediate-path role index, the callgraph indices and the
+        nearest-cluster memo. Called when cluster data or the
+        addresses/names baked into it change (cluster re-analysis, image
+        rebase, cluster-function rename)."""
+        self._cluster_ascii_cache = {}
+        self._cluster_ascii_token = None
+        self._func_to_cluster_ids_cache = None
+        self._func_path_index_cache = None
+        self._callgraph_callees_cache = None
+        self._callgraph_callers_cache = None
+        self._nearest_clusters_memo = {}
+
+    def _cluster_ascii_lines(self, key: Any, build: Callable[[], Optional[List[str]]]) -> Optional[List[str]]:
+        """Return the (cached) cursor-independent ASCII layout for a cluster
+        graph view.
+
+        The Sugiyama layout is the expensive part of cluster-graph rendering
+        — hundreds of milliseconds and superlinear in node count — and it
+        does not depend on the cursor: the per-cursor highlight is applied
+        line by line afterwards. Caching the raw ASCII lines per view key
+        means cluster sync pays only the colorization pass on each cursor
+        landing instead of a full relayout.
+
+        Cache entries are additionally guarded by the identity of the
+        clusters / cluster_analysis objects: any re-analysis or DB reload
+        reassigns those, which flushes the cache even if an explicit
+        invalidation site is ever missed. The wait box is shown only while
+        actually building (cache misses); hits render instantly.
+
+        ``build`` returns the layout lines, or None on failure — failures
+        are reported by the caller and never cached.
+        """
+        token = (
+            id(self.xrefer_obj.clusters),
+            len(self.xrefer_obj.clusters or []),
+            id(self.xrefer_obj.cluster_analysis),
+            # paths is mutated in place by secondary-EP analysis and feeds
+            # the overview graph; the EP set tracks that mutation.
+            tuple(sorted(self.xrefer_obj.paths or {})),
+        )
+        if token != self._cluster_ascii_token:
+            self._cluster_ascii_cache = {}
+            self._cluster_ascii_token = token
+        lines = self._cluster_ascii_cache.get(key)
+        if lines is None:
+            # Synchronous main-thread work; IDA nests show/hide pairs.
+            idaapi.show_wait_box("HIDECANCEL\nGenerating graph...")
+            try:
+                lines = build()
+            finally:
+                idaapi.hide_wait_box()
+            if lines is None:
+                return None
+            self._cluster_ascii_cache[key] = lines
+        return lines
+
     def _func_to_cluster_ids(self) -> Dict[int, Set[int]]:
         """Build (lazily) a mapping ``func_ea → {cluster_ids}`` covering
         every function that is a member (``nodes`` or ``root_node``) of
@@ -2836,6 +3714,77 @@ class XReferView(idaapi.simplecustviewer_t):
             walk(top)
         self._func_to_cluster_ids_cache = cache
         return cache
+
+    def _func_path_index(self) -> Dict[int, Dict[int, Dict[str, Any]]]:
+        """Lazily build ``func_ea → {cluster_id: record}`` over every
+        cluster's intermediate paths in ONE pass, then answer all four
+        path-role questions with dict lookups. The four consumers
+        (cursor classification, gateway hints, the xrefs-section
+        memberships, the Roles section) used to each re-walk every
+        cluster's every path tuple per redraw — per cursor move in
+        cluster sync, per keystroke in search — recomputing facts that
+        are frozen for the life of the analysis.
+
+        Record fields (per func, per cluster — the three different
+        "intermediate" predicates the consumers rely on):
+
+        * ``any`` — appears at any position in any of the cluster's
+          paths (cursor classification's predicate for non-members).
+        * ``interior`` — appears at a non-endpoint position
+          (gateway hints, xrefs-section memberships).
+        * ``member_endpoints`` — interior on a path whose BOTH
+          endpoints are members of that cluster (the Roles section's
+          stricter predicate, which filters out paths copied up from
+          subclusters by ``extract_cluster``).
+        * ``best`` — closest endpoint over interior occurrences as
+          ``(gateway_ea, hops, direction)``, preserving the original
+          first-wins-on-equal-hops selection (same walk order).
+
+        Invalidated alongside the other cluster-derived caches in
+        ``_invalidate_cluster_render_caches``.
+        """
+        cache = getattr(self, "_func_path_index_cache", None)
+        if cache is not None:
+            return cache
+        index: Dict[int, Dict[int, Dict[str, Any]]] = {}
+
+        def rec_for(func_ea: int, cluster_id: int) -> Dict[str, Any]:
+            by_cluster = index.setdefault(func_ea, {})
+            rec = by_cluster.get(cluster_id)
+            if rec is None:
+                rec = {"any": False, "interior": False, "member_endpoints": False, "best": None}
+                by_cluster[cluster_id] = rec
+            return rec
+
+        def walk(cluster: "FunctionalCluster") -> None:
+            members = set(cluster.nodes)
+            members.add(cluster.root_node)
+            for (src, tgt), paths in (cluster.intermediate_paths or {}).items():
+                endpoints_are_members = src in members and tgt in members
+                for path in paths:
+                    last = len(path) - 1
+                    for idx, node in enumerate(path):
+                        rec = rec_for(node, cluster.id)
+                        rec["any"] = True
+                        if 0 < idx < last:
+                            rec["interior"] = True
+                            if endpoints_are_members:
+                                rec["member_endpoints"] = True
+                            src_hops = idx                  # node → … → path[0]
+                            tgt_hops = last - idx           # node → … → path[-1]
+                            if src_hops <= tgt_hops:
+                                cand = (path[0], src_hops, "caller")
+                            else:
+                                cand = (path[-1], tgt_hops, "callee")
+                            if rec["best"] is None or cand[1] < rec["best"][1]:
+                                rec["best"] = cand
+            for sub in cluster.subclusters or []:
+                walk(sub)
+
+        for top in self.xrefer_obj.clusters or []:
+            walk(top)
+        self._func_path_index_cache = index
+        return index
 
     def _ensure_callgraph_indices(self) -> None:
         """Lazily build forward / reverse function-call indices off
@@ -2959,6 +3908,16 @@ class XReferView(idaapi.simplecustviewer_t):
         """
         if not self.func_ea or max_depth < 1:
             return []
+        # The banner runs this BFS up to twice per render for unclustered
+        # cursors (V-hint applicability + the nearest-cluster hint itself);
+        # memoize per (cursor, args). Cleared with the cluster caches.
+        memo = getattr(self, "_nearest_clusters_memo", None)
+        if memo is None:
+            memo = self._nearest_clusters_memo = {}
+        memo_key = (self.func_ea, max_depth, max_results)
+        cached = memo.get(memo_key)
+        if cached is not None:
+            return list(cached)
         func_to_clusters = self._func_to_cluster_ids()
         found: Dict[int, Tuple[int, int, str]] = {}
 
@@ -2987,10 +3946,12 @@ class XReferView(idaapi.simplecustviewer_t):
 
         walk("caller")
         walk("callee")
-        return sorted(
+        result = sorted(
             ((cid, depth, gateway_ea, direction) for cid, (depth, gateway_ea, direction) in found.items()),
             key=lambda t: (t[1], t[0]),  # nearest first, then deterministic by cluster id
         )
+        memo[memo_key] = result
+        return list(result)
 
     def _adjacent_clusters_for_cursor(self, exclude_ids: Set[int]) -> List[Tuple[int, int, int, str]]:
         """Find clusters that contain a direct caller or callee of the
@@ -3058,39 +4019,15 @@ class XReferView(idaapi.simplecustviewer_t):
         if not self.func_ea:
             return []
 
-        # cluster_id → (gateway_ea, hops, direction) — keep the closest
-        # endpoint when the same cursor appears in multiple paths under
-        # the same cluster.
-        best: Dict[int, Tuple[int, int, str]] = {}
-
-        def consider(cluster_id: int, gateway_ea: int, hops: int, direction: str) -> None:
-            existing = best.get(cluster_id)
-            if existing is None or hops < existing[1]:
-                best[cluster_id] = (gateway_ea, hops, direction)
-
-        def walk(cluster: "FunctionalCluster") -> None:
-            for (_src, _tgt), paths in (cluster.intermediate_paths or {}).items():
-                for path in paths:
-                    try:
-                        idx = path.index(self.func_ea)
-                    except ValueError:
-                        continue
-                    if idx <= 0 or idx >= len(path) - 1:
-                        # Endpoint, not intermediate — skip.
-                        continue
-                    src_hops = idx                  # cursor → … → path[0]
-                    tgt_hops = len(path) - 1 - idx  # cursor → … → path[-1]
-                    if src_hops <= tgt_hops:
-                        consider(cluster.id, path[0], src_hops, "caller")
-                    else:
-                        consider(cluster.id, path[-1], tgt_hops, "callee")
-            for sub in cluster.subclusters or []:
-                walk(sub)
-
-        for top in self.xrefer_obj.clusters or []:
-            walk(top)
-
-        return [(cid, gw, hops, direction) for cid, (gw, hops, direction) in best.items()]
+        # All path scanning happened once in _func_path_index; this is a
+        # per-cursor dict read. ``best`` holds the closest endpoint when
+        # the cursor appears in multiple paths under the same cluster.
+        by_cluster = self._func_path_index().get(self.func_ea, {})
+        return [
+            (cid, *rec["best"])
+            for cid, rec in by_cluster.items()
+            if rec["interior"] and rec["best"] is not None
+        ]
 
     def _classify_cursor_relative_to_clusters(self, current_cluster_id: Optional[int]) -> Tuple[str, List[int]]:
         """Decide what status to show for ``self.func_ea`` relative to the
@@ -3118,32 +4055,27 @@ class XReferView(idaapi.simplecustviewer_t):
         if func is None:
             return ("no_function", [])
 
-        containing: List[int] = []
-
-        def walk(c: "FunctionalCluster") -> None:
-            if self.func_ea in c.nodes or self.func_ea == c.root_node:
-                containing.append(c.id)
-            for sc in c.subclusters:
-                walk(sc)
-
-        for top in self.xrefer_obj.clusters or []:
-            walk(top)
-
+        # Membership and path presence both come from the prebuilt maps —
+        # this runs on every banner render / cursor move.
+        containing = self._func_to_cluster_ids().get(self.func_ea, set())
         if containing:
-            unique_ids = sorted(set(containing))
+            unique_ids = sorted(containing)
             if current_cluster_id is not None and current_cluster_id in unique_ids:
                 return ("in_current", unique_ids)
             return ("in_other", unique_ids)
 
-        # Not in any cluster's nodes — check intermediate paths.
+        # Not in any cluster's nodes — check intermediate paths. The tree
+        # walk (O(#clusters), no path scans) preserves the original
+        # semantics: a cluster that matches claims the role and its
+        # subclusters are not separately reported.
+        path_index = self._func_path_index().get(self.func_ea, {})
         intermediate_owners: List[int] = []
 
         def walk_intermediate(c: "FunctionalCluster") -> None:
-            for (_src, _tgt), paths in c.intermediate_paths.items():
-                for path in paths:
-                    if self.func_ea in path:
-                        intermediate_owners.append(c.id)
-                        return
+            rec = path_index.get(c.id)
+            if rec is not None and rec["any"]:
+                intermediate_owners.append(c.id)
+                return
             for sc in c.subclusters:
                 walk_intermediate(sc)
 
@@ -3293,6 +4225,47 @@ class XReferView(idaapi.simplecustviewer_t):
             [hint("(no nearby cluster within 3 hops)")],
         )
 
+    def _emit_compact_cluster_context(self, func_ea: int) -> None:
+        """Emit a compact 2-line cluster-context strip (membership + adjacency)
+        for the xref and cluster-graph-overview views.
+
+        Replaces the full multi-row banner (View/Function/Status/Adjacent) plus
+        the verbose ``print_cluster_membership`` roles block: the current
+        function's address/name already live in the ribbon, and the full role
+        breakdown lives in the cluster views. Reuses the banner's classification
+        and adjacency helpers, so the membership chip + labels are identical —
+        just without the repetition. No-op when the cursor isn't on a function.
+        """
+        try:
+            on_func = bool(self.func_ea) and ida_funcs.get_func(ida_idaapi.ea_t(int(self.func_ea))) is not None
+        except Exception:
+            on_func = False
+        if not on_func:
+            return
+
+        status_kind, cluster_ids = self._classify_cursor_relative_to_clusters(None)
+        if status_kind == "no_function":
+            return
+        value, _cont = self._format_status_value(status_kind, cluster_ids, None)
+        for line in self._banner_field("Clusters:", value):
+            self.AddLine(line)
+
+        adj = self._adjacent_clusters_for_cursor(exclude_ids=set(cluster_ids))
+        if adj:
+            adj.sort(key=lambda t: t[0])
+            shown = adj[:4]
+            cont: List[str] = []
+            for cid, _neighbor_ea, edge_addr, direction in shown:
+                chip = self._format_cluster_chip(cid)
+                arrow = ida_lines.COLSTR("←" if direction == "caller" else "→", ida_lines.SCOLOR_VOIDOP)
+                edge = ida_lines.COLSTR(f"0x{edge_addr:x}", ida_lines.SCOLOR_DEMNAME)
+                cont.append(f"↳ {chip} {arrow} {edge}")
+            if len(adj) > len(shown):
+                cont.append(ida_lines.COLSTR(f"↳ …and {len(adj) - len(shown)} more", ida_lines.SCOLOR_DSTR))
+            for line in self._banner_field("Adjacent:", "", cont):
+                self.AddLine(line)
+        self.AddLine("")
+
     def _build_cluster_context_banner(
         self,
         current_cluster_id: Optional[int],
@@ -3358,23 +4331,17 @@ class XReferView(idaapi.simplecustviewer_t):
             )
         out.extend(self._banner_field("View:", view_value))
 
-        # ── Cursor row ─────────────────────────────────────────────
+        # ── Function gate ──────────────────────────────────────────
+        # The current function (addr + name) already lives in the ribbon, so
+        # the banner no longer repeats it as a "Function:" row; it only needs
+        # to know whether the cursor is on a function to decide whether the
+        # Status / Adjacent rows below apply.
         try:
             on_func = ida_funcs.get_func(ida_idaapi.ea_t(int(self.func_ea))) is not None if self.func_ea else False
         except Exception:
             on_func = False
         if not self.func_ea or not on_func:
-            cursor_value = ida_lines.COLSTR("(not inside a recognised function)", ida_lines.SCOLOR_DSTR)
-            out.extend(self._banner_field("Function:", cursor_value))
             return out
-
-        try:
-            fname = idc.get_func_name(ida_idaapi.ea_t(int(self.func_ea))) or ""
-        except Exception:
-            fname = ""
-        addr_chip = ida_lines.COLSTR(f"0x{self.func_ea:x}", ida_lines.SCOLOR_DEMNAME)
-        name_part = f"  {ida_lines.COLSTR(fname, ida_lines.SCOLOR_LIBNAME)}" if fname else ""
-        out.extend(self._banner_field("Function:", f"{addr_chip}{name_part}"))
 
         # ── Status row ─────────────────────────────────────────────
         # Both the M and V discoverability hints live as continuation
@@ -3451,8 +4418,6 @@ class XReferView(idaapi.simplecustviewer_t):
 
         if not self.xrefer_obj or not self.xrefer_obj.clusters:
             return None
-
-        log(f"\nSearching for function 0x{func_ea:x}")
 
         def check_root_node(cluster) -> Optional[Tuple[int, bool]]:
             if func_ea == cluster.root_node:
@@ -3562,24 +4527,26 @@ class XReferView(idaapi.simplecustviewer_t):
 
             return cluster_str
 
+        # Per-cluster path facts come from the prebuilt index (this method
+        # used to rescan every cluster's path tuples per render).
+        path_index = self._func_path_index().get(func_ea, {})
+
         # Check all clusters and subclusters
         def check_cluster(cluster, parent_id=None):
-            cluster_info = format_cluster_info(cluster.id)
-
             # First check if function is root node
             is_member_here = False
             if func_ea == cluster.root_node:
-                root_memberships.append((cluster_info, parent_id))
+                root_memberships.append((format_cluster_info(cluster.id), parent_id))
                 is_member_here = True
             # Check if function is regular node (but not root node)
             elif func_ea in cluster.nodes:  # Only add as regular node if not root
-                direct_memberships.append((cluster_info, parent_id))
+                direct_memberships.append((format_cluster_info(cluster.id), parent_id))
                 is_member_here = True
 
             # Only classify as "intermediary in this cluster" when the
             # function is *not* already a member of this cluster, AND
             # the path's endpoints are themselves direct members of
-            # this cluster.
+            # this cluster (the index's ``member_endpoints`` predicate).
             #
             # The endpoint-membership check filters out paths that
             # were copied up from subclusters by ``extract_cluster``
@@ -3589,19 +4556,9 @@ class XReferView(idaapi.simplecustviewer_t):
             # be misleading — the path doesn't actually connect any
             # of the parent's own member functions.
             if not is_member_here:
-                found_intermediate = False
-                for (src, tgt), paths in cluster.intermediate_paths.items():
-                    if found_intermediate:
-                        break
-                    src_is_member = (src == cluster.root_node) or (src in cluster.nodes)
-                    tgt_is_member = (tgt == cluster.root_node) or (tgt in cluster.nodes)
-                    if not (src_is_member and tgt_is_member):
-                        continue
-                    for path in paths:
-                        if func_ea in path and func_ea != path[0] and func_ea != path[-1]:
-                            intermediate_memberships.append((cluster_info, parent_id))
-                            found_intermediate = True
-                            break
+                rec = path_index.get(cluster.id)
+                if rec is not None and rec["member_endpoints"]:
+                    intermediate_memberships.append((format_cluster_info(cluster.id), parent_id))
 
             # Recursively check subclusters
             for subcluster in cluster.subclusters:
@@ -3709,22 +4666,6 @@ class XReferView(idaapi.simplecustviewer_t):
                 return
 
             cluster_data = find_cluster_analysis(self.xrefer_obj.cluster_analysis, cluster_id)
-
-            # Gather all nodes (including subclusters)
-            def gather_all_cluster_nodes(c, node_set):
-                node_set.update(c.nodes)
-                node_set.add(c.root_node)
-                node_set.update(c.cluster_refs.keys())
-                for sc in c.subclusters:
-                    gather_all_cluster_nodes(sc, node_set)
-
-            all_nodes = set()
-            gather_all_cluster_nodes(cluster, all_nodes)
-
-            # Also gather global nodes from all top-level clusters
-            global_all_nodes = set()
-            for top_c in self.xrefer_obj.clusters:
-                gather_all_cluster_nodes(top_c, global_all_nodes)
 
             # If the user has explicitly entered the intermediate-paths
             # sub-view (M key), render that instead of the cluster's
@@ -3863,38 +4804,6 @@ class XReferView(idaapi.simplecustviewer_t):
 
             self.AddLine("")
 
-    def _calculate_header_lines(self, analysis_data: Dict, cluster: "FunctionalCluster") -> int:
-        """
-        Calculate number of header lines before graph content for accurate scrolling.
-
-        Args:
-            analysis_data: Analysis data for the cluster
-            cluster: The cluster being displayed
-
-        Returns:
-            int: Number of header lines
-        """
-        header_offset = 4  # Base offset: mode line + node count + empty line + graph start
-
-        if analysis_data:
-            header_offset += 2  # Cluster ID and separator
-            if analysis_data.get("label"):
-                header_offset += 1
-            if analysis_data.get("description"):
-                # Count wrapped lines in description
-                desc_lines = len(analysis_data["description"].split("\n"))
-                header_offset += 1 + desc_lines  # Title + content
-            if analysis_data.get("relationships"):
-                # Count wrapped lines in relationships
-                rel_lines = len(analysis_data["relationships"].split("\n"))
-                header_offset += 1 + rel_lines  # Title + content
-
-        # Add spacing before graph
-        header_offset += 1
-
-        log(f"Calculated header offset: {header_offset} lines")
-        return header_offset
-
     def print_cluster_xrefs(self, cluster: "FunctionalCluster", indent: str = "    ") -> None:
         """Print xrefs to cluster root node with comprehensive membership information."""
         # Group xrefs by function
@@ -3939,16 +4848,14 @@ class XReferView(idaapi.simplecustviewer_t):
                 elif func_ea in cluster.nodes:
                     memberships.append((cluster.id, data.get("label", ""), "member"))
                     membership_found = True
-                # Check intermediate paths
+                # Check intermediate paths — interior positions, from the
+                # prebuilt index (this ran a full path rescan per xref-ing
+                # function per cluster-graph render).
                 else:
-                    for _, paths in cluster.intermediate_paths.items():
-                        for path in paths:
-                            if func_ea in path and func_ea != path[0] and func_ea != path[-1]:
-                                memberships.append((cluster.id, data.get("label", ""), "intermediate"))
-                                membership_found = True
-                                break
-                        if membership_found:
-                            break
+                    rec = self._func_path_index().get(func_ea, {}).get(cluster.id)
+                    if rec is not None and rec["interior"]:
+                        memberships.append((cluster.id, data.get("label", ""), "intermediate"))
+                        membership_found = True
 
                 # Check subclusters recursively
                 for subcluster in cluster.subclusters:
@@ -4014,23 +4921,7 @@ class XReferView(idaapi.simplecustviewer_t):
             func_ea: Optional function EA to highlight in the graph
         """
 
-        # Get view mode from cluster manager
-        current = self.state_machine.cluster_manager.get_current_cluster()
         simplified = True
-
-        # Create graph based on view mode
-        graph = cluster.to_graph(cluster_analysis=self.xrefer_obj.cluster_analysis, include_intermediate=not simplified)
-
-        # Add xrefs node before root node
-        xref_addrs = set()
-        for xref in idautils.XrefsTo(ida_idaapi.ea_t(cluster.root_node)):
-            # Only include code references
-            if ida_bytes.is_code(ida_bytes.get_full_flags(xref.frm)):
-                xref_addrs.add(xref.frm)
-
-        # # Show current view mode
-        # mode_str = "SIMPLIFIED" if simplified else "FULL"
-        # self.AddLine(f'{self.INDENT}\x01{ida_lines.SCOLOR_DNAME}{mode_str} VIEW MODE - Press S to toggle\x02{ida_lines.SCOLOR_DNAME}')
 
         # Show node counts
         interesting_count = len(cluster.nodes)
@@ -4038,39 +4929,39 @@ class XReferView(idaapi.simplecustviewer_t):
             self.AddLine(f"{self.INDENT}\x01{ida_lines.SCOLOR_NUMBER}Simplified graph showing {interesting_count} nodes\x02{ida_lines.SCOLOR_NUMBER}")
         self.AddLine("")
 
-        # Calculate header offset by counting actual header lines
-        analysis_data = find_cluster_analysis(self.xrefer_obj.cluster_analysis, cluster.id)
+        def build_layout() -> List[str]:
+            graph = cluster.to_graph(cluster_analysis=self.xrefer_obj.cluster_analysis, include_intermediate=not simplified)
+            return ascii_graphs.graph_to_ascii(graph).splitlines()
 
         try:
-            # Convert to ASCII and display
-            graph_lines = ascii_graphs.graph_to_ascii(graph).splitlines()
+            # Layout is cursor-independent and cached; only the per-line
+            # highlight colorization below runs on every cursor landing.
+            graph_lines = self._cluster_ascii_lines(("cluster", cluster.id), build_layout)
             highlighted_position = None
 
-            for i, line in enumerate(graph_lines):
+            for line in graph_lines:
                 # Format line with proper coloring
                 colored_line = self._format_cluster_graph_line(line, highlight_addr=func_ea)
 
-                # Track line with highlighted address for auto-scrolling
+                # Capture the highlight's display position as the line is
+                # added — self.Count() is the index this AddLine lands on,
+                # exact by construction. (The previous header-line ESTIMATE
+                # ignored word-wrap and whole sections and drifted tens of
+                # lines, leaving the synced node off-screen.)
                 if func_ea is not None:
                     func_addr = f"0x{func_ea:x}"
                     if func_addr in line and "\x01\x12" in colored_line:
                         # Find exact column position of the address
                         clean_line = strip_color_codes(line)
                         addr_column = clean_line.find(func_addr)
-                        highlighted_position = (i, addr_column)
+                        highlighted_position = (self.Count(), addr_column)
 
                 self.AddLine(f"{self.INDENT}    {colored_line}")
 
             # Auto-scroll to highlighted line and ensure address is visible
             if highlighted_position is not None and self.state_machine.cluster_sync_enabled and not self._from_double_click:  # Do not adjust view if we are coming from a double click navigation
-                try:
-                    line_num, column = highlighted_position
-                    total_line_offset = line_num + self._calculate_header_lines(analysis_data, cluster)
-                    scroll_column = column + 100
-                    self.Jump(total_line_offset, scroll_column)
-
-                except Exception as e:
-                    self.Jump(total_line_offset, 0)
+                line_num, column = highlighted_position
+                self.Jump(line_num, column + 100)
 
         except Exception as e:
             log(f"[-] Error drawing cluster nodes: {str(e)}")
@@ -4145,17 +5036,34 @@ class XReferView(idaapi.simplecustviewer_t):
             return
 
         if ea:
-            func_ea: int = idc.get_name_ea_simple(idc.get_func_name(ea))
-            current_func = ida_funcs.get_func(ea)
+            # One get_func resolves both the function object and its start —
+            # the old prologue paid a name round-trip (get_func_name +
+            # get_name_ea_simple) plus a second get_func re-resolving the
+            # PREVIOUS position on every cursor move.
+            current_func = ida_funcs.get_func(ida_idaapi.ea_t(int(ea)))
+            func_ea: int = current_func.start_ea if current_func else idaapi.BADADDR
 
-            if self.func_ea:
-                prev_func = ida_funcs.get_func(self.func_ea)
-                if current_func is not None and prev_func is not None and current_func == prev_func:
-                    if not self.peek_flag:
-                        return
+            # Same-function move: nothing to do (unless peeking). The
+            # current_func guard keeps the both-outside-any-function case
+            # falling through exactly as before (BADADDR == BADADDR must
+            # not early-return).
+            if current_func is not None and self.func_ea is not None and func_ea == self.func_ea:
+                if not self.peek_flag:
+                    return
 
-            # Handle cluster sync if enabled
-            if self.state_machine.cluster_sync_enabled and self.state_machine.current_state in (self.state_machine.cluster_graphs, self.state_machine.pinned_cluster_graphs):
+            # Handle cluster sync if enabled — but NOT while the
+            # intermediate-paths sub-view is open. Following the cursor
+            # would mutate the cluster stack under the sub-view (so the
+            # M/ESC count-based undo pops the wrong entry), capture a
+            # spider-graph cursor position as the wrong cluster's, and
+            # never actually render the followed cluster (the sub-view
+            # short-circuits the cluster-graph draw). The cursor banner
+            # still updates via the no-result path below.
+            if (
+                self.state_machine.cluster_sync_enabled
+                and self.state_machine.intermediate_view_func_ea is None
+                and self.state_machine.current_state in (self.state_machine.cluster_graphs, self.state_machine.pinned_cluster_graphs)
+            ):
                 current_cluster = self.state_machine.cluster_manager.get_current_cluster()
                 current_cluster_id = current_cluster.cluster_id if current_cluster else None
 
@@ -4189,11 +5097,25 @@ class XReferView(idaapi.simplecustviewer_t):
                     force = True
                     self.func_ea = func_ea
                 else:
+                    # Quiet: this fires on every sync cursor landing on an
+                    # unclustered function; the banner's Status row already
+                    # says it.
                     force = True
                     self.func_ea = func_ea
-                    log(f"Function 0x{self.func_ea:x} not found in any clusters")
 
-            elif self.peek_flag:
+            elif (
+                self.peek_flag
+                and not self.state_machine.is_sticky_state()
+                and not self.state_machine.is_pinned_graph()
+                and self.state_machine.current_state != self.state_machine.search
+            ):
+                # Peek hijacks the panel with a call-focus preview; while a
+                # reading view, pinned graph, or live search is up, it must
+                # not. (search is not sticky, so without this guard a click
+                # on a call line mid-typing fired start_call_focus — which
+                # no-ops from search — then still set address_filter and
+                # forced a redraw that dropped every non-matching row, and a
+                # click on a non-call line tore the search down to base.)
                 # Get all operands of the current instruction
                 has_func_operand = False
                 # Check up to 6 operands (typical maximum in IDA)
@@ -4227,10 +5149,30 @@ class XReferView(idaapi.simplecustviewer_t):
         else:
             func_ea = self.func_ea
 
-        if ea and func_ea != self.func_ea or force:
+        if (ea and func_ea != self.func_ea) or force:
             if not force and self.state_machine.current_state:
-                if self.state_machine.current_state != self.state_machine.pinned_cluster_graphs:
-                    self.state_machine.to_base()
+                sm = self.state_machine
+                if sm.is_sticky_state():
+                    # Binary-wide reading views (cluster table, ATT&CK
+                    # matrix, orphans, xref listing, boundary results,
+                    # full trace, help) survive disassembly navigation —
+                    # including double-clicking address links INSIDE them.
+                    # No re-render either: several end with Jump(0,0), so a
+                    # redraw per cursor move would swap state-loss for
+                    # scroll-loss. Track the cursor function for when the
+                    # user leaves, except for boundary results, which
+                    # render the selections of the function they were
+                    # invoked from.
+                    if sm.current_state not in (sm.boundary_results, sm.last_boundary_results):
+                        self.func_ea = func_ea
+                    return
+                # Pinned graphs persist across navigation and re-render
+                # below (highlight / recenter follows the cursor). This
+                # covers all four pinned states — previously only
+                # pinned_cluster_graphs was exempted and a pinned
+                # neighborhood graph was torn down.
+                if not sm.is_pinned_graph():
+                    sm.to_base()
                 self.func_ea = func_ea
 
             if func_ea not in self.xref_coverage_dict:
@@ -4239,25 +5181,22 @@ class XReferView(idaapi.simplecustviewer_t):
             self.load_function_context()
 
     def print_context_help(self) -> None:
-        """Print context-sensitive help with properly aligned borders."""
+        """Print a single compact context hint.
+
+        Replaces the old multi-line bordered help box (which ate ~6-8 lines of
+        a usually-short panel and whose width was only an estimate). The hint
+        teaches the non-obvious gestures and points to H for the full per-state
+        shortcut screen. Still gated by the ``show_help_banner`` setting.
+        """
         if not self.xrefer_obj.settings["display_options"]["show_help_banner"]:
             return
 
         current_state = self.state_machine.current_state.name
-
-        # Get view width in characters, ensuring proper right border alignment
-        try:
-            width = (self.qt_widget.width() // 10) + 15  # Added +1 for right border alignment
-        except:
-            width = 80
-
-        help_lines = self.context_help.format_help_text(current_state, width)
-
-        # Add consistent indentation
-        indent = "    "
-        for line in help_lines:
-            self.AddLine(f"{indent}{line}")
-        self.AddLine("")  # Add spacing after help box
+        hint = self.context_help.format_compact_hint(current_state)
+        if not hint:  # e.g. the help view itself — no self-referential hint line
+            return
+        self.AddLine(f"    {hint}")
+        self.AddLine("")
 
     def print_ribbon(self) -> None:
         """Print status ribbon and aligned context help."""
@@ -4279,7 +5218,11 @@ class XReferView(idaapi.simplecustviewer_t):
         """
         base_text: str = "[ XRefer ]"
         esc_str: str = "[ ESC to go back ]"
-        h_str: str = "[ H for help ]"
+        # Compact H affordance kept in the ribbon so help stays discoverable
+        # even when the compact help line is turned off (show_help_banner) or
+        # suppressed (the help view). Minor overlap with the help line's
+        # 'H: full help' when both are shown is accepted.
+        h_str: str = "[ H help ]"
         exclusions_str: str = f"[ exclusions: {'on' if self.xrefer_obj.settings['enable_exclusions'] else 'off'} ]"
         content: str = ""
 
@@ -4317,13 +5260,27 @@ class XReferView(idaapi.simplecustviewer_t):
         elif current_state == self.state_machine.search:
             # Search shows current filter text
             content = f"[ search ]: {self.state_machine.search_filter}"
+        elif current_state == self.state_machine.artifact_search:
+            content = f"[ artifact search ]: {self.state_machine.search_filter}"
         elif current_state == self.state_machine.clusters:
             # Added handling for clusters state (cluster table view)
             content = f"[ clusters ]{esc_str}{h_str}"
         else:
-            # Default if no matching state: show func info, exclusions, help
-            content = f"[ func_ea: 0x{self.func_ea:x} ][ func_name: {func_name} ]{exclusions_str}{h_str}"
+            # Default (base): show func info, exclusions, selection count, help.
+            selected_n = len(self.state_machine.get_selected_refs(self.func_ea))
+            sel_str = f"[ selected: {selected_n} ]" if selected_n else ""
+            content = f"[ func_ea: 0x{self.func_ea:x} ][ func_name: {func_name} ]{exclusions_str}{sel_str}{h_str}"
 
+        if self.state_machine.view_filter_active and current_state in (self.state_machine.trace_scope_full, self.state_machine.orphans, self.state_machine.clusters):
+            # Front-load the filter text like the home-view search ribbon —
+            # appending it to the full banner pushed it off the right edge
+            # of a narrow panel. ESC restores the verbose banner.
+            view_label = {
+                self.state_machine.trace_scope_full: "full trace",
+                self.state_machine.orphans: "orphans",
+                self.state_machine.clusters: "clusters",
+            }.get(current_state, "view")
+            content = f"[ {view_label} filter ]: {self.state_machine.search_filter}"
         return f"{base_text}{content}"
 
     def get_trace_ribbon_content(self) -> str:
@@ -4446,17 +5403,8 @@ class XReferView(idaapi.simplecustviewer_t):
             return False
 
         disclaimer_lines = [
-            (
-                "===> Some aspects of cluster analysis use LLM processing to enhance code relationship",
-                "s with semantic context. Results may be inconsistent or incomplete, and thus the anal",
-                "ysis provided is considered low confidence. Right-click to re-run analysis if current",
-                "results appear inaccurate. Always verify findings through manual inspection. <===",
-            ),
-            (
-                "===> Do not solely rely on this listing. These artifacts are bubbled up",
-                "via an LLM which can be inconsistent, miss indicators and be in need of",
-                "further prompt tuning. This is meant to jump start triage analysis <===",
-            ),
+            ("LLM-assisted analysis — low confidence; verify findings manually. Right-click to re-run.",),
+            ("LLM-bubbled artifacts — may be inconsistent or miss indicators; a triage starting point.",),
         ]
         INDENT = "    "  # Standard 4-space indent
         for line in disclaimer_lines[disclaimer_index]:
@@ -4503,26 +5451,29 @@ class XReferView(idaapi.simplecustviewer_t):
             self.state_machine.trace_scope_path: self.handle_trace_scope_path,
             self.state_machine.trace_scope_full: self.handle_trace_scope_full,
             self.state_machine.xref_listing: self.draw_entity_xrefs,
+            self.state_machine.attack_matrix: self.draw_attack_matrix,
             self.state_machine.help: self.draw_help,
+            self.state_machine.artifact_search: self.draw_artifact_search,
         }
 
         # Get appropriate handler or use default table context
         state_handler = state_actions.get(self.state_machine.current_state, self.handle_table_context)
 
-        # Graph rendering (artifact path graphs via G, cluster graphs,
-        # neighborhood graphs) can be slow for large/complex graphs —
-        # the ASCII layout especially. Put up IDA's wait box so the user
-        # gets "Generating graph..." feedback instead of a seemingly
-        # frozen UI. Simple graphs render instantly and the box just
-        # flashes. This is all synchronous on the main thread, so the
-        # show/hide pair is safe (unlike background-thread wait-box use).
+        # Graph rendering (artifact path graphs via G, neighborhood graphs)
+        # can be slow for large/complex graphs — the ASCII layout
+        # especially. Put up IDA's wait box so the user gets "Generating
+        # graph..." feedback instead of a seemingly frozen UI. Simple
+        # graphs render instantly and the box just flashes. This is all
+        # synchronous on the main thread, so the show/hide pair is safe
+        # (unlike background-thread wait-box use). Cluster graph states are
+        # absent on purpose: their layouts are cached (_cluster_ascii_lines)
+        # and the box is shown there only on an actual rebuild, so cluster
+        # sync doesn't flash a wait box on every cursor landing.
         graph_states = {
             self.state_machine.graph,
             self.state_machine.simplified_graph,
             self.state_machine.pinned_graph,
             self.state_machine.pinned_simplified_graph,
-            self.state_machine.cluster_graphs,
-            self.state_machine.pinned_cluster_graphs,
             self.state_machine.neighborhood_graph,
             self.state_machine.pinned_neighborhood_graph,
         }
@@ -4580,8 +5531,18 @@ class XReferView(idaapi.simplecustviewer_t):
             self.AddLine("    ALL API CALLS ARE EXCLUDED")
             return
 
+        flt = ""
+        if self.state_machine.view_filter_active:
+            flt = self.state_machine.search_filter.lower()
+        shown = 0
         for rec in filtered_calls:
-            self.AddLine(format_api_call_for_ida(rec))
+            line = format_api_call_for_ida(rec)
+            if flt and flt not in strip_color_codes(line).lower():
+                continue
+            shown += 1
+            self.AddLine(self._highlight_filter_match(line, flt))
+        if flt and not shown:
+            self.AddLine(f"    No rows match '{flt}' — backspace edits, ESC clears")
 
     def handle_trace_scope_function(self) -> None:
         """Function-scope trace: API calls made directly from the current function."""
@@ -4625,20 +5586,11 @@ class XReferView(idaapi.simplecustviewer_t):
 
         if ida_funcs.get_func(self.func_ea):
             if self.func_ea in self.xrefer_obj.global_xrefs:
-                # Sticky context banner — same one used by the cluster
-                # graph view so the analyst gets a consistent "where
-                # am I" anchor across the whole xrefer UI. Sync state
-                # is hidden here because it only governs cluster-graph
-                # behavior; surfacing it in the base view would imply
-                # functionality that doesn't exist in this context.
-                for line in self._build_cluster_context_banner(
-                    current_cluster_id=None,
-                    view_label="function context (xrefs)",
-                    show_sync=False,
-                ):
-                    self.AddLine(line)
-                self.AddLine("")
-                self.print_cluster_membership(self.func_ea)
+                # Compact 2-line cluster context (membership + 1-hop adjacency).
+                # Replaces the full banner + the verbose roles block: the
+                # function addr/name live in the ribbon and the full role
+                # breakdown lives in the cluster views.
+                self._emit_compact_cluster_context(self.func_ea)
                 self.draw_function_context_tables(self.func_ea)
             else:
                 self.handle_no_context_available()
@@ -4713,6 +5665,44 @@ class XReferView(idaapi.simplecustviewer_t):
         self._align_merged_name_columns(merged_rows)
         td[self.merged_indirect_name] = {"heading": heading, "rows": merged_rows}
 
+    def _emit_reaches_summary(self, func_ea: int) -> None:
+        """Emit a one-line 'at a glance' summary of what this function reaches.
+
+        Counts are taken from the same ``table_data`` the tables below render
+        (post-merge, post-exclusion), so the summary's numbers always match the
+        per-table counts. No-op when the function reaches nothing.
+        """
+        td = self.xrefer_obj.table_data.get(func_ea, {})
+
+        def tcount(name: str) -> int:
+            tbl = td.get(name)
+            if not tbl:
+                return 0
+            return sum(len(v) for v in tbl.get("rows", {}).values() if v)
+
+        direct = tcount("DIRECT XREFS")
+        imps_libs = tcount(self.merged_indirect_name)
+        strings = tcount(self.xrefer_obj.table_names[3])
+        capa = tcount(self.xrefer_obj.table_names[4])
+        total = direct + imps_libs + strings + capa
+        if not total:
+            return
+
+        def num(n: int) -> str:
+            return ida_lines.COLSTR(str(n), ida_lines.SCOLOR_VOIDOP)
+
+        def dim(s: str) -> str:
+            return ida_lines.COLSTR(s, ida_lines.SCOLOR_DSTR)
+
+        line = (
+            f"    {dim('Reaches ')}{num(total)}{dim(' artifacts')}"
+            f"{dim(' · direct ')}{num(direct)}"
+            f"{dim(' · indirect: ')}{num(imps_libs)}{dim(' imports & libs, ')}"
+            f"{num(strings)}{dim(' strings, ')}{num(capa)}{dim(' capa')}"
+        )
+        self.AddLine(line)
+        self.AddLine("")
+
     def draw_function_context_tables(self, func_ea: int) -> bool:
         """
         Draw all relevant tables for a function.
@@ -4731,7 +5721,9 @@ class XReferView(idaapi.simplecustviewer_t):
         # import/library pair into one merged table before rendering.
         if func_ea not in self.xrefer_obj.table_data:
             self.xrefer_obj.table_data[func_ea] = self.xrefer_obj.create_sorted_table(func_ea)
+            self._reapply_selection_markers(func_ea)
         self._merge_indirect_tables(func_ea)
+        self._emit_reaches_summary(func_ea)
 
         for table_index in range(self.table_count):
             table_start_index: int = (table_index + self.table_index_offset) % self.table_count
@@ -4740,6 +5732,7 @@ class XReferView(idaapi.simplecustviewer_t):
                 table_data = self.xrefer_obj.table_data[func_ea][table_name]
             except KeyError:
                 self.xrefer_obj.table_data[func_ea] = self.xrefer_obj.create_sorted_table(func_ea)
+                self._reapply_selection_markers(func_ea)
                 self._merge_indirect_tables(func_ea)
                 table_data = self.xrefer_obj.table_data[func_ea][table_name]
 
@@ -4748,7 +5741,7 @@ class XReferView(idaapi.simplecustviewer_t):
                 if self.table_states[table_name] or self.state_machine.current_state in (self.state_machine.call_focus, self.state_machine.search):
                     self.draw_function_context_table(func_ea, table_name)
                 else:
-                    self.draw_function_context_table_heading(func_ea, table_name, "[+] %s")
+                    self.draw_function_context_table_heading(func_ea, table_name, "▸ %s")
                     self.AddLine("")
 
         return printed
@@ -4775,7 +5768,8 @@ class XReferView(idaapi.simplecustviewer_t):
             if is_expanded or table_name.startswith("D") or self.state_machine.current_state in (self.state_machine.call_focus, self.state_machine.search):
                 self.display_function_context_table_contents(table_name, inner_table_key, inner_table)
             else:
-                self.AddLine(ida_lines.COLSTR("    %s %s" % (ida_lines.COLSTR("(+)", ida_lines.SCOLOR_DATNAME), inner_table_key), ida_lines.SCOLOR_ASMDIR))
+                # Collapsed category — chevron + artifact count, gaugeable without expanding.
+                self.AddLine(self._category_line("▸", inner_table_key, len(inner_table)))
 
         if self.xrefer_obj.table_data[func_ea][table_name]["rows"]:
             self.AddLine("")
@@ -4793,14 +5787,136 @@ class XReferView(idaapi.simplecustviewer_t):
             inner_table (List[str]): Content rows to display
         """
         if not table_name.startswith("D") and not self.state_machine.current_state == self.state_machine.call_focus:
-            self.AddLine(ida_lines.COLSTR("    %s %s" % (ida_lines.COLSTR("(-)", ida_lines.SCOLOR_DATNAME), inner_table_key), ida_lines.SCOLOR_ASMDIR))
+            self.AddLine(self._category_line("▾", inner_table_key, len(inner_table)))
 
         line_prefix: str = "    " if table_name.startswith("D") else self.indent
+        is_merged = table_name == self.merged_indirect_name
 
         for line in inner_table:
-            self.print_xref_item(f"{line_prefix}{line}", self.state_machine.address_filter)
+            # T2: a selection checkbox (☑ when the row carries a \x04 select
+            # mark) and, in the merged table, an imp/lib type tag inferred from
+            # the row's leading color byte. Both are uncolored and accounted for
+            # in cell_regex, so double-click still resolves the artifact name.
+            box = "☑ " if "\x04" in line else "☐ "
+            tag = ""
+            if is_merged and len(line) > 1 and line[0] == "\x01":
+                cbyte = ord(line[1])
+                if cbyte == ida_lines.SCOLOR_IMPNAME:
+                    tag = "imp "
+                elif cbyte == ida_lines.SCOLOR_DEMNAME:
+                    tag = "lib "
+            self.print_xref_item(f"{line_prefix}{box}{tag}{line}", self.state_machine.address_filter)
 
-    def draw_function_context_table_heading(self, func_ea: int, table_name: str, fmt: str = "[-] %s") -> None:
+    def _category_line(self, marker: str, key: str, count: int) -> str:
+        """Build a category header line: '<chevron> <category>  (N)'.
+
+        Starts with a color code (not raw spaces) so ``cell_regex`` never
+        mistakes it for a selectable row."""
+        return (
+            ida_lines.COLSTR(f"    {marker} ", ida_lines.SCOLOR_DATNAME)
+            + ida_lines.COLSTR(key, ida_lines.SCOLOR_DNAME)
+            + "  " + ida_lines.COLSTR(f"({count})", ida_lines.SCOLOR_VOIDOP)
+        )
+
+    def _indirect_via_funcs(self, e_index: int) -> List[int]:
+        """The current function's callees through which an *indirect* artifact
+        is reached — i.e. which of ``self.func_ea``'s direct callees begin a
+        call path that references entity ``e_index``. Empty for direct refs or
+        when unknown. Sorted for stable display.
+
+        Note: for INDIRECT xrefs the ``*_ea`` buckets map entity_index -> set
+        of callee function EAs (unlike DIRECT, where they map to call-site
+        addresses); ``process_rows_for_indirect_xrefs`` relies on the same
+        shape.
+        """
+        try:
+            entity = self.xrefer_obj.entities[e_index]
+            base = {1: "libs", 2: "imports", 3: "strings", 4: "capa", 5: "api_trace"}.get(entity[2])
+            if not base:
+                return []
+            bucket = self.xrefer_obj.entity_suffix_map.get(base, f"{base}_ea")
+            gx = self.xrefer_obj.global_xrefs.get(self.func_ea)
+            if not gx:
+                return []
+            indirect = gx.get(self.xrefer_obj.INDIRECT_XREFS, {})
+            return sorted(indirect.get(bucket, {}).get(e_index, ()))
+        except Exception:
+            return []
+
+    def _combine_tooltips(self, *tips) -> Optional[Tuple[int, str]]:
+        """Merge IDA hint tuples ``(num_important_lines, text)`` into one,
+        skipping ``None``/empty. ``OnHint`` must return this tuple shape for the
+        hint to DISPLAY (a bare string is accepted but silently not shown)."""
+        valid: List[Tuple[int, str]] = []
+        for t in tips:
+            if not t:
+                continue
+            if isinstance(t, tuple) and len(t) == 2:
+                n, text = t
+            else:  # defensive: coerce a bare string
+                text = str(t)
+                n = text.count("\n") + 1
+            if text:
+                valid.append((int(n), text))
+        if not valid:
+            return None
+        total = sum(n for n, _ in valid) + (len(valid) - 1)  # +blank separators
+        return total, "\n\n".join(text for _, text in valid)
+
+    def _indirect_via_tooltip(self, e_index: int) -> Optional[Tuple[int, str]]:
+        """Hover body for an indirect artifact: the callee functions it is
+        reached through (the indirection's 'through what').
+
+        Returns an IDA hint tuple ``(num_important_lines, text)`` — the shape
+        ``OnHint`` must return for the tip to actually DISPLAY — or ``None``
+        when the artifact isn't reached indirectly from the current function.
+
+        Deliberately does NOT gate on ``get_parent_table()`` — that reads the
+        mouse line (``GetLineNo(mouse=1)``), which returns -1 inside the OnHint
+        callback. ``_indirect_via_funcs`` is itself indirect-only (empty for a
+        purely direct ref), so it's a sufficient gate on its own.
+
+        The body is colorized to match the function-address tooltips: a keyword
+        header with an emphasized count, a dashed rule, then each callee in the
+        function-name colour (``SCOLOR_DEMNAME``) and a dimmed overflow line."""
+        callees = self._indirect_via_funcs(e_index)
+        if not callees:
+            return None
+        # SWIG's get_func_name wants a real ea_t; the callee values come from the
+        # backend and aren't always plain ints, so wrap as ida_idaapi.ea_t(int(…)).
+        func_trunc_length: int = 60
+        names: List[str] = []
+        for c in callees:
+            name = idc.get_func_name(ida_idaapi.ea_t(int(c))) or f"0x{int(c):x}"
+            if len(name) > func_trunc_length:
+                name = f"{name[:func_trunc_length]}..."
+            names.append(name)
+        shown = names[:12]
+        overflow = len(names) - len(shown)
+
+        kw: int = ida_lines.SCOLOR_KEYWORD   # header label
+        num: int = ida_lines.SCOLOR_VOIDOP   # the count
+        fn: int = ida_lines.SCOLOR_DEMNAME   # callee names (matches addr tooltips)
+        dim: int = ida_lines.SCOLOR_AUTOCMT  # "+N more"
+
+        # Size the rule to the widest *visible* line (color codes excluded).
+        plain = [f"Reached through {len(names)} function(s):"] + [f"  {n}" for n in shown]
+        if overflow > 0:
+            plain.append(f"  … (+{overflow} more)")
+        sep_len = max(len(p) for p in plain)
+
+        header = (
+            f"\x01{kw}Reached through \x02{kw}"
+            f"\x01{num}{len(names)}\x02{num}"
+            f"\x01{kw} function(s):\x02{kw}"
+        )
+        lines = [header, f"\x01{fn}{'-' * sep_len}\x02{fn}"]
+        lines += [f"  \x01{fn}{n}\x02{fn}" for n in shown]
+        if overflow > 0:
+            lines.append(f"  \x01{dim}… (+{overflow} more)\x02{dim}")
+        return len(lines), "\n".join(lines)
+
+    def draw_function_context_table_heading(self, func_ea: int, table_name: str, fmt: str = "▾ %s") -> None:
         """
         Print formatted table heading.
 
@@ -4819,6 +5935,11 @@ class XReferView(idaapi.simplecustviewer_t):
 
         heading_line: str = self.xrefer_obj.table_data[func_ea][table_name]["heading"][0]
         hline: str = ida_lines.COLSTR(fmt % heading_line, ida_lines.SCOLOR_DATNAME)
+        # Append the artifact count so the magnitude of each table is legible
+        # at a glance — including when the table is collapsed.
+        total = sum(len(v) for v in self.xrefer_obj.table_data[func_ea][table_name].get("rows", {}).values() if v)
+        if total:
+            hline += "  " + ida_lines.COLSTR(f"({total})", ida_lines.SCOLOR_VOIDOP)
         self.AddLine(hline)
         heading_line = self.xrefer_obj.table_data[func_ea][table_name]["heading"][1]
         # Non-direct tables get a "----" continuation marker that visually
@@ -4881,6 +6002,33 @@ class XReferView(idaapi.simplecustviewer_t):
             line = set_xref_coverage_color(line, "0x%x" % xref_frm, xref_coverage_dict[xref_frm])
 
         return line
+
+    def _reapply_selection_markers(self, func_ea: int) -> None:
+        """Re-wrap the selection markers on a freshly built table.
+
+        Selections persist across sessions on the core object, but the
+        visual markers live only in rendered rows, which are rebuilt from
+        scratch on demand — without this, a restored selection would gate
+        B/D and fill the ribbon chip while every checkbox showed
+        unselected."""
+        selected = self.state_machine.get_selected_refs(func_ea)
+        if not selected:
+            return
+        tables = self.xrefer_obj.table_data.get(func_ea, {})
+        for e_index in selected:
+            try:
+                entity = self.xrefer_obj.entities[e_index]
+            except (IndexError, TypeError):
+                continue
+            if not isinstance(entity, tuple):
+                continue  # plain strings are not double-click selectable
+            cell = entity[1]
+            for table in tables.values():
+                for rows in table.get("rows", {}).values():
+                    for i, row in enumerate(rows):
+                        replaced = wrap_substring_with_string(row, cell, "\x04", case=True)
+                        if len(replaced) != len(row):
+                            rows[i] = replaced
 
     def select_cell(self, cell: str) -> None:
         """
@@ -5136,6 +6284,117 @@ class XReferView(idaapi.simplecustviewer_t):
         line_count = len(tooltip)
         return line_count, "\n".join(tooltip)
 
+    # Per-artifact width clamp for "node detail" mode (keeps boxes from going
+    # absurdly wide on a single long string). No *line-count* cap — the
+    # experiment shows every direct artifact; tall nodes are expected.
+    _NODE_ARTIFACT_TRUNC = 26
+
+    def _graph_artifact_cap(self) -> Optional[int]:
+        """Effective per-type artifact cap for graph node-detail mode, or
+        ``None`` when capping is disabled (show all — the default).
+
+        Driven by the ``display_options`` settings ``cap_graph_node_artifacts``
+        (bool) and ``graph_node_artifact_cap`` (int). A non-positive / malformed
+        value reads as "no cap" so a bad setting never hides everything."""
+        opts = self.xrefer_obj.settings.get("display_options", {})
+        if not opts.get("cap_graph_node_artifacts", False):
+            return None
+        try:
+            n = int(opts.get("graph_node_artifact_cap", 6))
+        except (TypeError, ValueError):
+            return None
+        return n if n > 0 else None
+
+    def _node_artifact_entries(self, ea: int) -> List[Tuple[str, int]]:
+        """``(display_text, SCOLOR)`` for each of a function's *direct* xrefs —
+        the data the hover tooltip shows, but for in-node rendering. One entry
+        per artifact (imports → strings → capa → libs), truncated to
+        ``_NODE_ARTIFACT_TRUNC``; the colour is the entity's per-type tag
+        (``color_tags`` — IMPORT→IMPNAME, STRING→DSTR, CAPA→CODNAME,
+        LIBRARY→DEMNAME), so the node matches the tooltip's palette. No type
+        tag: colour carries the type. Returns ``[]`` for functions with no
+        direct artifacts (node stays as small as today).
+
+        When the ``cap_graph_node_artifacts`` setting is on, each type is capped
+        to ``_graph_artifact_cap()`` entries with a dim ``(+N more)`` overflow
+        line per truncated type (the cap is folded into ``draw_paths_graph``'s
+        cache key so a changed cap re-renders rather than returning a stale box).
+
+        The text is laid out plain (the ASCII layout is colour-blind and sizes
+        boxes by raw width); the colour is applied post-layout by
+        ``draw_paths_graph`` via the per-key ``_graph_artifact_colors`` map."""
+        try:
+            direct = self.xrefer_obj.global_xrefs[ea][self.xrefer_obj.DIRECT_XREFS]
+        except Exception:
+            return []
+
+        per_type: List[Tuple[str, List[Tuple[str, int]]]] = []
+        for key in ("imports", "strings", "capa", "libs"):
+            items: List[Tuple[str, int]] = []
+            for e_index in sorted(direct.get(key, ())):
+                try:
+                    entity = self.xrefer_obj.entities[e_index]
+                    name = entity[1]
+                    color = self.xrefer_obj.color_tags[self.xrefer_obj.table_names[entity[2]]]
+                except Exception:
+                    continue
+                # Strip IDA colour-control bytes too: an artifact carrying a
+                # stray \x01/\x02 would desync the post-layout colour scan.
+                name = name.replace("\x01", "").replace("\x02", "")
+                name = name.replace("\n", " ").replace("\r", " ").strip()
+                if not name:
+                    continue
+                if len(name) > self._NODE_ARTIFACT_TRUNC:
+                    name = name[: self._NODE_ARTIFACT_TRUNC - 2] + ".."
+                items.append((name, color))
+            per_type.append((key, items))
+
+        return cap_artifact_entries(per_type, self._graph_artifact_cap(), ida_lines.SCOLOR_AUTOCMT)
+
+    def _colorize_node_artifacts(self, line: str, artifact_items: List[Tuple[str, int]]) -> str:
+        """Colour EVERY occurrence of each node artifact in a rendered graph line.
+
+        The ASCII layout packs nodes side-by-side, so the same artifact name
+        recurs across boxes on a single output line. ``wrap_substring_with_string``
+        only wraps the *first* occurrence, which left every box but the leftmost
+        uncoloured (and, with vertical box offsets, coloured some artifacts in a
+        node and not others). This does a single left-to-right scan instead:
+
+        * existing IDA colour-code pairs (``\\x01X`` / ``\\x02X``) are copied
+          verbatim as opaque 2-char skips, so the blanket DEMNAME wrap and the
+          func_ea / entity highlights already applied survive untouched;
+        * at each plain position the LONGEST artifact starting there wins, so a
+          prefix artifact never bleeds into a longer one (CreateFile vs
+          CreateFileW);
+        * a match is emitted wrapped and the cursor advances past it, so an
+          already-coloured span is never re-entered.
+
+        Case-sensitive (matches the rest of the graph colouring). ``artifact_items``
+        must be pre-sorted longest-first; empty keys are skipped (an empty match
+        would loop / emit unbalanced codes)."""
+        out: List[str] = []
+        i = 0
+        n = len(line)
+        while i < n:
+            ch = line[i]
+            if ch in ("\x01", "\x02") and i + 1 < n:
+                out.append(line[i:i + 2])
+                i += 2
+                continue
+            match = None
+            for text, color in artifact_items:
+                if text and line.startswith(text, i):
+                    match = (text, color)
+                    break
+            if match is not None:
+                text, color = match
+                out.append(f"\x01{color}{text}\x02{color}")
+                i += len(text)
+            else:
+                out.append(ch)
+                i += 1
+        return "".join(out)
+
     def draw_paths_graph(self) -> None:
         """
         Draw ASCII graph of paths to selected cross-reference.
@@ -5166,10 +6425,35 @@ class XReferView(idaapi.simplecustviewer_t):
         _graph: Optional[List[bytes]] = None
 
         # Use different cache keys for normal and simplified graphs
-        cache_key = f"simplified_{e_index}" if is_simplified else e_index
+        # Cache key carries every dimension that changes the rendered ASCII:
+        # the simplified axis and the node-detail (artifacts) axis.
+        _ck_parts = []
+        if is_simplified:
+            _ck_parts.append("simplified")
+        if self.graph_node_artifacts:
+            _ck_parts.append("artifacts")
+            # Fold the per-type cap into the key so toggling the cap (or changing
+            # its value) renders fresh instead of returning a stale cached box.
+            _cap = self._graph_artifact_cap()
+            if _cap is not None:
+                _ck_parts.append(f"cap{_cap}")
+        cache_key = "_".join([*_ck_parts, str(e_index)]) if _ck_parts else e_index
 
-        if cache_key in self.xrefer_obj.graph_cache:
+        # display_text -> SCOLOR for post-layout per-type artifact colouring.
+        node_artifact_colors: Dict[str, int] = {}
+
+        # graph_cache is serialized into the .xrefer DB, but the parallel
+        # per-key colour map (_graph_artifact_colors) is view-local and is NOT
+        # persisted. After a DB reload a node-detail key can therefore be present
+        # in graph_cache with no colour map — which would render every artifact
+        # in the fallback colour. Treat that as a miss so the node re-renders
+        # (rebuilding both the box and its colour map). Membership (not truthiness)
+        # is the test: a graph legitimately free of artifacts has the key present
+        # with an empty map and still counts as a valid hit.
+        _have_colors = (not self.graph_node_artifacts) or (cache_key in self._graph_artifact_colors)
+        if cache_key in self.xrefer_obj.graph_cache and _have_colors:
             _graph, num_original_nodes, num_simplified_nodes = self.xrefer_obj.graph_cache[cache_key]
+            node_artifact_colors = self._graph_artifact_colors.get(cache_key, {})
         else:
             # Collect paths and track unique nodes
             original_nodes = set()
@@ -5253,9 +6537,16 @@ class XReferView(idaapi.simplecustviewer_t):
                         func_name = idc.get_func_name(ea)
                         if not func_name:
                             func_name = "<no_name>"
-                        # Truncate function name at 16 chars
-                        if len(func_name) > 12:
-                            func_name = func_name[:12] + ".."
+                        # The node title shouldn't be the most-truncated line.
+                        if self.graph_node_artifacts:
+                            # Node-detail: give the name the same budget as the
+                            # artifacts (same cap → box no wider than they make it).
+                            if len(func_name) > self._NODE_ARTIFACT_TRUNC:
+                                func_name = func_name[: self._NODE_ARTIFACT_TRUNC - 2] + ".."
+                        else:
+                            # Normal mode: keep names tight so plain graphs stay narrow.
+                            if len(func_name) > 12:
+                                func_name = func_name[:12] + ".."
 
                         addr_str = f"0x{ea:x}"
 
@@ -5266,12 +6557,25 @@ class XReferView(idaapi.simplecustviewer_t):
                             # Two lines: addr, func_name
                             lines = [addr_str, func_name]
 
+                        # "Node detail" mode: append the function's direct
+                        # artifacts under the header (plain text; per-type
+                        # colour recorded for the post-layout pass below).
+                        header_count = len(lines)
+                        if self.graph_node_artifacts:
+                            for art_text, art_color in self._node_artifact_entries(ea):
+                                lines.append(art_text)
+                                node_artifact_colors[art_text] = art_color
+
                         # Determine this node's max line length
                         node_max_len = max(len(line) for line in lines)
 
-                        # Center each line individually for this node
-                        centered_lines = [f"{line:^{node_max_len}}" for line in lines]
-                        new_label = "\n".join(centered_lines)
+                        # Header lines (addr / name) are centred; the artifact
+                        # list reads better left-aligned within the box.
+                        rendered_lines = [
+                            f"{line:^{node_max_len}}" if i < header_count else f"{line:<{node_max_len}}"
+                            for i, line in enumerate(lines)
+                        ]
+                        new_label = "\n".join(rendered_lines)
 
                         func_nodes.append((node, new_label))
 
@@ -5281,10 +6585,21 @@ class XReferView(idaapi.simplecustviewer_t):
 
                 _graph = ascii_graphs.graph_to_ascii(graph).splitlines()
                 self.xrefer_obj.graph_cache[cache_key] = (_graph, num_original_nodes, num_simplified_nodes)
-            except:
+                self._graph_artifact_colors[cache_key] = node_artifact_colors
+            except Exception as e:
+                # Bounce first, log after — so the diagnosis lands LAST in
+                # the Output window where the analyst will see it. The old
+                # bare except mapped every failure (KeyError, layout bug,
+                # anything) to a fixed "too large" lie with the real
+                # exception discarded — undiagnosable. Reserve the size
+                # wording for genuine resource exhaustion.
                 self.state_machine.go_back()
                 self.update(True)
-                log("Graph too large to draw")
+                if isinstance(e, (RecursionError, MemoryError)):
+                    log(f"Graph too large to draw ({type(e).__name__})")
+                else:
+                    traceback.print_exc()
+                    log(f"Graph rendering failed ({type(e).__name__}): {e}")
                 return
 
         self.ClearLines()
@@ -5301,6 +6616,8 @@ class XReferView(idaapi.simplecustviewer_t):
         paths_view_label = "artifact path graph"
         if is_simplified:
             paths_view_label = "simplified " + paths_view_label
+        if self.graph_node_artifacts:
+            paths_view_label += " (detailed nodes)"
         if is_pinned:
             paths_view_label += " (pinned)"
         for line in self._build_cluster_context_banner(
@@ -5311,6 +6628,12 @@ class XReferView(idaapi.simplecustviewer_t):
             self.AddLine(line)
         self.AddLine("")
 
+        # Node-detail status (mirrors the simplified reduction note below) so
+        # the mode + its toggle key stay discoverable while it's on.
+        if self.graph_node_artifacts:
+            detail_str = f"    \x01{ida_lines.SCOLOR_AUTOCMT}Nodes show their direct artifacts — D to toggle\x02{ida_lines.SCOLOR_AUTOCMT}"
+            self.AddLine(detail_str)
+
         # Add node reduction info if in simplified mode
         if is_simplified and num_original_nodes > num_simplified_nodes:
             reduction = (num_original_nodes - num_simplified_nodes) / num_original_nodes * 100
@@ -5320,11 +6643,23 @@ class XReferView(idaapi.simplecustviewer_t):
         self.AddLine("")
         func_ea: str = f"0x{self.func_ea:x}"
 
+        # Pre-sort artifacts longest-first so the per-position greedy match
+        # prefers the longer of two that share a prefix (CreateFileW over
+        # CreateFile). Built once; the per-line colourer reuses it.
+        artifact_items = sorted(node_artifact_colors.items(), key=lambda kv: len(kv[0]), reverse=True)
+
         for line in _graph:
             line: str = line
             line = ida_lines.COLSTR(line, ida_lines.SCOLOR_DEMNAME)
             line = wrap_substring_with_string(line, func_ea, "\x01\x12", "\x02\x12", case=True)
             line = wrap_substring_with_string(line, entity_content, entity_wrap_start, entity_wrap_end, True)
+            # "Node detail": recolour EVERY occurrence of each artifact by its
+            # type (post-layout, since the ASCII layout is colour-blind). Must
+            # colour all occurrences, not just the first — the layout packs
+            # nodes side-by-side, so the same artifact name recurs across boxes
+            # on one rendered line.
+            if artifact_items:
+                line = self._colorize_node_artifacts(line, artifact_items)
             self.AddLine(f"        {line}")
 
         self.Refresh()
@@ -5513,9 +6848,13 @@ class XReferView(idaapi.simplecustviewer_t):
         try:
             graph_lines = ascii_graphs.graph_to_ascii(graph).splitlines()
         except Exception as e:
-            log(f"[-] Error rendering neighborhood graph: {e}")
+            log(f"[-] Error rendering neighborhood graph ({type(e).__name__}): {e}")
+            if isinstance(e, (RecursionError, MemoryError)):
+                reason = "Graph too large to draw."
+            else:
+                reason = f"Graph rendering failed ({type(e).__name__}) — see the Output window."
             self.AddLine(
-                f"    \x01{ida_lines.SCOLOR_DSTR}Graph too large to draw.\x02{ida_lines.SCOLOR_DSTR}"
+                f"    \x01{ida_lines.SCOLOR_DSTR}{reason}\x02{ida_lines.SCOLOR_DSTR}"
             )
             self.Refresh()
             return
@@ -5540,7 +6879,14 @@ class XReferView(idaapi.simplecustviewer_t):
         Returns:
             Optional[str]: Word under cursor, or None if no valid word found
         """
-        _, xpos, _ = self.GetPos(True)
+        # GetPos returns None when there is no valid cursor line (a splash
+        # / decorative line, an empty view) — unpacking that NoneType was
+        # the "cannot unpack non-iterable NoneType object" crash callers
+        # hit on such lines. Treat it as "no word".
+        pos = self.GetPos(True)
+        if not pos:
+            return None
+        _, xpos, _ = pos
         line = self.GetCurrentLine(True)
 
         if not line:
@@ -5587,6 +6933,12 @@ class XReferView(idaapi.simplecustviewer_t):
 
         return word
 
+    def _strip_count_suffix(self, text: str) -> str:
+        """Strip a trailing '  (N)' artifact-count badge from a heading or
+        category label so it matches the table_states / subtable_states keys.
+        (Counts were added to those lines for at-a-glance magnitude.)"""
+        return re.sub(r"\s*\(\d+\)\s*$", "", text).rstrip()
+
     def get_parent_table(self) -> Optional[str]:
         """
         Get name of table containing current line.
@@ -5605,8 +6957,12 @@ class XReferView(idaapi.simplecustviewer_t):
             if not result or result[0] is None:
                 return None
             line = result[0]
-            candidate = line[6:-2].strip()
-            if candidate in self.table_names or candidate in self.orphan_table_names:
-                return candidate
+            # Heading lines look like "▾ NAME" / "▸ NAME" (optionally with a
+            # trailing "  (N)" count). Parse robustly rather than by offset.
+            clean = strip_color_codes(line).strip()
+            if clean[:1] in ("▸", "▾"):
+                candidate = self._strip_count_suffix(clean[1:].strip())
+                if candidate in self.table_names or candidate in self.orphan_table_names or candidate in self.search_table_to_type:
+                    return candidate
             lineno -= 1
         return None

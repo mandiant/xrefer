@@ -5,7 +5,7 @@
 </p>
 
 
-XRefer is a Python-based plugin for the [IDA Pro disassembler](https://hex-rays.com/ida-pro), a tool used for analyzing software. The plugin provides a custom navigation interface within IDA. It examines execution paths from entry points, breaks down the binary into clusters of related functions, and highlights downstream behaviors and artifacts for quicker insights. XRefer can incorporate external data (e.g., API traces, capa results, user-defined xrefs) and provides path graphs for richer context. It integrates with Google's Gemini model to produce natural language descriptions of code relationships and behaviors. Additionally, XRefer can provide cluster based labels for functions, aiming to accelerate the manual static analysis process.
+XRefer is a Python-based plugin for the [IDA Pro disassembler](https://hex-rays.com/ida-pro), a tool used for analyzing software. The plugin provides a custom navigation interface within IDA. It examines execution paths from entry points, breaks down the binary into clusters of related functions, and highlights downstream behaviors and artifacts for quicker insights. XRefer can incorporate external data (e.g., API traces, capa results, user-defined xrefs) and provides path graphs for richer context. It integrates with LLMs — hosted providers (Gemini, OpenAI, Anthropic, xAI, Qwen) or a local Ollama model — to produce natural language descriptions of code relationships and behaviors. Additionally, XRefer can provide cluster based labels for functions, aiming to accelerate the manual static analysis process.
 
 More can be read about XRefer in the accompanying [blog post](https://cloud.google.com/blog/topics/threat-intelligence/xrefer-gemini-assisted-binary-navigator).
 
@@ -26,7 +26,6 @@ More can be read about XRefer in the accompanying [blog post](https://cloud.goog
    ```
    pip install -r requirements-ida.txt
    ```
-   _Note: The `asciinet` dependency requires Java to be installed. OpenJDK or any JRE should work. Ensure `java` is accessible on your system's PATH._
 
 ## Usage
 
@@ -88,8 +87,12 @@ XRefer's LLM-based features, when enabled, send portions of analyzed data (e.g.,
    For reference on CLI options, run:
    ```bash
     ❯ uv run xrefer --help
-    usage: xrefer [-h] --backend {ida,binaryninja,ghidra} [--save] [--auto-analysis] [--mode {light,full}]
-                  [--report-data-mode {html,json,none}] [--force] [--entry-point ENTRY_POINT] [-L LOGFILE]
+    usage: xrefer [-h] --backend {ida,binaryninja,ghidra} [--save] [--auto-analysis | --no-auto-analysis]
+                  [--mode {light,full}] [--report-data-mode {html,json,none}] [--force]
+                  [--entry-point ENTRY_POINT] [-L LOGFILE] [--model MODEL] [--api-key API_KEY]
+                  [--api-base API_BASE] [--light-model LIGHT_MODEL] [--light-api-key LIGHT_API_KEY]
+                  [--llm | --no-llm] [--git-lookups | --no-git-lookups] [--capa CAPA] [--trace TRACE]
+                  [--user-xrefs USER_XREFS] [-o OUTPUT] [--save-settings]
                   file
 
     Unified XRefer CLI for multiple backends
@@ -100,10 +103,14 @@ XRefer's LLM-based features, when enabled, send portions of analyzed data (e.g.,
     options:
       -h, --help            show this help message and exit
       --backend {ida,binaryninja,ghidra}
-                            Analysis backend to use (available: ida, binaryninja, ghidra)
+                            Analysis backend to use
       --save                Save changes to database/project
-      --auto-analysis       Run auto analysis (default: True)
-      --mode {light,full}   Select analyzer mode (default: full)
+      --auto-analysis, --no-auto-analysis
+                            Run the disassembler's auto-analysis when opening the file (default: on)
+      --mode {light,full}   Analyzer mode (default: light). 'light' produces the SAME report as
+                            'full', just faster: it skips interactive-only work that the report
+                            does not use. Use '--mode full' when you also want a complete,
+                            GUI-reusable .xrefer cache.
       --report-data-mode {html,json,none}
                             Report output format: html (standalone), json (data only), or none
       --force               Remove previous artifacts and re-analyze
@@ -111,6 +118,27 @@ XRefer's LLM-based features, when enabled, send portions of analyzed data (e.g.,
                             Override entry point address (decimal or hex like 0x401000)
       -L, --logfile LOGFILE
                             Output log file path
+
+    settings overrides (flags > environment > settings.json > defaults):
+      --model MODEL         LLM model id for BOTH cluster analysis and categorization (unless
+                            --light-model is given), e.g. gemini/gemini-flash-latest,
+                            openai/gpt-5, anthropic/claude-opus-4-5, ollama_chat/llama3.1
+      --api-key API_KEY     LLM provider API key; falls back to the provider's standard
+                            environment variable (GEMINI_API_KEY, OPENAI_API_KEY, ...)
+      --api-base API_BASE   Base URL for a local / self-hosted (Ollama) model
+      --light-model LIGHT_MODEL
+                            Optional separate (cheaper / local) model for categorization
+      --light-api-key LIGHT_API_KEY
+                            API key for --light-model (defaults to reusing --api-key)
+      --llm, --no-llm       Enable/disable LLM lookups
+      --git-lookups, --no-git-lookups
+                            Enable/disable enriching strings via public GitHub code search
+      --capa CAPA           Path to a capa JSON results file (default: <binary>_capa.json)
+      --trace TRACE         Path to an API trace file (default: <binary>_trace.zip)
+      --user-xrefs USER_XREFS
+                            Path to a user cross-references file (default: <binary>_user_xrefs.txt)
+      -o, --output OUTPUT   Report output path (default: <binary>_report.html)
+      --save-settings       Persist the supplied overrides to ~/.xrefer/settings.json
     ```
 
 

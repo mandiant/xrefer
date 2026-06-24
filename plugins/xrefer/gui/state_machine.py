@@ -49,13 +49,21 @@ class XReferStateMachine(StateMachine):
     pinned_neighborhood_graph = State("pinned neighborhood graph")
     xref_listing = State("xref listing")
     help = State("help")
+    attack_matrix = State("attack matrix")
+    # Binary-wide artifact search (Shift+S from home): substring-filters
+    # every entity — imports, libraries, strings, capa matches — as the
+    # analyst types, with X / G / double-click pivots into the existing
+    # views. A real state (like search), not a per-view filter flag: it
+    # owns its own rendering rather than narrowing an underlying view.
+    artifact_search = State("artifact search")
 
     # primary transitions
     start_search = base.to(search)
+    start_artifact_search = base.to(artifact_search)
     start_call_focus = base.to(call_focus)
     start_trace = base.to(trace_scope_function)
-    start_graph = base.to(graph) | search.to(graph)
-    start_xref_listing = base.to(xref_listing) | search.to(xref_listing)
+    start_graph = base.to(graph) | search.to(graph) | artifact_search.to(graph)
+    start_xref_listing = base.to(xref_listing) | search.to(xref_listing) | artifact_search.to(xref_listing)
     start_boundary_results = base.to(boundary_results)
     start_last_boundary_results = base.to(last_boundary_results)
     start_orphans = base.to(orphans)
@@ -68,6 +76,9 @@ class XReferStateMachine(StateMachine):
         # cluster's intermediate paths" without manually ESC-ing first.
         | neighborhood_graph.to(cluster_graphs)
         | pinned_neighborhood_graph.to(cluster_graphs)
+        # Clicking a cluster chip inside the ATT&CK matrix jumps into that
+        # cluster's graph.
+        | attack_matrix.to(cluster_graphs)
     )
     # Neighborhood view is reachable from any banner-bearing state.
     # Centered on cursor, shows 1-hop callgraph adjacency to other
@@ -84,6 +95,17 @@ class XReferStateMachine(StateMachine):
         | pinned_simplified_graph.to(neighborhood_graph)
     )
 
+    # ATT&CK matrix view — binary-wide (or cluster-scoped) kill-chain
+    # coverage built from the per-cluster MITRE mappings. Reachable from the
+    # home view and the cluster views; scoped to the active cluster when
+    # entered from a cluster graph.
+    start_attack_matrix = (
+        base.to(attack_matrix)
+        | clusters.to(attack_matrix)
+        | cluster_graphs.to(attack_matrix)
+        | pinned_cluster_graphs.to(attack_matrix)
+    )
+
     # help transition
     start_help = (
         base.to(help)
@@ -91,6 +113,8 @@ class XReferStateMachine(StateMachine):
         | trace_scope_function.to(help)
         | graph.to(help)
         | pinned_graph.to(help)
+        | simplified_graph.to(help)
+        | pinned_simplified_graph.to(help)
         | boundary_results.to(help)
         | trace_scope_path.to(help)
         | last_boundary_results.to(help)
@@ -102,11 +126,19 @@ class XReferStateMachine(StateMachine):
         | pinned_cluster_graphs.to(help)
         | neighborhood_graph.to(help)
         | pinned_neighborhood_graph.to(help)
+        | attack_matrix.to(help)
     )
 
     # graph transitions
     toggle_on_pinned_graph = graph.to(pinned_graph) | simplified_graph.to(pinned_simplified_graph)
-    toggle_on_graph = pinned_graph.to(graph) | pinned_simplified_graph.to(simplified_graph) | pinned_simplified_graph.to(graph)
+    # G unpins: pinned->graph, pinned_simplified->simplified (keeps the
+    # simplified mode). There is deliberately NO pinned_simplified->graph
+    # arm here: it could only ever be the 2nd arm from pinned_simplified
+    # and python-statemachine fires the FIRST matching arm by event name,
+    # so go_back firing this event would land on simplified_graph anyway —
+    # the extra arm was dead and produced a state/history desync. go_back
+    # steps pinned_simplified -> simplified -> graph one mode at a time.
+    toggle_on_graph = pinned_graph.to(graph) | pinned_simplified_graph.to(simplified_graph)
     toggle_simplified = graph.to(simplified_graph) | pinned_graph.to(pinned_simplified_graph)
     toggle_normal = simplified_graph.to(graph) | pinned_simplified_graph.to(pinned_graph)
     toggle_pinned_cluster_graph = cluster_graphs.to(pinned_cluster_graphs)
@@ -123,7 +155,11 @@ class XReferStateMachine(StateMachine):
     toggle_on_trace_scope_full = trace_scope_path.to(trace_scope_full)
     toggle_on_trace_scope_function = trace_scope_full.to(trace_scope_function)
 
-    # trace revert transition
+    # trace revert transitions — ESC steps the scope cycle back one at a
+    # time (full -> path -> function), the inverse of T's forward cycle.
+    # The full -> path arm did not exist, so ESC from the full scope had
+    # no single-step way back and skipped past path.
+    revert_trace_scope_full_to_trace_scope_path = trace_scope_full.to(trace_scope_path)
     revert_trace_scope_path_to_trace_scope_fn = trace_scope_path.to(trace_scope_function)
 
     # help revert transitions
@@ -133,6 +169,8 @@ class XReferStateMachine(StateMachine):
     revert_help_to_trace_f = help.to(trace_scope_full)
     revert_help_to_graph = help.to(graph)
     revert_help_to_pinned_graph = help.to(pinned_graph)
+    revert_help_to_simplified_graph = help.to(simplified_graph)
+    revert_help_to_pinned_simplified_graph = help.to(pinned_simplified_graph)
     revert_help_to_boundary_results = help.to(boundary_results)
     revert_help_to_last_boundary_results = help.to(last_boundary_results)
     revert_help_to_xref_listing = help.to(xref_listing)
@@ -157,17 +195,34 @@ class XReferStateMachine(StateMachine):
     revert_neighborhood_graph_to_pinned_graph = neighborhood_graph.to(pinned_graph) | pinned_neighborhood_graph.to(pinned_graph)
     revert_neighborhood_graph_to_pinned_simplified_graph = neighborhood_graph.to(pinned_simplified_graph) | pinned_neighborhood_graph.to(pinned_simplified_graph)
 
+    # ATT&CK matrix exits — one reverse per entry state so go_back (ESC / K)
+    # returns the analyst to wherever they opened it (base is covered by
+    # to_base below).
+    revert_attack_matrix_to_clusters = attack_matrix.to(clusters)
+    revert_attack_matrix_to_cluster_graphs = attack_matrix.to(cluster_graphs)
+    revert_attack_matrix_to_pinned_cluster_graphs = attack_matrix.to(pinned_cluster_graphs)
+    revert_help_to_attack_matrix = help.to(attack_matrix)
+
     # search revert transitions
     revert_xref_listing_to_search = xref_listing.to(search)
     revert_graph_to_search = graph.to(search)
+    # … and the same pair for artifact search, so ESC from a pivoted
+    # xref listing / path graph returns to the result list (go_back
+    # needs an explicit arm targeting the previous state).
+    revert_xref_listing_to_artifact_search = xref_listing.to(artifact_search)
+    revert_graph_to_artifact_search = graph.to(artifact_search)
 
     # base transition
     to_base = (
         search.to(base)
         | call_focus.to(base)
         | trace_scope_function.to(base)
+        | trace_scope_path.to(base)
+        | trace_scope_full.to(base)
         | graph.to(base)
         | simplified_graph.to(base)
+        | pinned_graph.to(base)
+        | pinned_simplified_graph.to(base)
         | boundary_results.to(base)
         | last_boundary_results.to(base)
         | xref_listing.to(base)
@@ -178,6 +233,8 @@ class XReferStateMachine(StateMachine):
         | pinned_cluster_graphs.to(base)
         | neighborhood_graph.to(base)
         | pinned_neighborhood_graph.to(base)
+        | attack_matrix.to(base)
+        | artifact_search.to(base)
     )
 
     def __init__(self):
@@ -207,7 +264,18 @@ class XReferStateMachine(StateMachine):
         # mirror each other.
         self._intermediate_view_pushed_cluster: bool = False
         self._intermediate_view_transitioned_state: bool = False
+        # Cluster the ATT&CK matrix is scoped to (None = binary-wide). Set
+        # when K opens the matrix from a cluster graph; read by
+        # draw_attack_matrix; cleared on reset_state.
+        self._attack_matrix_scope_cluster_id: Optional[int] = None
         self._selected_index: Optional[int] = None
+        # Per-view substring filter (S in the full-trace / orphans reading
+        # views). Unlike the search STATE — a base-view mode with its own
+        # transitions — this is a flag layered onto the current state: the
+        # view keeps rendering, rows not matching search_filter are hidden,
+        # and printable keys feed the filter while it is active. Cleared on
+        # reset_state, on ESC, and whenever the state changes.
+        self._view_filter_active: bool = False
         self._boundary_methods: Optional[list] = None
         self._selected_refs = {}
         self._state_history: List[tuple] = []
@@ -224,6 +292,16 @@ class XReferStateMachine(StateMachine):
 
         if event_data.state == self.base:
             self.reset_state()
+
+        # Cluster sync auto-pins, so it is only ever valid in
+        # pinned_cluster_graphs. Whenever we land anywhere else with sync
+        # still set — an unpin via go_back/ESC, return-to-table, the K
+        # matrix round trip — clear it, or it strands True in an unpinned
+        # state and the next J toggles "off" from a view that never looked
+        # synced (and update()'s sync-follow keeps firing in a view that is
+        # then torn down on the next cursor move).
+        if self._cluster_sync_enabled and event_data.state != self.pinned_cluster_graphs:
+            self._cluster_sync_enabled = False
 
         if not self._state_history or self._state_history[-1][0] != self.current_state:
             self._state_history.append((self.current_state, event_data.event))
@@ -270,18 +348,62 @@ class XReferStateMachine(StateMachine):
         for i in range(len(self._state_history) - 2, -1, -1):
             prev_state, event = self._state_history[i]
 
+            # toggle_ events are mode flips (pin, sync, library visibility)
+            # whose states must not be revisited — EXCEPT the cluster
+            # table <-> graph pair, a real view change that ESC / K / N
+            # should walk back through (the revert_*_to_clusters
+            # transitions exist but were never reachable past this filter,
+            # stranding the triage loop in the overview).
+            event_name = str(event)
+            # toggle_ events are mode flips whose states ESC should not
+            # revisit — EXCEPT real, content-changing view modes that ESC
+            # must walk back through one step at a time. Without an
+            # exemption, go_back skips the toggled state and lands on the
+            # plain ancestor: returning from help/neighborhood/matrix opened
+            # FROM a pinned or simplified graph silently dropped the pin /
+            # simplification (the revert_*_to_pinned_*/_simplified_* arms
+            # existed but were never reachable past this filter), and the
+            # cluster table<->graph and trace-scope walks had the same gap.
+            # The pin/simplify exemptions also let ESC step one mode at a
+            # time within a graph session, matching the trace-scope flow.
+            is_mode_flip = event_name.startswith("toggle_") and event_name not in (
+                "toggle_on_clusters",
+                "toggle_on_cluster_graphs",
+                "toggle_on_trace_scope_path",
+                "toggle_on_trace_scope_full",
+                "toggle_on_trace_scope_function",
+                "toggle_on_pinned_graph",
+                "toggle_on_graph",
+                "toggle_simplified",
+                "toggle_normal",
+                "toggle_pinned_cluster_graph",
+                "toggle_unpinned_cluster_graph",
+                "toggle_pinned_neighborhood_graph",
+                "toggle_unpinned_neighborhood_graph",
+            )
+
             # Check if this state meets our criteria
-            if prev_state != current_state and not event.startswith("toggle_"):
+            if prev_state != current_state and not is_mode_flip:
                 # Find the transition
                 for transition in current_state.transitions:
                     if transition.target == prev_state:
                         try:
-                            # Get stored cursor position before updating history
-                            cursor_pos = self.get_cursor_position(prev_state)
                             getattr(self, transition.event)()
-                            # Remove states from history up to this point
-                            self._state_history = self._state_history[: i + 1]
-                            # log(f"Successfully transitioned to {self.current_state.name}")
+                            # Firing by event name dispatches the FIRST
+                            # matching arm from the current state, which may
+                            # differ from transition.target if an event has
+                            # several arms out of this state (a shadowed
+                            # arm). Key the cursor and the history truncation
+                            # off where we ACTUALLY landed so state, screen
+                            # position, and history can never desync.
+                            landed = self.current_state
+                            cursor_pos = self.get_cursor_position(landed)
+                            for j in range(i, -1, -1):
+                                if self._state_history[j][0] == landed:
+                                    self._state_history = self._state_history[: j + 1]
+                                    break
+                            else:
+                                self._state_history = self._state_history[: i + 1]
                             return True, cursor_pos
                         except Exception as e:
                             # log(f"[-] Error during transition: {str(e)}")
@@ -292,17 +414,91 @@ class XReferStateMachine(StateMachine):
         # log("No suitable previous state found")
         return False, None
 
+    def return_to_clusters_table(self) -> bool:
+        """ESC support for the table → cluster-graph → ESC triage loop.
+
+        When the active cluster graph was entered FROM the clusters table,
+        transition back to the table and truncate the history so a further
+        ESC keeps walking toward base. The table's history entry is
+        recorded with a toggle_ event, which ``go_back`` would need extra
+        context to pick (the graph may legitimately sit between two table
+        visits), so the raw history is scanned here: the nearest distinct
+        prior state decides. Returns False when the graph was entered any
+        other way (overview / base / chip click from elsewhere) — callers
+        keep the existing overview behavior.
+        """
+        if self.current_state not in (self.cluster_graphs, self.pinned_cluster_graphs):
+            return False
+        for i in range(len(self._state_history) - 2, -1, -1):
+            prev_state, _event = self._state_history[i]
+            # Skip the graph's own history entries — a pin/unpin or sync
+            # on/off pair appended (pinned_)cluster_graphs entries between
+            # the table and here; without skipping them the scan bailed and
+            # ESC detoured through the never-visited relationship overview.
+            if prev_state in (self.cluster_graphs, self.pinned_cluster_graphs):
+                continue
+            if prev_state != self.clusters:
+                return False
+            self._state_history = self._state_history[: i + 1]
+            # If the graph was pinned (G or a sync auto-pin), unpin first so
+            # the single transition back to the table is available; the
+            # on_enter sync-clear keeps the flag consistent.
+            if self.current_state == self.pinned_cluster_graphs:
+                self.toggle_unpinned_cluster_graph()
+            self.toggle_on_clusters()
+            return True
+        return False
+
+    def step_back_trace_scope(self) -> bool:
+        """ESC within the trace-scope cycle steps back exactly one scope
+        (full -> path -> function) and then out to base.
+
+        This is a pure function of the CURRENT scope, not of history, so
+        it never skips a scope and never dead-ends on the cyclic history
+        the T key builds (T wraps full -> function, which would otherwise
+        leave ``go_back`` with no single-step arm to walk). Returns False
+        when not in a trace scope, so the caller falls through to the
+        normal ESC handling.
+        """
+        if self.current_state == self.trace_scope_full:
+            return bool(self.revert_trace_scope_full_to_trace_scope_path())
+        if self.current_state == self.trace_scope_path:
+            return bool(self.revert_trace_scope_path_to_trace_scope_fn())
+        if self.current_state == self.trace_scope_function:
+            return bool(self.to_base())
+        return False
+
     def reset_state(self) -> None:
         """Reset state machine to initial conditions."""
         self._state_history.clear()
         self._cluster_sync_enabled = False
+        # Honor the M-undo contract before discarding it: if the
+        # intermediate sub-view pushed a cluster onto the stack as
+        # rendering plumbing, pop it now. Otherwise base entry (e.g. a
+        # cross-function cursor move that tears the view down to base)
+        # would strand that push, and the next C would open the pushed
+        # cluster's individual graph instead of the relationship overview.
+        if self._intermediate_view_pushed_cluster:
+            self.cluster_manager.pop_cluster()
         self._intermediate_view_func_ea = None
         self._intermediate_view_show_all = False
         self._intermediate_view_pushed_cluster = False
         self._intermediate_view_transitioned_state = False
+        self._attack_matrix_scope_cluster_id = None
         self._search_filter = ""
         self._address_filter = ""
+        self._view_filter_active = False
         self._selected_index = None
+
+    def adopt_selected_refs(self, store: Dict[int, Set[int]]) -> None:
+        """Use an externally-owned dict as the selection store.
+
+        The view passes the core analyzer's persisted dict, so user
+        selections survive IDA restarts: the state machine mutates the
+        adopted dict in place and the analyzer pickles it with the DB —
+        without the core layer ever importing gui state.
+        """
+        self._selected_refs = store
 
     def update_selected_refs(self, func_ea: int, e_index: int) -> None:
         """Update the set of selected references for a function."""
@@ -324,6 +520,37 @@ class XReferStateMachine(StateMachine):
     def is_pinned_graph(self) -> bool:
         """Check if current state is a pinned graph view."""
         return self.current_state in (self.pinned_graph, self.pinned_simplified_graph, self.pinned_cluster_graphs, self.pinned_neighborhood_graph)
+
+    @property
+    def view_filter_active(self) -> bool:
+        """Whether the per-view row filter is live (see __init__ note)."""
+        return self._view_filter_active
+
+    @view_filter_active.setter
+    def view_filter_active(self, value: bool) -> None:
+        self._view_filter_active = bool(value)
+
+    def is_sticky_state(self) -> bool:
+        """Check if the current state is a binary-wide "reading" view.
+
+        These views' content does not depend on the cursor function, so
+        cross-function navigation in the disassembly must not tear them
+        down — ESC / their toggle keys are the explicit exits. Boundary
+        results are included because they render the selections of the
+        function they were invoked from; the view keeps their func_ea
+        frozen while sticky (see XReferView.update).
+        """
+        return self.current_state in (
+            self.clusters,
+            self.attack_matrix,
+            self.orphans,
+            self.xref_listing,
+            self.boundary_results,
+            self.last_boundary_results,
+            self.trace_scope_full,
+            self.help,
+            self.artifact_search,
+        )
 
     def push_cluster_graph(self, cluster_id: int, parent_cluster_id: Optional[int] = None) -> None:
         """Delegate to cluster manager."""
@@ -358,8 +585,21 @@ class XReferStateMachine(StateMachine):
         return self.cluster_manager.pop_cluster() is not None
 
     def clear_cluster_history(self) -> None:
-        """Delegate to cluster manager."""
+        """Delegate to cluster manager, and discard the intermediate
+        sub-view with it.
+
+        Both callers (the (Re-)run Cluster Analysis menu action and the R
+        key) wipe the whole cluster stack and land on the relationship
+        overview, where the intermediate sub-view can no longer render.
+        Its undo bookkeeping refers to stack entries that no longer
+        exist, so leaving the flags armed makes M and ESC fake-undo (pop
+        an empty/foreign stack, go_back to base) and A a silent no-op.
+        """
         self.cluster_manager.clear()
+        self._intermediate_view_func_ea = None
+        self._intermediate_view_show_all = False
+        self._intermediate_view_pushed_cluster = False
+        self._intermediate_view_transitioned_state = False
 
     def store_cluster_position(self, cluster_id: int, lineno: int, x: int = 0, y: int = 0) -> None:
         """Delegate to cluster manager."""
@@ -450,11 +690,36 @@ class XReferStateMachine(StateMachine):
     def flip_intermediate_scope(self) -> bool:
         """Flip intermediate view between current-cluster and
         all-clusters scope. Only meaningful while the intermediate
-        view is active.
+        view is active AND actually rendered — i.e. in a cluster-graph
+        state. The state guard mirrors flip_intermediate_view so A
+        cannot silently re-scope a hidden sub-view from neighborhood /
+        help / attack_matrix (where the flag may still be armed).
         """
+        if self.current_state not in (self.cluster_graphs, self.pinned_cluster_graphs):
+            return False
         if self._intermediate_view_func_ea is None:
             return False
         self._intermediate_view_show_all = not self._intermediate_view_show_all
+        return True
+
+    def discard_intermediate_view(self) -> bool:
+        """Drop the intermediate sub-view bookkeeping WITHOUT the state
+        guard or go_back that ``flip_intermediate_view`` applies.
+
+        Used when M is pressed on a state where a stale sub-view flag
+        lingers (e.g. it was opened in cluster_graphs, then the user left
+        via V/K): the flag must be cleared — and any plumbing push undone
+        — so M can act fresh, but there is no live sub-view to ``go_back``
+        out of. Returns True if anything was cleared.
+        """
+        if self._intermediate_view_func_ea is None:
+            return False
+        if self._intermediate_view_pushed_cluster:
+            self.cluster_manager.pop_cluster()
+        self._intermediate_view_func_ea = None
+        self._intermediate_view_show_all = False
+        self._intermediate_view_pushed_cluster = False
+        self._intermediate_view_transitioned_state = False
         return True
 
     def toggle_hide_library_clusters(self, event=None) -> bool:
@@ -462,7 +727,7 @@ class XReferStateMachine(StateMachine):
         cluster table / cluster graph / pinned cluster graph states; returns
         False otherwise so the caller can fall back to other behavior.
         """
-        if self.current_state not in (self.clusters, self.cluster_graphs, self.pinned_cluster_graphs):
+        if self.current_state not in (self.clusters, self.cluster_graphs, self.pinned_cluster_graphs, self.attack_matrix):
             return False
         self._hide_library_clusters = not self._hide_library_clusters
         return True
@@ -513,6 +778,16 @@ class XReferStateMachine(StateMachine):
     def hide_library_clusters(self) -> bool:
         """Whether library clusters are filtered out of cluster views."""
         return self._hide_library_clusters
+
+    @property
+    def attack_matrix_scope_cluster_id(self) -> Optional[int]:
+        """Cluster id the ATT&CK matrix is scoped to, or None for the
+        binary-wide matrix."""
+        return self._attack_matrix_scope_cluster_id
+
+    @attack_matrix_scope_cluster_id.setter
+    def attack_matrix_scope_cluster_id(self, value: Optional[int]) -> None:
+        self._attack_matrix_scope_cluster_id = value
 
     @property
     def intermediate_view_func_ea(self) -> Optional[int]:

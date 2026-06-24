@@ -21,7 +21,7 @@ import pickle
 import re
 import shutil
 import datetime
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict, defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from time import time
@@ -30,11 +30,10 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union, 
 import xrefer
 from xrefer.backend import Address, BackEnd, FunctionType, XrefType, get_current_backend
 from xrefer.core.clusters import ClusterManager, FunctionalCluster
-from xrefer.core.helpers import enrich_string_data_core, find_cluster_analysis, log, log_elapsed_time
-from xrefer.core.settings import XReferSettingsManager
+from xrefer.core.helpers import AnalysisCancelled, cancellable_phase, check_cancelled, enrich_string_data_core, find_cluster_analysis, log, log_elapsed_time, log_progress, sanitize_dirtree_name
+from xrefer.core.settings import XReferSettingsManager, deep_merge_settings
 from xrefer.lang import get_language_object
 from xrefer.llm import ClusterAnalyzer, CATEGORIES, Categorizer
-from xrefer.llm.base import ModelConfig
 from xrefer.loaders.capa import load_capa_json
 from xrefer.loaders.trace import parse_api_trace
 
@@ -97,6 +96,28 @@ ReportDataMode = Literal["html", "json", "none"]
 """html: standalone HTML with embedded data, json: write JSON only, none: skip report output (default)."""
 
 
+@dataclass(frozen=True)
+class FunctionPlacement:
+    """Per-function origin classification, the single source of truth shared by
+    the folder organizer (``compute_function_folders``) and the cluster
+    renamer (``rename_cluster_functions``), so names and folders never disagree.
+
+    category:
+        ``"func_lib"``       — FUNC_LIB / thunk (FLIRT-ish library code).
+        ``"cluster_member"`` — node of exactly one cluster, OR an intermediate
+                               that bridges exactly one cluster (its glue).
+                               ``cluster_id`` is that home cluster.
+        ``"shared"``         — node of >1 cluster, or an intermediate bridging
+                               >1 cluster. No single home (``cluster_id`` None).
+    origin: ``"library"`` | ``"user"`` (fail-open: any user membership → user).
+    cluster_id: home cluster for ``cluster_member``, else ``None``.
+    """
+
+    category: str
+    origin: str
+    cluster_id: Optional[int]
+
+
 class XRefer:
     """
     A class for managing and analyzing cross-references in IDA Pro.
@@ -118,16 +139,40 @@ class XRefer:
         *,
         mode: Optional[AnalysisMode] = 'full',
         report_data_mode: ReportDataMode = "none",
+        settings_overrides: Optional[Dict[str, Any]] = None,
+        persist_settings: bool = False,
+        report_path: Optional[str] = None,
     ) -> None:
         """
         Initialize the XRefer object.
 
         Args:
             ep (Optional[int]): The entry point address. If None, the default entry point will be used.
+            settings_overrides (Optional[dict]): Settings to deep-merge on top of
+                the loaded settings.json for this run only (e.g. from CLI flags).
+            persist_settings (bool): When True (and overrides were given), write the
+                merged settings back to settings.json so they apply to future runs.
+            report_path (Optional[str]): Explicit output path for the generated
+                report; defaults to ``<binary>_report.html`` / ``_report_data.json``.
         """
         try:
             self.settings_manager = XReferSettingsManager()
             self.settings = self.settings_manager.load_settings()
+            # Apply ephemeral CLI/programmatic overrides on top of the loaded
+            # settings. Overriding a path also flips its use_default_paths flag
+            # off so the value sticks (and, with persist_settings, is saved as an
+            # IDB-specific path rather than a global default).
+            if settings_overrides:
+                deep_merge_settings(self.settings, settings_overrides)
+                for path_type in settings_overrides.get("paths", {}):
+                    self.settings.setdefault("use_default_paths", {})[path_type] = False
+                if persist_settings:
+                    try:
+                        self.settings_manager.save_settings(self.settings)
+                        log(f"Saved settings to {self.settings_manager.settings_file}")
+                    except Exception as err:
+                        log(f"[-] Failed to persist settings: {err}")
+            self.report_path: Optional[str] = report_path
             self.exclusions = self.settings_manager.load_exclusions()
             self.report_data_mode: ReportDataMode = report_data_mode
             self.analysis_warnings: List[str] = []
@@ -227,6 +272,25 @@ class XRefer:
             self._processed_orphan_thunks: Set[int] = set()
             self.clusters = None
             self.cluster_analysis = None
+            # Set by the pre-flight token-budget gate in analyze_clusters when a
+            # run is skipped for exceeding the model's context window; consumed
+            # (and cleared) by the GUI to show the budget bar. None = no block.
+            self.cluster_token_budget_exceeded = None
+            # Set when a cluster-analysis run fails outright or completes
+            # only partially (skipped stage-1 calls, stage-2 fallback, user
+            # cancel); a dict with severity/stage/message details. Consumed
+            # (and cleared) by the GUI to show a failure dialog instead of
+            # letting the run masquerade as a success. None = clean run.
+            self.cluster_analysis_failure = None
+            # User artifact selections (func_ea -> {entity indices}) — the
+            # gating input for B boundary scans and D exclusions. Owned by
+            # the CORE object so it persists with the analysis DB; the gui
+            # state machine adopts this same dict (shared reference) so
+            # toggles land here without core touching gui state. The view
+            # sets selected_refs_dirty on every toggle; the close hook
+            # saves only when it is set.
+            self.selected_refs: Dict[int, Set[int]] = {}
+            self.selected_refs_dirty: bool = False
             self.mode = mode
             self.configure_llm_and_lookups()
             # Run analysis if requested
@@ -345,7 +409,15 @@ class XRefer:
 
         if self.llm_lookups and self.mode == 'full':
             lib_list = [x[1] for x in self.lang.lib_refs]
-            _, self.categories["lib_categories"] = Categorizer.categorize(lib_list, self.categories["libs"], type="lib")
+            # Categorization is a nice-to-have on top of the default
+            # grouping; an LLM failure (auth, connectivity, timeout — the
+            # processor itself only absorbs rate limits) must not abort the
+            # whole analysis before it is saved. The per-item fallback below
+            # already handles anything left uncategorized.
+            try:
+                _, self.categories["lib_categories"] = Categorizer.categorize(lib_list, self.categories["libs"], type="lib")
+            except Exception as err:
+                log(f"Library categorization failed ({err}) — keeping default grouping for this run")
 
         for lib_ref in self.lang.lib_refs:
             try:
@@ -377,6 +449,10 @@ class XRefer:
             - strings[1]: Extended string references with additional data
         """
         log("Sifting string references...")
+        # Membership shadow for string_index_cache: the list stays (pickled,
+        # ordered) but the per-string `in` check was a linear scan that made
+        # this loop quadratic on string-heavy binaries.
+        cached_indices = set(self.string_index_cache)
         for str_ea in self.lang.strings:
             string_contents = self.lang.strings[str_ea][0]
             if len(string_contents) >= 3:
@@ -397,7 +473,8 @@ class XRefer:
                 else:
                     self.strings[0].append(Reference(str_ea, e_index, EntityType.STRING))
 
-                if e_index not in self.string_index_cache:
+                if e_index not in cached_indices:
+                    cached_indices.add(e_index)
                     self.string_index_cache.append(e_index)
 
         # Record the 'simple' (uncategorized) string indices so the
@@ -527,23 +604,47 @@ class XRefer:
 
         log("Generating xref mappings...")
         for func in self._backend.functions():
-            for block in func.basic_blocks:
-                # Iterate over the instructions in the basic block
-                for addr in self._backend.instructions(block.start, block.end):
-                    for ref in self._backend.get_xrefs_from(Address(addr)):
-                        # Check if the reference points within the same function
-                        if Address(ref.target) in func:
-                            continue
+            start = int(func.start)
+            ranges = func.chunk_ranges
+            if ranges is not None:
+                # far_only skips the per-instruction fall-through flow refs
+                # (the bulk of XREF_ALL's yield), and containment is one
+                # Python tuple scan over the function's chunk ranges — tail
+                # chunks included, matching func_contains — instead of one
+                # backend round-trip per xref. Walking the chunk ranges also
+                # covers refs originating at data embedded in the function
+                # (jump tables, literal pools), which the basic-block walk
+                # missed.
+                for range_start, range_end in ranges:
+                    for addr in self._backend.instructions(Address(range_start), Address(range_end)):
+                        for ref in self._backend.get_xrefs_from(Address(addr), far_only=True):
+                            target = int(ref.target)
+                            # Skip references pointing within the same function
+                            if any(cs <= target < ce for cs, ce in ranges):
+                                continue
+                            self._record_caller_xref(start, ref)
+            else:
+                # Backend can't enumerate chunks — original per-block walk
+                # with per-ref containment.
+                for block in func.basic_blocks:
+                    # Iterate over the instructions in the basic block
+                    for addr in self._backend.instructions(block.start, block.end):
+                        for ref in self._backend.get_xrefs_from(Address(addr), far_only=True):
+                            # Check if the reference points within the same function
+                            if Address(ref.target) in func:
+                                continue
+                            self._record_caller_xref(start, ref)
 
-                        start = int(func.start)
-                        if start not in self.caller_xrefs_cache:
-                            # function A -> function B call locations
-                            self.caller_xrefs_cache[start] = {ref.target: {ref.source}}
-                        else:
-                            try:
-                                self.caller_xrefs_cache[start][ref.target].add(ref.source)
-                            except KeyError:
-                                self.caller_xrefs_cache[start][ref.target] = {ref.source}
+    def _record_caller_xref(self, start: int, ref) -> None:
+        """Record one outgoing reference into caller_xrefs_cache."""
+        if start not in self.caller_xrefs_cache:
+            # function A -> function B call locations
+            self.caller_xrefs_cache[start] = {ref.target: {ref.source}}
+        else:
+            try:
+                self.caller_xrefs_cache[start][ref.target].add(ref.source)
+            except KeyError:
+                self.caller_xrefs_cache[start][ref.target] = {ref.source}
 
     def get_user_xrefs(self, user_xrefs_path: str) -> List[Tuple[int, int]]:
         _xrefs = []
@@ -614,18 +715,58 @@ class XRefer:
         """
         Get the index of an entity, adding it to the list if not already present.
 
+        Backed by a lazily-synced hash index instead of a linear scan over
+        all entities (the scan made first-analysis interning quadratic —
+        tens of seconds of main-thread blocking on string-heavy Rust/Go
+        binaries). The index rebuilds when the entities list object is
+        replaced wholesale (string enrichment, DB load) and extends
+        incrementally over entries appended directly (load_imports), so an
+        identical tuple interned later still dedupes against them.
+        Post-enrichment 7-tuples contain dicts/lists and are unhashable;
+        they are skipped when indexing — an unhashable entity can never
+        compare equal to any hashable probe, so the linear scan would never
+        have matched one either. Duplicate keys keep the FIRST position,
+        matching the scan's first-match return.
+
         Args:
             entity (Tuple[str, str, EntityType]): The entity to look up or add.
 
         Returns:
             int: The index of the entity in the entities list.
         """
-        for index, _entity in enumerate(self.entities):
-            if entity == _entity:
-                return index
+        entities = self.entities
+        index_map = getattr(self, "_entity_index_map", None)
+        if index_map is None or getattr(self, "_entity_index_ident", None) != id(entities):
+            index_map = {}
+            self._entity_index_map = index_map
+            self._entity_index_ident = id(entities)
+            self._entity_indexed_count = 0
+        for pos in range(self._entity_indexed_count, len(entities)):
+            try:
+                index_map.setdefault(entities[pos], pos)
+            except TypeError:
+                pass  # unhashable post-enrichment tuple — see docstring
+        self._entity_indexed_count = len(entities)
 
-        self.entities.append(entity)
-        return len(self.entities) - 1
+        try:
+            existing = index_map.get(entity)
+        except TypeError:
+            # Unhashable probe (no current caller does this) — fall back to
+            # the equality scan the map replaced.
+            for index, _entity in enumerate(entities):
+                if entity == _entity:
+                    return index
+            existing = None
+        if existing is not None:
+            return existing
+
+        entities.append(entity)
+        try:
+            index_map[entity] = len(entities) - 1
+        except TypeError:
+            pass
+        self._entity_indexed_count = len(entities)
+        return len(entities) - 1
 
     def load_imports(self) -> None:
         """
@@ -639,7 +780,13 @@ class XRefer:
         categorize_apis = self.llm_lookups and self.mode == "full"
         if categorize_apis:
             api_list = [x[1] for x in entries]
-            _, self.categories["api_categories"] = Categorizer.categorize(api_list, self.categories["apis"])
+            # Same degrade-not-abort contract as sift_libs: the per-item
+            # except below falls back to the module name for anything the
+            # LLM did not categorize.
+            try:
+                _, self.categories["api_categories"] = Categorizer.categorize(api_list, self.categories["apis"])
+            except Exception as err:
+                log(f"Import categorization failed ({err}) — keeping module-name grouping for this run")
         for ea, name, module_name in entries:
             if categorize_apis:
                 try:
@@ -750,75 +897,131 @@ class XRefer:
                 ref_to_search = []
 
         log(f"Mapped {len(self.mapped_refs)} references to {len(self.leaf_funcs) - initial_leaf_count} new leaf functions (total: {len(self.leaf_funcs)})")
-    def propagate_xref_nodes(self, iter: int) -> bool:
+    def _path_corpus_topology(self) -> Tuple[List[int], List[Tuple[int, int]], List[Tuple[int, int]]]:
+        """One walk over the stored path corpus for the current entry point.
+
+        The propagation, address-population and thunk-fix passes only ever
+        need the corpus' distinct nodes and call edges, yet each used to
+        re-walk every node of every stored path (the same edge recurs
+        across up to 10k paths per leaf). Returns:
+
+        * nodes — every path node, first-encounter order;
+        * edges — every distinct ``(parent, child)`` call edge,
+          first-encounter order. Order is load-bearing: the ``*_ea`` maps'
+          insertion order feeds the INDIRECT xref table row order.
+        * last_edges — distinct ``(second-to-last, leaf)`` pairs, the only
+          pairs ``fix_thunk_xrefs`` acts on.
+
+        The walk mirrors the original per-path ``reversed(path)``
+        iteration, so first-encounter order matches the old passes' first
+        processing order. Edges come strictly from the stored corpus —
+        never ``caller_xrefs_cache``, whose binary-wide edges off any EP
+        path would over-propagate and change results.
+        """
+        nodes: List[int] = []
+        seen_nodes: Set[int] = set()
+        edges: List[Tuple[int, int]] = []
+        seen_edges: Set[Tuple[int, int]] = set()
+        last_edges: List[Tuple[int, int]] = []
+        seen_last: Set[Tuple[int, int]] = set()
+        for path_group in self.paths[self.current_analysis_ep].values():
+            for path in path_group:
+                child: Optional[int] = None
+                for idx, func_ea in enumerate(reversed(path)):
+                    if func_ea not in seen_nodes:
+                        seen_nodes.add(func_ea)
+                        nodes.append(func_ea)
+                    if child is not None:
+                        edge = (func_ea, child)
+                        if edge not in seen_edges:
+                            seen_edges.add(edge)
+                            edges.append(edge)
+                        if idx == 1 and edge not in seen_last:
+                            seen_last.add(edge)
+                            last_edges.append(edge)
+                    child = func_ea
+        return nodes, edges, last_edges
+
+    def propagate_xref_nodes(self) -> None:
         """
         Propagate cross-reference information through call paths.
 
-        Iteratively propagates cross-reference information up call chains,
-        ensuring complete visibility of references through call paths.
-        Critical for boundary analysis and path tracking.
-
-        Args:
-            iter (int): Current iteration number for logging
-
-        Returns:
-            bool: True if any modifications were made during propagation
+        Worklist propagation over the corpus' distinct call edges: each
+        edge is merged once, and an edge is re-queued only when its
+        child's information actually grew. merge_xrefs is a monotone set
+        union, so this reaches the same least fixpoint as the previous
+        whole-corpus passes — which re-merged every adjacent pair of
+        every stored path (millions of redundant idempotent merges for
+        tens of thousands of distinct edges) and repeated until a full
+        pass changed nothing.
 
         Side Effects:
             - Updates global_xrefs with propagated reference information
-
-        Note:
-            - Handles both direct and indirect references
-            - Maintains reference type distinction during propagation
-            - Updates entity visibility through call chains
+              (including merge_xrefs' create-on-first-touch entries for
+              every node appearing in any path)
         """
-        total = len(self.paths[self.current_analysis_ep]) - 1
-        assert total >= 0, f"Hmm, {self.current_analysis_ep = :#x}, {self.paths = }"
-        modified = False
+        assert len(self.paths[self.current_analysis_ep]) >= 1, f"Hmm, {self.current_analysis_ep = :#x}, {self.paths = }"
+        nodes, edges, _ = self._path_corpus_topology()
+        # The old passes created global_xrefs entries for both endpoints of
+        # every merged edge; cover every path node explicitly (including
+        # single-node paths with no edges at all).
+        for func_ea in nodes:
+            self.ensure_global_xrefs_entry(func_ea)
 
-        for index, (_, path_group) in enumerate(self.paths[self.current_analysis_ep].items()):
-            log(f"Propagating xref nodes :: [pass {iter}] :: [{index}/{total}]")
-            for path in path_group:
-                child_func_ea = None
+        parents_of: Dict[int, Set[int]] = {}
+        for parent, child in edges:
+            parents_of.setdefault(child, set()).add(parent)
 
-                for func_ea in reversed(path):
-                    if child_func_ea:
-                        ret = self.merge_xrefs(func_ea, child_func_ea)
-                        if ret:
-                            modified = ret
-                    child_func_ea = func_ea
-
-        return modified
+        log(f"Propagating xrefs across {len(edges)} distinct call edges ({len(nodes)} functions)...")
+        pending = deque(edges)
+        queued: Set[Tuple[int, int]] = set(edges)
+        processed = 0
+        while pending:
+            edge = pending.popleft()
+            queued.discard(edge)
+            parent, child = edge
+            processed += 1
+            log_progress(f"Propagating xrefs :: {processed} edge merges, {len(pending)} queued")
+            if self.merge_xrefs(parent, child):
+                # Parent's indirect set grew — its own callers may now have
+                # something new to pick up.
+                for grandparent in parents_of.get(parent, ()):
+                    gedge = (grandparent, parent)
+                    if gedge not in queued:
+                        queued.add(gedge)
+                        pending.append(gedge)
+        log(f"Propagation complete after {processed} edge merges")
 
     def fix_thunk_xrefs(self) -> None:
         """
         Fix cross-references for thunk functions.
 
         This method adjusts cross-references related to thunk functions
-        to ensure proper analysis and display of references.
+        to ensure proper analysis and display of references. Only the
+        final (caller-of-leaf, leaf) pair of each path can qualify, so it
+        runs once per distinct such pair instead of once per stored path
+        (which also re-resolved the same leaf function per path and kept
+        iterating the rest of the path to no effect).
         """
         log("Fixing thunk function references...")
 
-        for index, (_, path_group) in enumerate(self.paths[self.current_analysis_ep].items()):
-            for path in path_group:
-                child_func_ea = None
-                for _index, func_ea in enumerate(reversed(path)):
-                    if _index == 1 and self.global_xrefs[child_func_ea][self.DIRECT_XREFS]["imports"]:
-                        fn = self._backend.get_function_at(child_func_ea)
-                        if fn.is_thunk:
-                            node = next(iter(self.global_xrefs[child_func_ea][self.DIRECT_XREFS]["imports"]))
-                            self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports"].add(node)
-                            try:
-                                if node not in self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports_ea"]:
-                                    call_xrefs = self.caller_xrefs_cache[func_ea][child_func_ea]
-                                    self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports_ea"][node] = call_xrefs
-                                    self.entity_xrefs[node].update(call_xrefs)
-                            except (KeyError, AttributeError) as e:
-                                log(f"Warning: Failed to update thunk imports for function 0x{func_ea:x}: {e}")
-                            self.global_xrefs[func_ea][self.INDIRECT_XREFS]["imports"].discard(node)
-                            break
-
-                    child_func_ea = func_ea
+        _, _, last_edges = self._path_corpus_topology()
+        for func_ea, child_func_ea in last_edges:
+            if not self.global_xrefs[child_func_ea][self.DIRECT_XREFS]["imports"]:
+                continue
+            fn = self._backend.get_function_at(child_func_ea)
+            if not fn.is_thunk:
+                continue
+            node = next(iter(self.global_xrefs[child_func_ea][self.DIRECT_XREFS]["imports"]))
+            self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports"].add(node)
+            try:
+                if node not in self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports_ea"]:
+                    call_xrefs = self.caller_xrefs_cache[func_ea][child_func_ea]
+                    self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports_ea"][node] = call_xrefs
+                    self.entity_xrefs[node].update(call_xrefs)
+            except (KeyError, AttributeError) as e:
+                log(f"Warning: Failed to update thunk imports for function 0x{func_ea:x}: {e}")
+            self.global_xrefs[func_ea][self.INDIRECT_XREFS]["imports"].discard(node)
 
     def _process_artifact_xrefs(self, idx: int, entity: Tuple, xrefs: Set[int], func_artifacts: Dict, orphan_func_artifacts: Dict, orphan_artifacts: List) -> None:
         """
@@ -880,6 +1083,20 @@ class XRefer:
         orphan_func_artifacts = {}  # Same structure for orphans
         orphan_artifacts = []  # For artifacts with no xrefs at all
 
+        # Back-fill entity_xrefs for indices the analyze() loop didn't
+        # touch, in ONE pass over mapped_refs (it used to rescan all of
+        # mapped_refs once per missing entity — and mapped_refs is not
+        # persisted, so on a loaded DB every one of those scans iterated
+        # an empty list for nothing). Only found entries are written, so
+        # no empty sets leak into the persisted entity_xrefs.
+        missing = {idx for idx in interesting_indices if idx not in self.entity_xrefs}
+        if missing and self.mapped_refs:
+            refs_by_entity: Dict[int, Set[int]] = {}
+            for ref in self.mapped_refs:
+                if ref.entity_index in missing:
+                    refs_by_entity.setdefault(ref.entity_index, set()).add(ref.address)
+            self.entity_xrefs.update(refs_by_entity)
+
         # Filter out excluded artifacts and those with >2 xrefs
         filtered_indices = set()
         excluded_count = 0
@@ -888,9 +1105,6 @@ class XRefer:
             if self.settings["enable_exclusions"] and idx in self.excluded_entities:
                 excluded_count += 1
                 continue
-            # Check xref count before adding
-            if idx not in self.entity_xrefs:
-                self.populate_entity_xrefs(idx)
             xrefs = self.entity_xrefs.get(idx, set())
             if len(xrefs) > 2:  # Only include if 2 or fewer xrefs
                 high_xref_count += 1
@@ -912,18 +1126,6 @@ class XRefer:
             self._process_artifact_xrefs(idx, entity, xrefs, func_artifacts, orphan_func_artifacts, orphan_artifacts)
 
         return func_artifacts, orphan_func_artifacts, orphan_artifacts
-
-    def populate_entity_xrefs(self, entity_idx: int) -> None:
-        """Quickly populate xrefs for a specific entity."""
-        entity = self.entities[entity_idx]
-        entity_type = entity[2]  # Type ID of entity
-
-        # Search through mapped refs to find xrefs for this entity
-        for ref in self.mapped_refs:
-            if ref.entity_index == entity_idx:  # If entity index matches
-                if entity_idx not in self.entity_xrefs:
-                    self.entity_xrefs[entity_idx] = set()
-                self.entity_xrefs[entity_idx].add(ref.address)
 
     def has_indirect_xrefs(self, func_ea: int) -> bool:
         """
@@ -1053,31 +1255,40 @@ class XRefer:
         Populate cross-reference addresses through paths.
 
         This method fills in the cross-reference address information
-        for all functions in the analyzed paths.
+        for all functions in the analyzed paths. The COMBINED set depends
+        only on the function and the ``*_ea`` maps only on the (parent,
+        child) pair, so one pass over the corpus' unique nodes and one
+        over its distinct edges produces the identical result the old
+        every-node-of-every-path walk did — in first-encounter order, so
+        the ``*_ea`` insertion order (which feeds the INDIRECT table row
+        order) is unchanged.
         """
-        total = len(self.paths[self.current_analysis_ep]) - 1
-        for index, (_, path_group) in enumerate(self.paths[self.current_analysis_ep].items()):
-            log(f"Populating xref addresses :: [{index}/{total}]")
-            for path in path_group:
-                child_func_ea = None
-                for func_ea in reversed(path):
-                    parent_xref_entry = self.ensure_global_xrefs_entry(func_ea)
-                    for xref_type in "libs", "imports", "strings", "capa", "api_trace":
-                        for xref_cat in self.DIRECT_XREFS, self.INDIRECT_XREFS:
-                            parent_xref_entry[self.COMBINED_XREFS].update(parent_xref_entry[xref_cat][xref_type])
-                            if child_func_ea is None:
-                                continue
-                            child_xref_entry = self.ensure_global_xrefs_entry(child_func_ea)
-                            try:
-                                for xref in child_xref_entry[xref_cat][xref_type]:
-                                    try:
-                                        parent_xref_entry[self.INDIRECT_XREFS][self.entity_suffix_map[xref_type]][xref].add(child_func_ea)
-                                    except KeyError:
-                                        parent_xref_entry[self.INDIRECT_XREFS][self.entity_suffix_map[xref_type]][xref] = {child_func_ea}
-                            except KeyError:
-                                pass
+        nodes, edges, _ = self._path_corpus_topology()
+        log(f"Populating xref addresses across {len(nodes)} functions / {len(edges)} edges...")
+        xref_types = ("libs", "imports", "strings", "capa", "api_trace")
 
-                    child_func_ea = func_ea
+        for func_ea in nodes:
+            entry = self.ensure_global_xrefs_entry(func_ea)
+            for xref_type in xref_types:
+                for xref_cat in (self.DIRECT_XREFS, self.INDIRECT_XREFS):
+                    entry[self.COMBINED_XREFS].update(entry[xref_cat][xref_type])
+
+        for func_ea, child_func_ea in edges:
+            parent_xref_entry = self.ensure_global_xrefs_entry(func_ea)
+            child_xref_entry = self.ensure_global_xrefs_entry(child_func_ea)
+            for xref_type in xref_types:
+                suffix = self.entity_suffix_map[xref_type]
+                for xref_cat in (self.DIRECT_XREFS, self.INDIRECT_XREFS):
+                    try:
+                        child_xrefs = child_xref_entry[xref_cat][xref_type]
+                    except KeyError:
+                        continue
+                    target_map = parent_xref_entry[self.INDIRECT_XREFS][suffix]
+                    for xref in child_xrefs:
+                        try:
+                            target_map[xref].add(child_func_ea)
+                        except KeyError:
+                            target_map[xref] = {child_func_ea}
 
     def generate_reverse_entity_lookup_index(self) -> None:
         """
@@ -1277,6 +1488,47 @@ class XRefer:
                 log(f"Creating clusters from {len(graph_paths)} paths with {len(root_nodes)} root nodes")
                 self.clusters = ClusterManager.decompose_into_clusters(graph_paths, intermediate_paths_map, root_nodes, self.artifact_functions, backend=self._backend)
 
+            # ── Pre-flight token-budget gate ─────────────────────────
+            # Estimate the stage-1 request against the configured model's
+            # context window. If it would overflow, do NOT send anything to
+            # the LLM: record the estimate (the GUI shows the budget bar),
+            # restore prior cluster state, and bail. The dropdown's
+            # min-context filter is only a coarse cut — a big enough binary
+            # can overflow even a wide window, so this is the real per-binary
+            # backstop.
+            self.cluster_token_budget_exceeded = None
+            self.cluster_analysis_failure = None
+            from xrefer.llm.cluster_analyzer import exceeds_context_window
+            try:
+                _estimate = ClusterAnalyzer.estimate_cluster_request(self.clusters, self)
+            except Exception as _budget_err:
+                _estimate = None
+                log(f"[-] Token-budget pre-check skipped ({_budget_err.__class__.__name__})")
+            if _estimate is not None and exceeds_context_window(_estimate):
+                self.cluster_token_budget_exceeded = _estimate
+                if getattr(_estimate, "mode", "full") == "hierarchical":
+                    _guidance = (
+                        "Even a single cluster's bottom-up call overflows this window. Pick a "
+                        "larger-context model (this is the genuine last resort — bottom-up "
+                        "already shrank the request as far as the frozen clusters allow)."
+                    )
+                else:
+                    _guidance = (
+                        "Set analysis_options.cluster_context_mode to 'hierarchical' to summarise "
+                        "bottom-up (much smaller per-call requests), pick a larger-context model, "
+                        "or reduce scope, then re-run."
+                    )
+                log(
+                    "[!] Cluster analysis NOT sent to the LLM: estimated "
+                    f"{_estimate.total_tokens:,} tokens (request {_estimate.request_tokens:,} "
+                    f"+ max response {_estimate.max_response_tokens or 0:,}) exceeds "
+                    f"{_estimate.model_id}'s {_estimate.context_window:,}-token context "
+                    f"window [{getattr(_estimate, 'mode', 'full')} mode]. {_guidance}"
+                )
+                self.clusters = current_clusters or []
+                self.cluster_analysis = current_analysis or {}
+                return
+
             # Setup and run cluster analysis
             try:
                 # Batch size pulled from user settings; falls back to
@@ -1287,8 +1539,18 @@ class XRefer:
                     self.clusters, self, batch_size=batch_size, force_no_cache=force_no_cache,
                 )
                 # self.cluster_analysis = ClusterAnalyzer.populate_dummy_cluster_analysis(self.clusters)
-                if not self.cluster_analysis:  # Empty results usually means network issue
-                    log("No analysis results obtained - likely network connectivity issue")
+                if not self.cluster_analysis:
+                    # The budget gate and the auth pre-flight inside the run
+                    # also return {} after setting their own flags; don't
+                    # overwrite their specific diagnosis with a generic one.
+                    if not self.cluster_token_budget_exceeded and not self.cluster_analysis_failure:
+                        log("No analysis results obtained from the LLM run")
+                        self.cluster_analysis_failure = {
+                            "severity": "total",
+                            "stage": "stage 1",
+                            "error": "EmptyResult",
+                            "message": "The run produced no cluster analyses. Check the Output window for the underlying errors.",
+                        }
                     self.clusters = current_clusters or []
                     self.cluster_analysis = current_analysis or {}
                     return
@@ -1340,12 +1602,24 @@ class XRefer:
                 if not isinstance(e, litellm.exceptions.RateLimitError):
                     traceback.print_exc()
                 log(f"[-] Error analyzing clusters: {str(e)}")
+                self.cluster_analysis_failure = {
+                    "severity": "total",
+                    "stage": "run",
+                    "error": e.__class__.__name__,
+                    "message": str(e)[:300],
+                }
                 # Restore previous state (coerce None to empty defaults on first run)
                 self.clusters = current_clusters or []
                 self.cluster_analysis = current_analysis or {}
 
         except Exception as e:
             log(f"[-] Error in cluster analysis: {str(e)}")
+            self.cluster_analysis_failure = {
+                "severity": "total",
+                "stage": "clustering",
+                "error": e.__class__.__name__,
+                "message": str(e)[:300],
+            }
             # Restore previous state (coerce None to empty defaults on first run)
             self.clusters = current_clusters or []
             self.cluster_analysis = current_analysis or {}
@@ -1372,7 +1646,7 @@ class XRefer:
                     self.artifact_functions.add(func_ea)
                     break
 
-    def cluster_all_non_excluded(self, force_no_cache: bool = False) -> None:
+    def cluster_all_non_excluded(self, force_no_cache: bool = False, save: bool = True) -> None:
         """
         Cluster all non-excluded artifacts and run analysis.
         Now includes cluster merging after initial analysis.
@@ -1382,6 +1656,11 @@ class XRefer:
                 routed through ``LLMProcessor.uncached_lm()`` so DSPy /
                 LiteLLM response cache is bypassed. Used by the
                 "Force Re-analyze" UI flow.
+            save: persist the analysis afterwards. The secondary-analysis
+                pipeline passes False — every one of its callers saves
+                right after it returns, and the double save compressed and
+                wrote the multi-MB DB twice per run. The GUI re-cluster
+                handler keeps the default (it has no outer save).
         """
         try:
             if not self.artifact_functions:
@@ -1419,7 +1698,8 @@ class XRefer:
             # Run cluster analysis
             log("Running cluster analysis...")
             self.analyze_clusters(entities_to_cluster, force_no_cache=force_no_cache)
-            self.save_analysis()
+            if save:
+                self.save_analysis()
             if self.report_data_mode in ("html", "json"):
                 if self.clusters and self.cluster_analysis:
                     if self.report_data_mode == "html":
@@ -1675,7 +1955,9 @@ class XRefer:
             self.string_index_cache = master_struct["string_index_cache"]
             self.caller_xrefs_cache = master_struct["caller_xrefs_cache"]
             self.paths = master_struct["paths"]
-            self.table_data = master_struct["table_data"]
+            # New-format DBs no longer persist table_data (the viewer
+            # builds tables lazily); old DBs still load theirs.
+            self.table_data = master_struct.get("table_data", {})
             self.entities = master_struct["entities"]
             self.reverse_entity_lookup_index = master_struct["reverse_entity_lookup_index"]
             self.entity_xrefs = master_struct["entity_xrefs"]
@@ -1686,6 +1968,14 @@ class XRefer:
             self.string_storage_addrs = master_struct.get("string_storage_addrs", {})
             self.clusters = master_struct.get("clusters", [])
             self.cluster_analysis = master_struct.get("cluster_analysis", {})
+            # Restore selections, dropping indices that no longer exist
+            # (stale after a fresh re-analysis changed the entity list).
+            _n_entities = len(self.entities)
+            self.selected_refs = {
+                func_ea: kept
+                for func_ea, idxs in (master_struct.get("selected_refs", {}) or {}).items()
+                if (kept := {i for i in idxs if 0 <= i < _n_entities})
+            }
 
             self.sync_image_base(False)
             self.process_exclusions()
@@ -1702,7 +1992,11 @@ class XRefer:
             if self.is_node_in_existing_paths(self.current_analysis_ep):
                 return
 
-            self.run_secondary_analysis()
+            try:
+                self.run_secondary_analysis()
+            except AnalysisCancelled:
+                self._abandon_cancelled_run()
+                return
             self.clear_affected_graph_cache()
             self.save_analysis()
         elif not self.check_required_files():
@@ -1712,6 +2006,9 @@ class XRefer:
             try:
                 self.analyze(self.mode)
                 self.save_analysis()
+            except AnalysisCancelled:
+                self._abandon_cancelled_run()
+                return
             except AssertionError as err:
                 hide_wait_box()
                 message = str(err)
@@ -1748,7 +2045,6 @@ class XRefer:
             - string_index_cache: String lookup cache
             - caller_xrefs_cache: Cross-reference cache
             - paths: All analyzed paths
-            - table_data: Function context tables
             - entities: All identified entities
             - reverse_entity_lookup_index: Entity lookup cache
             - entity_xrefs: Entity cross-references
@@ -1757,10 +2053,15 @@ class XRefer:
             - api_trace_data: API trace information
         """
 
-        hide_wait_box()
         analysis_file_path = self.settings["paths"]["analysis"]
+        # Logged BEFORE the write so the wait box (when one is up) shows
+        # "Saving..." during compression instead of vanishing first and
+        # leaving the freeze unexplained.
         log("Saving analysis to: %s" % analysis_file_path)
-        with gzip.open(analysis_file_path, "wb") as outfile:
+        # Level 4 is the measured sweet spot (~3x faster than the default 9
+        # for ~0.6% size); decompression speed is level-independent and old
+        # files load unchanged.
+        with gzip.open(analysis_file_path, "wb", compresslevel=4) as outfile:
             master_struct = {
                 "image_base": self.image_base,
                 "lang": self.lang,
@@ -1768,7 +2069,6 @@ class XRefer:
                 "string_index_cache": self.string_index_cache,
                 "caller_xrefs_cache": self.caller_xrefs_cache,
                 "paths": self.paths,
-                "table_data": self.table_data,
                 "entities": self.entities,
                 "reverse_entity_lookup_index": self.reverse_entity_lookup_index,
                 "entity_xrefs": self.entity_xrefs,
@@ -1779,6 +2079,7 @@ class XRefer:
                 "uncategorized_string_indices": self.uncategorized_string_indices,
                 "clusters": self.clusters,
                 "cluster_analysis": self.cluster_analysis,
+                "selected_refs": self.selected_refs,
             }
             metadata = {
                 "__xrefer_metadata__": True,
@@ -1787,6 +2088,7 @@ class XRefer:
             }
             pickle.dump(metadata, outfile, protocol=pickle.HIGHEST_PROTOCOL)
             pickle.dump(master_struct, outfile, protocol=pickle.HIGHEST_PROTOCOL)
+        hide_wait_box()
 
     def load_categories(self) -> None:
         """
@@ -1857,16 +2159,42 @@ class XRefer:
             if self.llm_lookups:
                 model_id = self.settings["llm_model_id"]
                 api_key = self.settings["api_key"]
+                api_base = self.settings.get("api_base", "") or ""
+                # Local models (Ollama) authenticate via the base URL, not an
+                # API key — don't require a key for them.
+                from xrefer.llm.ollama import is_ollama_model
+                _is_local_model = is_ollama_model(model_id)
                 if not model_id:
-                    log(f"LLM lookups are enabled but missing setting(s): llm_model_id. Disabling LLM for this session. Update {self.settings_manager.settings_file} to enable it.")
+                    log("LLM lookups are enabled but no model is configured. Disabling LLM for this session. Set a model in Edit > XRefer > Configure (headless: edit "
+                        f"{self.settings_manager.settings_file}).")
                     self.llm_lookups = False
                     self.settings["llm_lookups"] = False
                     return
-                if not api_key:
-                    log(f"LLM lookups are enabled but missing setting(s): api_key. Disabling LLM for this session. Update {self.settings_manager.settings_file} to enable it.")
-                    self.llm_lookups = False
-                    self.settings["llm_lookups"] = False
-                    return
+                if not api_key and not _is_local_model:
+                    # No explicit key in settings, but litellm may find one in
+                    # the environment (the provider-standard vars: GEMINI_API_KEY,
+                    # OPENAI_API_KEY, ANTHROPIC_API_KEY, XAI_API_KEY, ...). Honor
+                    # that so `GEMINI_API_KEY=... xrefer ...` works with zero
+                    # config. Only disable the LLM when no key is available from
+                    # the settings OR the environment.
+                    env_has_key = False
+                    try:
+                        import litellm
+                        env_has_key = bool(
+                            litellm.validate_environment(model=model_id).get("keys_in_environment")
+                        )
+                    except Exception:
+                        env_has_key = False
+                    if not env_has_key:
+                        log(f"LLM lookups are enabled but no API key was found (in settings or the "
+                            f"environment) for '{model_id}'. Disabling LLM for this session. Set the "
+                            f"key in Edit > XRefer > Configure (headless: api_key in "
+                            f"{self.settings_manager.settings_file}, --api-key, or the provider's "
+                            f"API key environment variable).")
+                        self.llm_lookups = False
+                        self.settings["llm_lookups"] = False
+                        return
+                    log(f"Using API key from the environment for {model_id}")
                 log(f"Setting LLM model to: {model_id}")
                 # Temperature and reasoning-effort are deliberately not
                 # exposed as user settings — we let the provider's API
@@ -1874,18 +2202,29 @@ class XRefer:
                 # for hybrid reasoning models like Gemini 3. See
                 # ``_build_lm_kwargs`` in plugins/xrefer/llm/processor.py
                 # for the OpenAI-reasoning-model special case.
-                config_1 = ModelConfig(
-                    model_id=model_id,
-                    api_key=api_key,
-                    ignore_token_limit=True,
-                )
-                config_2 = ModelConfig(
-                    model_id=model_id,
-                    api_key=api_key,
-                )
-                assert config_2 is not None
-                ClusterAnalyzer.set_model_config(config_1)
-                Categorizer.set_model_config(config_2)
+                #
+                # Dual-model routing: the HEAVY model (this primary config)
+                # runs cluster analysis; the LIGHT model runs categorization.
+                # resolve_model_configs decides whether categorization reuses
+                # the primary model (default / "one model for everything") or a
+                # separately-configured lighter model (see the Settings dialog).
+                # Each analyzer holds its own LLMProcessor, and the processor
+                # re-asserts its own LM per call (dspy.context), so the two
+                # models never clobber each other through DSPy's global config.
+                from xrefer.llm.base import resolve_model_configs
+                config_heavy, config_light = resolve_model_configs(self.settings)
+                if config_light.model_id != config_heavy.model_id:
+                    log(f"Using a separate categorization model: {config_light.model_id}")
+                    # A hosted (non-Ollama) light model with no usable key would
+                    # fail at categorization time. Warn but don't disable LLM —
+                    # cluster analysis (the primary model) is independent and
+                    # categorization failures are already tolerated gracefully.
+                    if not config_light.api_key and not is_ollama_model(config_light.model_id):
+                        log(f"Warning: categorization model '{config_light.model_id}' has no API key "
+                            f"— categorization may fail. Give it a key, or enable 'Use the main "
+                            f"model's API key' in Settings (only valid when both are the same provider).")
+                ClusterAnalyzer.set_model_config(config_heavy)
+                Categorizer.set_model_config(config_light)
 
         except Exception as err:
             log(f"[-] Error loading config: {str(err)}")
@@ -1947,9 +2286,9 @@ class XRefer:
         self.sync_image_base_cs(delta)
         self.lang.entry_point += delta
 
-        log("Image-base synced, re-populating context tables for all functions...")
+        # Addresses shifted: wipe cached context tables; the viewer
+        # rebuilds them lazily on first visit.
         self.table_data = {}
-        self._populate_function_context_tables()
         hide_wait_box()
         self.save_analysis()
 
@@ -1990,6 +2329,9 @@ class XRefer:
             self.caller_xrefs_cache[func_ea] = self.sync_image_base_dictkeys(self.caller_xrefs_cache[func_ea], delta)
 
         self.caller_xrefs_cache = self.sync_image_base_dictkeys(self.caller_xrefs_cache, delta)
+        # Selections are keyed by func_ea (values are entity indices —
+        # image-base independent, so only the keys shift).
+        self.selected_refs = self.sync_image_base_dictkeys(self.selected_refs, delta)
 
     def sync_image_base_p(self, delta: int) -> None:
         """
@@ -2387,11 +2729,11 @@ class XRefer:
 
         * the **language module** — language-typed strings land in
           ``strings[1]``; plain ones in ``strings[0]``;
-        * a **grep.app / GitHub lookup** — ``enrich_string_data_core``
-          writes the matching repo name into ``entity[0]``, or the
-          literal ``'UNCATEGORIZED'`` when the string was not found in
-          any repo (also the case when the lookup is disabled or, as is
-          currently the case, unavailable because grep.app changed).
+        * a **GitHub code lookup** — ``enrich_string_data_core`` (now via
+          the Grep MCP server, the successor to the old grep.app HTTP API)
+          writes the matching repo name into ``entity[0]``, or the literal
+          ``'UNCATEGORIZED'`` when the string was not found in any repo
+          (also the case when the lookup is disabled).
 
         A string is "uncategorized" only when BOTH agree it is: it is a
         plain (``strings[0]``) string AND carries the ``'UNCATEGORIZED'``
@@ -2577,13 +2919,6 @@ class XRefer:
 
         log(f"Cleared cache for {len(affected_funcs)} function tables")
 
-    def _populate_function_context_tables(self) -> None:
-        """
-        Populate the function context tables with data.
-        """
-        for func_ea in self.global_xrefs:
-            self.table_data[func_ea] = self.create_sorted_table(func_ea)
-
     def create_sorted_table(self, func_ea: int) -> Dict[str, Dict[str, Union[List[str], OrderedDict]]]:
         """
         Create a sorted table of cross-references for a function.
@@ -2762,8 +3097,10 @@ class XRefer:
         """
         Perform the full analysis, loading configuration and categories, sifting references, and generating context tables.
         """
-        if self.table_data:
-            return self.table_data
+        if self.global_xrefs:
+            # Analysis already ran in this session. (The old sentinel keyed
+            # on the eagerly-built table_data, which is now lazy-only.)
+            return
 
         log("Starting analysis...")
         self.load_categories()
@@ -2837,16 +3174,25 @@ class XRefer:
             raise AssertionError(f"No call paths were generated for entry point 0x{self.current_analysis_ep:x}")
         if not any(ep_paths.values()):
             raise AssertionError(f"Call path generation produced only empty targets for entry point 0x{self.current_analysis_ep:x}")
-        if self.mode=='full':
-            iters = 1
-            while self.propagate_xref_nodes(iters):
-                iters += 1
-            self.fix_thunk_xrefs()
-        self.populate_xref_addrs()
-        self.cluster_all_non_excluded()
         if self.mode == 'full':
-            log("Populating function context tables...")
-            self._populate_function_context_tables()
+            self.propagate_xref_nodes()
+        # fix_thunk_xrefs runs in BOTH modes. It forwards a thunk's resolved
+        # import onto the calling function's DIRECT xrefs (global_xrefs[...]
+        # [DIRECT_XREFS]['imports'] and entity_xrefs), which both the cluster
+        # analysis and the generated report read directly. Skipping it would
+        # change which APIs a caller node lists and which functions become
+        # clustering candidates, so the report would differ between modes.
+        # It only reads DIRECT child imports + the (already built) call paths,
+        # so it does not depend on the full-mode propagation loop above.
+        self.fix_thunk_xrefs()
+        if self.mode == 'full':
+            # populate_xref_addrs only builds the INDIRECT/COMBINED xref sets.
+            # Those feed the interactive views (indirect-call display, boundary
+            # scan, context tables) but are never read by the report or by the
+            # clustering, so it is skipped in light mode — it is a heavy
+            # per-call-path walk.
+            self.populate_xref_addrs()
+        self.cluster_all_non_excluded(save=False)
 
     def run_standalone_secondary_analysis(self) -> None:
         """
@@ -2863,10 +3209,27 @@ class XRefer:
         show_wait_box("HIDECANCEL\nStarting Analysis...")
         start_time = time()
         self.process_exclusions()
-        self.run_secondary_analysis()
+        try:
+            self.run_secondary_analysis()
+        except AnalysisCancelled:
+            self._abandon_cancelled_run()
+            return
         self.clear_affected_graph_cache()
         self.save_analysis()
         log_elapsed_time("Analysis Time", start_time)
+
+    def _abandon_cancelled_run(self) -> None:
+        """Leave a consistent not-analyzed state after a user cancel.
+
+        Partial results are never persisted, and the in-progress entry
+        point is removed from ``paths`` — its (empty or partial) entry
+        would otherwise make every "already analyzed?" check answer yes
+        and silently serve an incomplete analysis.
+        """
+        hide_wait_box()
+        if self.current_analysis_ep is not None:
+            self.paths.pop(self.current_analysis_ep, None)
+        log("[!] Analysis cancelled by user — nothing was saved. Re-run the analysis when ready.")
 
     def check_required_files(self) -> bool:
         """
@@ -2936,35 +3299,44 @@ class XRefer:
 
         log(f"Cleared {len(affected_entities)} affected graph cache entries")
 
-    def insert_path(self, existing_paths: List[List[int]], new_path: List[int]) -> List[List[int]]:
-        """
-        Insert a new path into the existing paths if not already present.
-
-        Args:
-            existing_paths (List[List[int]]): The list of existing paths.
-            new_path (List[int]): The new path to insert.
-
-        Returns:
-            List[List[int]]: The updated list of paths.
-        """
-        if new_path not in existing_paths:
-            existing_paths.append(new_path)
-        return existing_paths
-
-    def generate_simple_call_paths(self, initial: int, final: int, max_limit: int = 10000) -> List[List[int]]:
+    def generate_simple_call_paths(self, initial: int, final: int, preds: Dict[int, Set[int]], max_limit: int = 10000, allowed: Optional[Set[int]] = None) -> List[List[int]]:
         """
         Generate call paths between two functions.
+
+        Paths are simple (node-distinct, via the ``ref in current_path``
+        cycle check), so path length is bounded by the graph size and the
+        enumeration always terminates without a depth cap.
 
         Args:
             initial (int): The starting function address.
             final (int): The ending function address.
-            max_limit (int): The maximum number of paths to generate. Defaults to 10000.
+            preds (Dict[int, Set[int]]): Predecessor map: function start ->
+                set of function starts that reference it. Built once per run
+                by inverting caller_xrefs_cache (see
+                generate_all_simple_call_paths_for_ep).
+            max_limit (int): Cap on both the number of completed paths and
+                the working-buffer size. Defaults to 10000.
+            allowed (Optional[Set[int]]): When given, expansion is restricted
+                to these nodes. The caller passes the intersection of
+                backward-reachable-from-``final`` and forward-reachable-from-
+                ``initial``; every node on any initial->final path lies in
+                that set, so the pruning never drops a valid simple path but
+                stops the BFS from wandering into branches that cannot
+                complete (which previously burned the whole buffer).
 
         Returns:
             List[List[int]]: A list of call paths between the initial and final functions.
         """
-        all_paths = []
-        path_buffer = [[final]]
+        all_paths: List[List[int]] = []
+        seen_paths: Set[Tuple[int, ...]] = set()
+        path_buffer = deque([[final]])
+        steps = 0
+
+        def record_path(path: List[int]) -> None:
+            key = tuple(path)
+            if key not in seen_paths:
+                seen_paths.add(key)
+                all_paths.append(path)
 
         # NOTE: progress is logged by the caller
         # (generate_all_simple_call_paths_for_ep) with a clean function name and
@@ -2973,28 +3345,25 @@ class XRefer:
         # per leaf instead of flickering through Function() reprs + per-pair
         # "Found N / No path" noise (the latter is redundant with the footer).
         while path_buffer and len(all_paths) < max_limit and len(path_buffer) < max_limit:
-            refs = set()
-            target = path_buffer[0][-1]
+            # A single pathological leaf can grind for a long time; honor
+            # Cancel from inside the BFS too, not just between leaves.
+            steps += 1
+            if steps & 0x3FF == 0 and check_cancelled():
+                raise AnalysisCancelled("path building cancelled")
 
-            if len(path_buffer[0]) < max_limit:
-                for cross_ref in self._backend.get_xrefs_to(target):
-                    if fn := self._backend.get_function_at(cross_ref.source):
-                        refs.add(fn.start)
-            if refs:
-                current_path = path_buffer.pop(0)
-                for ref in refs:
-                    if ref in current_path:
-                        continue
-                    if ref == initial:
-                        all_paths = self.insert_path(all_paths, (current_path + [ref])[::-1])
-                    else:
-                        path_buffer.append(current_path + [ref])
-
-            elif initial not in path_buffer[0]:
-                path_buffer.pop(0)
-
-            elif initial in path_buffer[0]:
-                all_paths = self.insert_path(all_paths, path_buffer.pop(0)[::-1])
+            current_path = path_buffer.popleft()
+            target = current_path[-1]
+            # The shared set from preds is only iterated, never mutated.
+            for ref in preds.get(target, ()):
+                if ref in current_path:
+                    continue
+                if ref == initial:
+                    # Completion is checked before the pruning filter so the
+                    # allowed set can only ever skip dead expansion, never a
+                    # finished path.
+                    record_path((current_path + [ref])[::-1])
+                elif allowed is None or ref in allowed:
+                    path_buffer.append(current_path + [ref])
 
         return all_paths
 
@@ -3010,16 +3379,60 @@ class XRefer:
         total = len(self.leaf_funcs)
         log(f"Building call paths from {ep_name} to {total} leaf functions...")
 
-        for idx, func_ea in enumerate(self.leaf_funcs, 1):
-            if self.current_analysis_ep != func_ea:
-                # Check if the paths from current_analysis_ep to func_ea are already stored
-                if func_ea not in self.paths[self.current_analysis_ep]:
-                    leaf_fn = self._backend.get_function_at(Address(func_ea))
-                    leaf_name = leaf_fn.name if leaf_fn else f"{func_ea:#x}"
-                    log(f"Building call paths [{idx}/{total}] :: {ep_name} -> {leaf_name}")
-                    _paths = self.generate_simple_call_paths(self.current_analysis_ep, func_ea)
-                    if len(_paths):
-                        self.paths[self.current_analysis_ep][func_ea] = _paths
+        # Invert caller_xrefs_cache (caller -> referenced targets) into a
+        # predecessor map (target -> callers) once per run. The BFS in
+        # generate_simple_call_paths only ever asks "which functions reference
+        # this one", and answering from the already-built cache avoids one
+        # get_xrefs_to + get_function_at backend round-trip per path expansion
+        # (millions on large binaries). Transient by design: rebuilt per run,
+        # never persisted, so image rebasing only has to keep
+        # caller_xrefs_cache itself in sync.
+        preds: Dict[int, Set[int]] = {}
+        for caller, targets in self.caller_xrefs_cache.items():
+            for tgt in targets:
+                preds.setdefault(tgt, set()).add(caller)
+
+        # Forward reachability from the EP over the same cache, once per run.
+        # A leaf outside this set provably has no path, so its enumeration is
+        # skipped outright — dead leaves (e.g. unexported-entry DLL exports)
+        # used to burn the entire path buffer producing nothing.
+        forward: Set[int] = {self.current_analysis_ep}
+        frontier = deque([self.current_analysis_ep])
+        while frontier:
+            node = frontier.popleft()
+            for nxt in self.caller_xrefs_cache.get(node, ()):
+                if nxt not in forward:
+                    forward.add(nxt)
+                    frontier.append(nxt)
+
+        with cancellable_phase():
+            for idx, func_ea in enumerate(self.leaf_funcs, 1):
+                if check_cancelled():
+                    raise AnalysisCancelled("path building cancelled")
+                if self.current_analysis_ep != func_ea:
+                    # Check if the paths from current_analysis_ep to func_ea are already stored
+                    if func_ea not in self.paths[self.current_analysis_ep]:
+                        if func_ea not in forward:
+                            continue
+                        leaf_fn = self._backend.get_function_at(Address(func_ea))
+                        leaf_name = leaf_fn.name if leaf_fn else f"{func_ea:#x}"
+                        log_progress(f"Building call paths [{idx}/{total}] :: {ep_name} -> {leaf_name}", final=idx == total)
+                        # Backward reachability from this leaf; expansion is
+                        # restricted to nodes that both reach the leaf and
+                        # are reachable from the EP — every such node lies on
+                        # some EP->leaf path, so pruning is lossless and the
+                        # BFS never wanders into branches that cannot finish.
+                        backward: Set[int] = {func_ea}
+                        bfrontier = deque([func_ea])
+                        while bfrontier:
+                            node = bfrontier.popleft()
+                            for caller in preds.get(node, ()):
+                                if caller not in backward:
+                                    backward.add(caller)
+                                    bfrontier.append(caller)
+                        _paths = self.generate_simple_call_paths(self.current_analysis_ep, func_ea, preds, allowed=backward & forward)
+                        if len(_paths):
+                            self.paths[self.current_analysis_ep][func_ea] = _paths
 
         total_paths_generated = len(self.paths[self.current_analysis_ep])
         log(f"Generated {total_paths_generated} call path groups from {ep_name}")
@@ -3090,200 +3503,263 @@ class XRefer:
         return True
 
     def rename_cluster_functions(self) -> None:
-        """
-        Rename functions based on their roles in clusters, following a strict priority:
+        """Give auto-named cluster functions a behavior-conveying name prefix,
+        from the shared origin verdict (``classify_functions``).
 
-        Priority (to determine final category):
-        1. Multi-Cluster (xutil_): Functions that belong to multiple clusters.
-        2. Cluster-Specific (cluster prefix): Functions that belong to exactly one cluster.
-        3. Intermediate (xint_): True intermediate nodes that:
-        - Appear in intermediate paths
-        - Are not in any cluster nodes
-        - Are not in artifact_functions
-        - Are not cluster references
-        4. Unclustered (xunc_): Functions not part of any cluster and not intermediate.
-        """
-        KNOWN_PREFIXES = {"xunc_", "xint_", "xutil_"}
+        Only functions that still carry a disassembler-generated name
+        (``sub_4012a0``, ``FUN_…``) are touched — FLIRT library names, imports,
+        and user-assigned names are never clobbered. Library (``FUNC_LIB``) and
+        unclustered functions are left alone. New names are address-based, so
+        they're unique and re-applied cleanly on re-runs:
 
+          * cluster_member -> ``<cluster function_prefix>_<addr>``  (fileenc_4012a0)
+          * shared         -> ``xutil_<addr>``
+
+        Intermediates inherit their bridged cluster's prefix (Option A), exactly
+        like that cluster's nodes — so names and folders stay in lockstep.
+        """
         if not self.clusters or not self.cluster_analysis:
             log("No cluster data available for function renaming")
             return
 
-        # Helper to parse cluster IDs from various formats
-        def parse_cluster_id(cluster_id_str: str) -> Optional[int]:
-            # Handle various formats: "cluster_XXXX", "cluster.id.XXXX", or pure integer strings.
-            if cluster_id_str.startswith("cluster_"):
-                try:
-                    return int(cluster_id_str.split("_")[1])
-                except (ValueError, IndexError):
-                    return None
-            elif cluster_id_str.startswith("cluster.id."):
-                parts = cluster_id_str.split(".")
-                if len(parts) >= 3:
-                    try:
-                        return int(parts[-1])
-                    except ValueError:
-                        return None
-                return None
-            else:
-                try:
-                    return int(cluster_id_str)
-                except ValueError:
-                    return None
+        SHARED_PREFIX = "xutil"
 
-        # Step 1: Gather all necessary data
-        func_clusters = defaultdict(set)  # func_ea -> set of cluster IDs
+        def _clean_prefix(pre: Optional[str]) -> str:
+            # Prefixes feed identifiers, so strip anything but [A-Za-z0-9_];
+            # an empty result means "no usable prefix".
+            return re.sub(r"[^0-9A-Za-z_]+", "", pre or "")
 
-        def map_function_clusters(cluster):
-            for node in cluster.nodes:
-                func_clusters[node].add(cluster.id)
-            for subcluster in cluster.subclusters:
-                map_function_clusters(subcluster)
+        # cluster id -> cleaned LLM function_prefix (find_cluster_analysis
+        # already normalizes the various cluster-id key formats).
+        def _prefix_for(cid: int) -> Optional[str]:
+            analysis = find_cluster_analysis(self.cluster_analysis, cid)
+            pre = analysis.get("function_prefix") if isinstance(analysis, dict) else None
+            return _clean_prefix(pre) or None
 
-        for cluster in self.clusters:
-            map_function_clusters(cluster)
+        # Every prefix xrefer might emit, so a re-run can re-prefix names it
+        # produced earlier (no longer "default" names, but still ours —
+        # "<prefix>_<hex>").
+        xrefer_prefixes = {SHARED_PREFIX}
+        for analysis in self.cluster_analysis.get("clusters", {}).values():
+            if isinstance(analysis, dict):
+                pre = _clean_prefix(analysis.get("function_prefix"))
+                if pre:
+                    xrefer_prefixes.add(pre)
 
-        all_functions = set(fn.start for fn in self._backend.functions())
+        def _is_xrefer_name(name: str) -> bool:
+            pre, sep, suf = name.rpartition("_")
+            return bool(sep) and pre in xrefer_prefixes and suf != "" and all(c in "0123456789abcdefABCDEF" for c in suf)
 
-        # Recursively gather all cluster nodes, root nodes, and cluster_refs from all levels
-        def gather_all_cluster_nodes(clusters):
-            all_nodes = set()
+        placements = self.classify_functions()
+        renamed = skipped = 0
+        for ea, p in placements.items():
+            if p.category == "func_lib":
+                continue  # never rename library / FLIRT code
 
-            def recurse(c):
-                all_nodes.update(c.nodes)
-                all_nodes.add(c.root_node)
-                all_nodes.update(c.cluster_refs.keys())
-                for sc in c.subclusters:
-                    recurse(sc)
+            if p.category == "cluster_member" and p.cluster_id is not None:
+                prefix = _prefix_for(p.cluster_id)
+                if not prefix:
+                    continue  # cluster has no usable LLM prefix -> nothing to apply
+            else:  # shared
+                prefix = SHARED_PREFIX
 
-            for top_cluster in clusters:
-                recurse(top_cluster)
-            return all_nodes
+            fn = self._backend.get_function_at(Address(ea))
+            if fn is None:
+                continue
+            old_name = fn.name or ""
 
-        # Combine all cluster nodes (including nested subclusters) for quick membership checks
-        all_cluster_nodes = gather_all_cluster_nodes(self.clusters)
+            # Only auto-named functions (never FLIRT/import/user names), OR a
+            # name xrefer itself assigned earlier (so re-runs re-apply).
+            try:
+                eligible = fn.has_default_name or _is_xrefer_name(old_name)
+            except Exception:
+                eligible = False
+            if not eligible:
+                continue
 
-        # Identify true intermediate functions
-        # A node is intermediate if it appears in intermediate_paths but is not:
-        # - In cluster nodes or cluster refs
-        # - In artifact_functions
-        potential_intermediates = set()
-        for cluster in self.clusters:
-            for _, paths in cluster.intermediate_paths.items():
-                for path in paths:
-                    for node in path:
-                        if node not in cluster.nodes and node not in cluster.cluster_refs and node not in self.artifact_functions:
-                            potential_intermediates.add(node)
-
-        intermediate_funcs = {f for f in potential_intermediates if f not in all_cluster_nodes and f not in self.artifact_functions}
-
-        # Step 2: Classify each function
-        func_classification = {}
-
-        # Identify multi-cluster functions
-        multi_cluster_funcs = {func_ea for func_ea, clusters in func_clusters.items() if len(clusters) > 1}
-
-        # Identify single-cluster functions
-        single_cluster_funcs = {func_ea for func_ea, clusters in func_clusters.items() if len(clusters) == 1}
-
-        # Functions not in any cluster
-        no_cluster_funcs = all_functions - single_cluster_funcs - multi_cluster_funcs
-
-        # Classify according to priority
-        # - multi_cluster_funcs: 'xutil_'
-        # - single_cluster_funcs: 'cluster_specific'
-        # - no_cluster_funcs + intermediate: 'xint_'
-        # - no_cluster_funcs + not intermediate: 'xunc_'
-        for f_ea in multi_cluster_funcs:
-            func_classification[f_ea] = "xutil_"
-        for f_ea in single_cluster_funcs:
-            func_classification[f_ea] = "cluster_specific"
-        for f_ea in no_cluster_funcs:
-            if f_ea in intermediate_funcs:
-                func_classification[f_ea] = "xint_"
-            else:
-                func_classification[f_ea] = "xunc_"
-
-        # Step 3: Determine cluster-specific prefixes
-        cluster_prefix_map = {}
-        for cluster_id_str, analysis in self.cluster_analysis.get("clusters", {}).items():
-            prefix = analysis.get("function_prefix")
-            if prefix:
-                cid = parse_cluster_id(cluster_id_str)
-                if cid is None:
-                    log(f"Invalid cluster id format: {cluster_id_str}")
-                else:
-                    cluster_prefix_map[cid] = prefix
-
-        # Build reverse mapping: function -> cluster_id (for single cluster funcs)
-        func_single_cluster_id = {}
-        for f_ea in single_cluster_funcs:
-            # Exactly one cluster_id in func_clusters[f_ea]
-            cid = next(iter(func_clusters[f_ea]))
-            func_single_cluster_id[f_ea] = cid
-
-        # Step 4: Rename functions
-        def has_known_prefix(old_name):
-            if not old_name:
-                return True  # Not a valid function name, skip
-            return any(old_name.startswith(p) for p in KNOWN_PREFIXES)
-
-        def rename_function(func_ea, new_prefix, allow_cluster_prefix_check=False):
-            # Check if this is a simple API thunk
-            fn = self._backend.get_function_at(Address(func_ea))
-            if self.is_simple_api_thunk(func_ea):
-                return
-
-            old_name = fn.name
-            if not old_name:
-                # Not a valid function name or no name known, skip
-                return
-
-            # If this function already has a known prefix, skip
-            if has_known_prefix(old_name):
-                return
-
-            # If applying a cluster-specific prefix, also check if old_name already starts with that prefix
-            if allow_cluster_prefix_check and new_prefix and old_name.startswith(new_prefix + "_"):
-                # Already has this cluster prefix
-                return
-
-            # If cluster prefix provided, ensure it ends with '_'
-            if new_prefix and not new_prefix.endswith("_"):
-                new_prefix += "_"
-
-            new_name = f"{new_prefix}{old_name}"
+            new_name = f"{prefix}_{ea:x}"
+            if old_name == new_name:
+                continue
             try:
                 fn.name = new_name
-                log(f"Renamed {old_name} -> {new_name}")
-            except ValueError as e:
+                renamed += 1
+            except Exception as e:
                 log(f"Failed to rename {old_name} -> {new_name}: {e}")
+                skipped += 1
 
-        # Handle multi-cluster (xutil_)
-        for f_ea, category in func_classification.items():
-            if category == "xutil_":
-                rename_function(f_ea, "xutil", allow_cluster_prefix_check=False)
+        log(f"Function renaming complete: renamed {renamed}, skipped {skipped}")
 
-        # Handle cluster-specific functions
-        for f_ea, category in func_classification.items():
-            if category == "cluster_specific":
-                cid = func_single_cluster_id[f_ea]
-                prefix = cluster_prefix_map.get(cid, None)
-                if prefix:
-                    # For cluster-specific prefixes, check again if prefix already applied
-                    rename_function(f_ea, prefix, allow_cluster_prefix_check=True)
+    def classify_functions(self) -> Dict[int, "FunctionPlacement"]:
+        """Classify every function we can confidently place by origin — the
+        single source of truth shared by ``compute_function_folders`` (folders)
+        and ``rename_cluster_functions`` (name prefixes).
 
-        # Handle intermediate (xint_)
-        for f_ea, category in func_classification.items():
-            if category == "xint_":
-                rename_function(f_ea, "xint", allow_cluster_prefix_check=False)
+        Categories (first match wins):
+          1. ``FUNC_LIB`` / thunk                 -> ``func_lib`` (library)
+          2. node of exactly one cluster          -> ``cluster_member`` (it)
+          3. intermediate bridging exactly one    -> ``cluster_member`` (it)
+          4. node OR intermediate spanning >1     -> ``shared``
+          5. unclustered, not FUNC_LIB            -> omitted (left at root)
 
-        # Handle unclustered (xunc_)
-        for f_ea, category in func_classification.items():
-            if category == "xunc_":
-                rename_function(f_ea, "xunc", allow_cluster_prefix_check=False)
+        Intermediates (pure connectors on a cluster's ``intermediate_paths``
+        that are not a node anywhere and bear no artifacts) fold into the
+        cluster they connect — same treatment as that cluster's nodes
+        (Option A). Simple API thunks are skipped. Fail-open: any user
+        membership wins over library, since hiding user code is the costlier
+        error.
 
-        log("Function renaming complete")
+        Returns ``{func_ea: FunctionPlacement}``; functions with no confident
+        verdict are absent (leave them alone). Backend-agnostic.
+        """
+        placements: Dict[int, FunctionPlacement] = {}
+        if not self._backend:
+            return placements
+
+        # func_ea -> set of cluster ids whose .nodes contain it (every level)
+        func_clusters: Dict[int, Set[int]] = defaultdict(set)
+        id_to_cluster: Dict[int, "FunctionalCluster"] = {}
+
+        def _walk(cluster: "FunctionalCluster") -> None:
+            id_to_cluster[cluster.id] = cluster
+            for node in cluster.nodes:
+                func_clusters[node].add(cluster.id)
+            for sub in cluster.subclusters:
+                _walk(sub)
+
+        for c in self.clusters or []:
+            _walk(c)
+
+        # "Structural" set = nodes + roots + replaced cluster-ref keys. A true
+        # intermediate is a connector that is none of these and bears no
+        # artifacts.
+        structural: Set[int] = set()
+        for c in id_to_cluster.values():
+            structural |= c.nodes
+            structural.add(c.root_node)
+            structural |= set(c.cluster_refs.keys())
+
+        # func_ea -> set of cluster ids whose intermediate_paths contain it
+        inter_clusters: Dict[int, Set[int]] = defaultdict(set)
+        for c in id_to_cluster.values():
+            for _key, paths in c.intermediate_paths.items():
+                for path in paths:
+                    for node in path:
+                        if node not in structural and node not in self.artifact_functions:
+                            inter_clusters[node].add(c.id)
+
+        is_lib = {cid: bool(getattr(cl, "is_library", False)) for cid, cl in id_to_cluster.items()}
+
+        def _origin(cids: Set[int]) -> str:
+            # Fail-open: library only if EVERY containing cluster is library.
+            return "library" if cids and all(is_lib.get(c) for c in cids) else "user"
+
+        for fn in self._backend.functions():
+            ea = fn.start
+
+            try:
+                if self.is_simple_api_thunk(ea):
+                    continue
+            except Exception:
+                pass
+
+            # Rule 1: FUNC_LIB / thunk -> library, overriding cluster membership.
+            try:
+                if fn.type == FunctionType.LIBRARY or fn.is_thunk:
+                    placements[ea] = FunctionPlacement("func_lib", "library", None)
+                    continue
+            except Exception:
+                pass
+
+            node_cids = func_clusters.get(ea)
+            if node_cids:
+                if len(node_cids) == 1:
+                    cid = next(iter(node_cids))
+                    placements[ea] = FunctionPlacement("cluster_member", _origin({cid}), cid)
+                else:
+                    placements[ea] = FunctionPlacement("shared", _origin(node_cids), None)
+                continue
+
+            bridged = inter_clusters.get(ea)
+            if bridged:
+                if len(bridged) == 1:
+                    cid = next(iter(bridged))
+                    placements[ea] = FunctionPlacement("cluster_member", _origin({cid}), cid)
+                else:
+                    placements[ea] = FunctionPlacement("shared", _origin(bridged), None)
+                continue
+
+            # Unclustered, not FUNC_LIB -> no verdict; leave at root.
+
+        return placements
+
+    def _cluster_folder_path(self, cid: int, id_to_cluster: Dict[int, "FunctionalCluster"],
+                             label_cache: Dict[int, str], path_cache: Dict[int, List[str]]) -> List[str]:
+        """[root-cluster component, ..., this-cluster component] for a cluster,
+        each component a sanitized ``NNNN <label>``. Walks parent links."""
+        if cid in path_cache:
+            return path_cache[cid]
+
+        def _component(c_id: int) -> str:
+            if c_id in label_cache:
+                return label_cache[c_id]
+            analysis = find_cluster_analysis(self.cluster_analysis, c_id)
+            label = analysis.get("label") if isinstance(analysis, dict) else None
+            comp = sanitize_dirtree_name(f"{c_id:04d} {label}" if label else f"cluster {c_id:04d}")
+            label_cache[c_id] = comp
+            return comp
+
+        chain: List[str] = []
+        seen: Set[int] = set()
+        cur = id_to_cluster.get(cid)
+        while cur is not None and cur.id not in seen:
+            seen.add(cur.id)
+            chain.append(_component(cur.id))
+            pid = getattr(cur, "parent_cluster_id", None)
+            cur = id_to_cluster.get(pid) if pid is not None else None
+        chain.reverse()
+        path_cache[cid] = chain
+        return chain
+
+    def compute_function_folders(self) -> Dict[int, List[str]]:
+        """Origin-based folder path for each classified function, for organizing
+        the IDA Functions window via ``ida_dirtree``. Thin mapping over
+        ``classify_functions`` (the shared verdict):
+
+          * ``func_lib``                 -> ``Library`` (flat)
+          * ``cluster_member`` (library) -> ``Library`` / <cluster path>
+          * ``cluster_member`` (user)    -> ``User`` / <cluster path>
+          * ``shared``                   -> bare ``Library`` / ``User`` root
+
+        Intermediates fold into their bridged cluster (Option A), same as that
+        cluster's nodes. Functions with no verdict are absent (left at root).
+
+        Returns ``{func_ea: [path components below the function-tree root]}``.
+        """
+        placements = self.classify_functions()
+        if not placements:
+            return {}
+
+        id_to_cluster: Dict[int, "FunctionalCluster"] = {}
+
+        def _index(cluster: "FunctionalCluster") -> None:
+            id_to_cluster[cluster.id] = cluster
+            for sub in cluster.subclusters:
+                _index(sub)
+
+        for c in self.clusters or []:
+            _index(c)
+
+        label_cache: Dict[int, str] = {}
+        path_cache: Dict[int, List[str]] = {}
+
+        folders: Dict[int, List[str]] = {}
+        for ea, p in placements.items():
+            root = "Library" if p.origin == "library" else "User"
+            if p.category == "cluster_member" and p.cluster_id is not None:
+                folders[ea] = [root] + self._cluster_folder_path(p.cluster_id, id_to_cluster, label_cache, path_cache)
+            else:  # func_lib or shared -> bare origin root
+                folders[ea] = [root]
+        return folders
 
     def get_artifacts_for_cluster(self, cluster: "FunctionalCluster") -> Dict[str, List[str]]:
         """Aggregates all unique artifacts for a given cluster."""
@@ -3439,7 +3915,7 @@ class XRefer:
         """Write report data JSON only (no HTML)."""
         report_data = self.generate_report_data()
         report_json_suffix = "_report_data.json"
-        json_path = Path(f"{self._backend.path}{report_json_suffix}")
+        json_path = Path(getattr(self, "report_path", None) or f"{self._backend.path}{report_json_suffix}")
         json_payload = json.dumps(report_data, indent=2, default=str)
         json_path.write_text(json_payload, encoding="utf-8")
         log(f"Report data saved to: {json_path}")
@@ -3457,7 +3933,7 @@ class XRefer:
         json_data = json.dumps(report_data, indent=2, default=str)
         report_html_suffix = "_report.html"
 
-        save_path = f"{self._backend.path}{report_html_suffix}"
+        save_path = getattr(self, "report_path", None) or f"{self._backend.path}{report_html_suffix}"
 
         data_url_value = json.dumps("")
         embedded_payload = json_data.replace("</", "<\\/")

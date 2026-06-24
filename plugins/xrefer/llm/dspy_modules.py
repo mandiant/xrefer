@@ -520,6 +520,24 @@ class CategorizerModule(dspy.Module):
         return categorization_
 
 
+def _coerce_to_str(v):
+    """Coerce a mistyped field value into a readable string. Small local models
+    sometimes return what should be prose as a dict or list — e.g. Gemma e2b
+    returns ``relationships`` as a ``{cluster: cluster}`` map. Accept and flatten
+    it rather than failing validation and aborting the whole run. A real string
+    passes through unchanged, so this is a no-op for well-behaved models.
+    """
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, dict):
+        return "; ".join(f"{k} -> {val}" for k, val in v.items()) if v else ""
+    if isinstance(v, (list, tuple)):
+        return "; ".join(_coerce_to_str(x) for x in v)
+    return str(v)
+
+
 class MitreAttackTechnique(BaseModel):
     """Single MITRE ATT&CK technique mapping for a cluster.
 
@@ -527,6 +545,11 @@ class MitreAttackTechnique(BaseModel):
     CAPA capabilities, call patterns) — the rationale field exists to
     force that grounding and let analysts audit the mapping.
     """
+
+    @field_validator("id", "tactic", "name", "rationale", mode="before")
+    @classmethod
+    def _coerce_mitre_strings(cls, v):
+        return _coerce_to_str(v)
 
     id: str = Field(
         ...,
@@ -537,7 +560,7 @@ class MitreAttackTechnique(BaseModel):
         ),
     )
     tactic: str = Field(
-        ...,
+        default="",
         description=(
             "MITRE ATT&CK tactic name the technique falls under, written exactly as MITRE names it "
             "(e.g. 'Execution', 'Defense Evasion', 'Command and Control', 'Impact'). "
@@ -546,7 +569,7 @@ class MitreAttackTechnique(BaseModel):
         ),
     )
     name: str = Field(
-        ...,
+        default="",
         description=(
             "Human-readable technique name as MITRE publishes it (e.g. 'Windows Command Shell'). "
             "For sub-techniques include the parent name and sub-name when natural, e.g. "
@@ -554,7 +577,7 @@ class MitreAttackTechnique(BaseModel):
         ),
     )
     rationale: str = Field(
-        ...,
+        default="",
         description=(
             "1-2 sentences (up to 3 when describing a behavioral chain) justifying the mapping. "
             "Cite the SPECIFIC artifacts or behaviors in THIS cluster that support it (e.g. "
@@ -590,8 +613,13 @@ class MitreAttackTechnique(BaseModel):
 class ClusterAnalysis(BaseModel):
     """Analysis for a single function cluster."""
 
+    @field_validator("label", "description", "relationships", "function_prefix", mode="before")
+    @classmethod
+    def _coerce_string_fields(cls, v):
+        return _coerce_to_str(v)
+
     label: str = Field(
-        ...,
+        default="",
         description=(
             "Short, descriptive label for the cluster. The label "
             "should reflect the functionality of ALL of the cluster's "
@@ -601,9 +629,9 @@ class ClusterAnalysis(BaseModel):
             "behavior, reflect that orchestrator role in its label."
         ),
     )
-    description: str = Field(..., description="Detailed description of cluster functionality. Do NOT mention function addresses or names. The description should not just be reflective of the cluster's own functionality, but also of the functionality of ALL of it's subclusters or referenced clusters.")
-    relationships: str = Field(..., description="How this cluster relates to other clusters. Always follow the format cluster.id.xxxx when referring to other clusters (Machine friendly IDs). ")
-    function_prefix: str = Field(..., description="Suggested prefix for renaming functions in this cluster. Concise, descriptive, and ideally one word.")
+    description: str = Field(default="", description="Detailed description of cluster functionality. Do NOT mention function addresses or names. The description should not just be reflective of the cluster's own functionality, but also of the functionality of ALL of it's subclusters or referenced clusters.")
+    relationships: str = Field(default="", description="How this cluster relates to other clusters. Always follow the format cluster.id.xxxx when referring to other clusters (Machine friendly IDs). ")
+    function_prefix: str = Field(default="", description="Suggested prefix for renaming functions in this cluster. Concise, descriptive, and ideally one word.")
     library_or_runtime: int = Field(default=0, description="1 if cluster is likely library/runtime code, 0 if application code")
     mitre_attack: List[MitreAttackTechnique] = Field(
         default_factory=list,
@@ -789,8 +817,13 @@ class BinarySynthesisResponse(BaseModel):
     it as a string.
     """
 
+    @field_validator("binary_description", mode="before")
+    @classmethod
+    def _coerce_binary_description(cls, v):
+        return _coerce_to_str(v)
+
     binary_description: str = Field(
-        ...,
+        default="",
         description=(
             "Overall description of the binary's functionality. "
             "PLAIN PROSE ONLY. Absolutely no markdown formatting "
@@ -810,7 +843,7 @@ class BinarySynthesisResponse(BaseModel):
         ),
     )
     binary_category: BinaryCategory = Field(
-        ...,
+        default=BinaryCategory.UNDETERMINED,
         description=(
             "Classification of the binary. Choose the category that "
             "matches closest based on OBSERVED ARTIFACTS, not on "
