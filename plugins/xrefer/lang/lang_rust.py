@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Tuple
 from tabulate import tabulate
 from xrefer.backend.base import Instruction
 from xrefer.backend import Address, FunctionType, OperandType, Section, XrefType
-from xrefer.core.helpers import filter_null_string, log, normalize_path
+from xrefer.core.helpers import dlog, filter_null_string, log, normalize_path
 from xrefer.lang.lang_base import LanguageBase
 from xrefer.lang.lang_default import LangDefault
 
@@ -784,9 +784,30 @@ class LangRust(LanguageBase):
     _GUARD_MIN_REACH = 16        # an EP reaching fewer than this is "dead"
     _GUARD_MIN_ALT = 50          # a replacement must reach at least this many
     _GUARD_TOPK = 40             # only probe the K highest out-degree functions
+    _GUARD_MAJORITY = 0.5        # an EP reaching < this fraction of all funcs is
+                                 # not trusted as the real root: a larger,
+                                 # disconnected island may hold the true user main
+                                 # (an orphaned rust_main whose indirect bootstrap
+                                 # edge the backend never resolved).
+    _GUARD_DOMINANCE = 4         # on a fragmented binary the real main may reach
+                                 # only a minority, yet still dwarf the stuck EP.
+                                 # Re-root at an island reaching >= this many times
+                                 # the EP *and* >= a quarter of the program.
 
     def _func_callees(self, fva: int, cache: dict) -> set:
-        """Callee function-starts of `fva` (CALL/indirect edges), memoized."""
+        """Callee function-starts of `fva`, memoized.
+
+        Counts the SAME edges the path-builder uses for reachability
+        (create_xref_mapping -> caller_xrefs_cache): every far cross-function
+        reference, via far_only=True, not just CALL. Rust leans on tail-call
+        JMPs and vtable / trait-dispatch DATA_OFFSET function pointers; a
+        CALL-only filter misses those, which made the connectivity guard see
+        the real user main as low-reach and decline to re-root (the residual
+        052e0fa2 collapse: guard saw reach 548 < majority where the path
+        builder actually reaches 1774). Aligning the metric with far_only=True
+        makes the guard's reach predict the true cluster-forming reach. (Also
+        cheaper: far_only skips the per-instruction fall-through flow refs.)
+        """
         if fva in cache:
             return cache[fva]
         out: set = set()
@@ -794,11 +815,10 @@ class LangRust(LanguageBase):
         if fn is not None:
             for bb in fn.basic_blocks:
                 for ia in self.backend.instructions(bb.start, bb.end):
-                    for xr in self.backend.get_xrefs_from(ia):
-                        if xr.type in (XrefType.CALL, XrefType.UNKNOWN):
-                            cf = self.backend.get_function_at(xr.target)
-                            if cf is not None:
-                                out.add(int(cf.start))
+                    for xr in self.backend.get_xrefs_from(ia, far_only=True):
+                        cf = self.backend.get_function_at(xr.target)
+                        if cf is not None and int(cf.start) != fva:
+                            out.add(int(cf.start))
         cache[fva] = out
         return out
 
@@ -821,31 +841,58 @@ class LangRust(LanguageBase):
             return ep
         ep = int(ep)
         cache: dict = {}
-        # Cheap path: stop as soon as we confirm the EP is well-connected.
-        if len(self._reachable(ep, cache, cap=self._GUARD_MIN_REACH)) >= self._GUARD_MIN_REACH:
+        # How many functions would the EP have to reach to be unambiguously the
+        # real root? A majority of the program. Counting functions is cheap
+        # (no reach computation).
+        total_funcs = sum(1 for _ in self.backend.functions())
+        majority = max(self._GUARD_MIN_REACH, int(self._GUARD_MAJORITY * total_funcs))
+        # Cheap path: stop the BFS as soon as the EP is shown to reach a
+        # majority — then it is the real root and we skip the dominant-island
+        # search entirely (the common, well-connected case: no overhead added).
+        reached = self._reachable(ep, cache, cap=majority)
+        if len(reached) >= majority:
             return ep
-        # EP is essentially dead — search for the dominant reachable root among
-        # the highest out-degree functions (the real main::main reaches the bulk
-        # of user code). Only runs in this pathological case.
+        # The EP reaches only a MINORITY. Two failure modes land here, both
+        # wanting the same remedy: (a) a genuinely dead EP (reaches almost
+        # nothing), and (b) — the bimodal Rust collapse — an EP stuck at the CRT
+        # stub that reaches a moderate runtime sliver while the real user main
+        # sits on a much larger DISCONNECTED island. That island's root is an
+        # orphaned rust_main: the indirect Rust bootstrap call
+        # (__lang_start_internal(main_ptr, ...)) was not resolved, so rust_main
+        # has zero incoming edges and is unreachable from the EP — but it still
+        # has high OUT-degree and reach. Find it by out-degree/reach (not by
+        # reachability from the EP) and re-root there. Only runs in this
+        # pathological minority case.
         try:
+            ep_reach = len(reached)   # BFS finished below the cap -> full reach
             degree = []
             for fn in self.backend.functions():
                 cs = self._func_callees(int(fn.start), cache)
                 if cs:
                     degree.append((len(cs), int(fn.start)))
             degree.sort(reverse=True)
-            ep_reach = len(self._reachable(ep, cache))
             best, best_reach = None, 0
             for _, f in degree[:self._GUARD_TOPK]:
                 r = len(self._reachable(f, cache))
                 if r > best_reach:
                     best, best_reach = f, r
+            dlog(f"GUARD ep=0x{ep:x} ep_reach={ep_reach} total_funcs={total_funcs} "
+                 f"majority={majority} best={('0x%x' % best) if best else None} "
+                 f"best_reach={best_reach} top_outdeg={[(d, hex(a)) for d, a in degree[:5]]}")
+            # Re-root only at a clearly dominant island: it must reach a program
+            # MAJORITY (robust signal that it is the true root), or dwarf the EP
+            # by 10x (the original strict rule, for genuinely-dead EPs). Where no
+            # function dominates (a genuinely fragmented binary), neither holds
+            # and the EP is kept untouched.
             if (best is not None and best != ep
                     and best_reach >= self._GUARD_MIN_ALT
-                    and best_reach >= 10 * max(1, ep_reach)):
+                    and (best_reach >= majority
+                         or best_reach >= 10 * max(1, ep_reach)
+                         or (best_reach >= self._GUARD_DOMINANCE * max(1, ep_reach)
+                             and best_reach >= total_funcs // 4))):
                 log(f"Rust EP connectivity guard: EP 0x{ep:x} reaches only {ep_reach} "
-                    f"function(s); re-rooting at dominant function 0x{best:x} "
-                    f"(reaches {best_reach}).")
+                    f"function(s) of {total_funcs}; re-rooting at dominant function "
+                    f"0x{best:x} (reaches {best_reach}).")
                 return best
         except Exception as e:
             log(f"Rust EP connectivity guard skipped: {e}")
