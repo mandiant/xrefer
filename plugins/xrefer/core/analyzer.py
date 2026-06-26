@@ -1014,6 +1014,15 @@ class XRefer:
             if not fn.is_thunk:
                 continue
             node = next(iter(self.global_xrefs[child_func_ea][self.DIRECT_XREFS]["imports"]))
+            # The caller side of a last_edge is not guaranteed to have a
+            # global_xrefs entry (e.g. a caller that bears no tracked
+            # artifacts of its own). The child is guarded above; guard the
+            # caller too, mirroring that check. Without this, _path_corpus_
+            # topology() yielding such a caller raises KeyError here and
+            # aborts the whole analysis before clustering. Regression
+            # introduced by 75b11941 (worklist propagation refactor).
+            if func_ea not in self.global_xrefs:
+                continue
             self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports"].add(node)
             try:
                 if node not in self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports_ea"]:
@@ -1613,8 +1622,12 @@ class XRefer:
                         analysis = find_cluster_analysis(self.cluster_analysis, cluster.id)
                         if analysis:
                             # The LLM returns 0 or 1. Convert to boolean.
+                            # Defensive: a missing/None value (LLM omitted the
+                            # field, or the dummy/skip-LLM debug path) must not
+                            # crash here — default to not-library. No-op for the
+                            # real path where the value is always 0/1.
                             is_lib_val = analysis.get("library_or_runtime") if isinstance(analysis, dict) else analysis.library_or_runtime
-                            cluster.is_library = bool(int(is_lib_val))
+                            cluster.is_library = bool(int(is_lib_val)) if is_lib_val is not None else False
                         # Recurse into subclusters
                         if cluster.subclusters:
                             populate_library_flag(cluster.subclusters)
