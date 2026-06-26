@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union, 
 import xrefer
 from xrefer.backend import Address, BackEnd, FunctionType, XrefType, get_current_backend
 from xrefer.core.clusters import ClusterManager, FunctionalCluster
-from xrefer.core.helpers import AnalysisCancelled, cancellable_phase, check_cancelled, enrich_string_data_core, find_cluster_analysis, log, log_elapsed_time, log_progress, sanitize_dirtree_name
+from xrefer.core.helpers import AnalysisCancelled, cancellable_phase, check_cancelled, dlog, enrich_string_data_core, find_cluster_analysis, log, log_elapsed_time, log_progress, sanitize_dirtree_name
 from xrefer.core.settings import XReferSettingsManager, deep_merge_settings
 from xrefer.lang import get_language_object
 from xrefer.llm import ClusterAnalyzer, CATEGORIES, Categorizer
@@ -635,6 +635,15 @@ class XRefer:
                             if Address(ref.target) in func:
                                 continue
                             self._record_caller_xref(start, ref)
+
+        # STAGE 0 (backend call graph) — the only true backend boundary;
+        # everything downstream is deterministic from this. Dump a sorted,
+        # per-edge view so two backends over the same binary diff cleanly.
+        if os.environ.get("XREFER_CLUSTER_DEBUG"):
+            edges = [(c, t) for c, tmap in self.caller_xrefs_cache.items() for t in tmap]
+            dlog(f"STAGE0 caller_xrefs_cache funcs={len(self.caller_xrefs_cache)} edges={len(edges)}")
+            for c, t in sorted(edges):
+                dlog(f"STAGE0 edge 0x{c:x} -> 0x{t:x}")
 
     def _record_caller_xref(self, start: int, ref) -> None:
         """Record one outgoing reference into caller_xrefs_cache."""
@@ -1443,6 +1452,8 @@ class XRefer:
                             all_candidate_funcs.add(rm)
                             log(f"Rust dominator anchor: rust_main 0x{rm:x} dominates "
                                 f"{len(dominated)} candidate(s) → rooting clusters there")
+                            dlog(f"STAGEB dominator_anchor FIRED rust_main=0x{rm:x} "
+                                 f"dominated={len(dominated)}")
                 except Exception as e:
                     log(f"Rust dominator anchor skipped: {e}")
 
@@ -1459,6 +1470,15 @@ class XRefer:
             if all_candidate_funcs:
                 preview = ", ".join(_fmt_func(ea) for ea in list(all_candidate_funcs)[:10])
                 log(f"Candidate function sample: {preview}")
+
+            # STAGE B (cluster candidates) — the artifact-bearing functions that
+            # seed clustering, plus whether the Rust dominator anchor fired.
+            dlog(f"STAGEB candidates total={len(all_candidate_funcs)} "
+                 f"with_artifacts={len(func_artifacts)} orphan={len(orphan_func_artifacts)} "
+                 f"ep=0x{self.current_analysis_ep:x}")
+            if os.environ.get("XREFER_CLUSTER_DEBUG"):
+                for fn in sorted(all_candidate_funcs):
+                    dlog(f"STAGEB candidate 0x{fn:x}")
 
             if not all_candidate_funcs:
                 log("No candidate functions found for clustering")
@@ -1536,6 +1556,13 @@ class XRefer:
             else:
                 # Normal decomposition path.
                 log(f"Creating clusters from {len(graph_paths)} paths with {len(root_nodes)} root nodes")
+                # STAGE C (paths/roots) — len(root_nodes) is ~the top-level
+                # cluster count, i.e. the metric itself.
+                dlog(f"STAGEC graph_paths={len(graph_paths)} root_nodes={len(root_nodes)} "
+                     f"paths_examined={paths_examined} candidate_paths={candidate_paths_found}")
+                if os.environ.get("XREFER_CLUSTER_DEBUG"):
+                    for r in sorted(root_nodes):
+                        dlog(f"STAGEC root 0x{r:x}")
                 self.clusters = ClusterManager.decompose_into_clusters(graph_paths, intermediate_paths_map, root_nodes, self.artifact_functions, backend=self._backend)
 
             # ── Pre-flight token-budget gate ─────────────────────────
@@ -1548,12 +1575,21 @@ class XRefer:
             # backstop.
             self.cluster_token_budget_exceeded = None
             self.cluster_analysis_failure = None
+            # Debug short-circuit: XREFER_SKIP_LLM bypasses both the token-budget
+            # pre-check and the LLM call below, substituting a dummy analysis.
+            # Cluster count/shape is already fully formed (decompose ran above);
+            # the LLM only labels. Lets cluster-parity debug runs finish in
+            # minutes. Env-gated -> production path byte-for-byte unchanged.
+            skip_llm = bool(os.environ.get("XREFER_SKIP_LLM"))
             from xrefer.llm.cluster_analyzer import exceeds_context_window
-            try:
-                _estimate = ClusterAnalyzer.estimate_cluster_request(self.clusters, self)
-            except Exception as _budget_err:
+            if not skip_llm:
+                try:
+                    _estimate = ClusterAnalyzer.estimate_cluster_request(self.clusters, self)
+                except Exception as _budget_err:
+                    _estimate = None
+                    log(f"[-] Token-budget pre-check skipped ({_budget_err.__class__.__name__})")
+            else:
                 _estimate = None
-                log(f"[-] Token-budget pre-check skipped ({_budget_err.__class__.__name__})")
             if _estimate is not None and exceeds_context_window(_estimate):
                 self.cluster_token_budget_exceeded = _estimate
                 if getattr(_estimate, "mode", "full") == "hierarchical":
@@ -1585,10 +1621,13 @@ class XRefer:
                 # the ClusterAnalyzer default if the key is missing (old
                 # settings.json without the new analysis_options group).
                 batch_size = self.settings.get("analysis_options", {}).get("cluster_batch_size", 30)
-                self.cluster_analysis = ClusterAnalyzer.analyze_clusters(
-                    self.clusters, self, batch_size=batch_size, force_no_cache=force_no_cache,
-                )
-                # self.cluster_analysis = ClusterAnalyzer.populate_dummy_cluster_analysis(self.clusters)
+                if skip_llm:
+                    self.cluster_analysis = ClusterAnalyzer.populate_dummy_cluster_analysis(self.clusters)
+                    log("[CLUSTERDBG] XREFER_SKIP_LLM set — dummy analysis (LLM + budget gate skipped)")
+                else:
+                    self.cluster_analysis = ClusterAnalyzer.analyze_clusters(
+                        self.clusters, self, batch_size=batch_size, force_no_cache=force_no_cache,
+                    )
                 if not self.cluster_analysis:
                     # The budget gate and the auth pre-flight inside the run
                     # also return {} after setting their own flags; don't
@@ -3490,6 +3529,16 @@ class XRefer:
 
         total_paths_generated = len(self.paths[self.current_analysis_ep])
         log(f"Generated {total_paths_generated} call path groups from {ep_name}")
+
+        # STAGE A (reachability) — forward_reach is the single most decisive
+        # number for the bimodal collapse (EP rooted at a CRT stub reaches a
+        # fraction of the user-code mass). The sorted forward set reveals
+        # exactly which funcs a backend fails to reach from this EP.
+        dlog(f"STAGEA ep=0x{self.current_analysis_ep:x} forward_reach={len(forward)} "
+             f"reachable_leaves={total_paths_generated} total_leaves={total}")
+        if os.environ.get("XREFER_CLUSTER_DEBUG"):
+            for fn in sorted(forward):
+                dlog(f"STAGEA forward 0x{fn:x}")
         if total_paths_generated == 0:
             log(f"WARNING: No paths found from {ep_name} to any leaf functions!")
         elif total_paths_generated < total / 2:
