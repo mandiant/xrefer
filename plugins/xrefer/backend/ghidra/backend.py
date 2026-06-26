@@ -539,6 +539,12 @@ class GhidraBackend(BackEnd):
             logger = logging.getLogger(__name__)
             logger.debug(f"Skipped {stack_refs_skipped} stack references from %s", address)
 
+    @property
+    def recover_incomplete_call_graph(self) -> bool:
+        # Ghidra misses indirect / Rust trait-dispatch call edges, so opt into
+        # the Rust EP / clustering repair heuristics (see base class docstring).
+        return True
+
     def _resolve_file_offset_impl(self, file_offset: int) -> Address | None:
         """Translate a file offset to an Address within the current program."""
         program = self._get_actual_program()

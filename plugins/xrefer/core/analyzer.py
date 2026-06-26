@@ -1415,7 +1415,13 @@ class XRefer:
             # >=2 candidates (e.g. a binary with genuinely independent user clusters),
             # the anchor does not fire and natural clustering stands. Gated to Rust with
             # a named rust_main, so Ghidra/other backends (no rust_main) are untouched.
-            if (self.lang is not None
+            # Additionally gated on the backend's recover_incomplete_call_graph
+            # capability: only backends that actually under-connect the call graph
+            # (Ghidra, Vivisect) opt in. IDA / Binary Ninja inherit False and skip
+            # this block entirely, so their Rust clustering is left byte-for-byte
+            # unchanged even if they expose a named rust_main.
+            if (self._backend.recover_incomplete_call_graph
+                    and self.lang is not None
                     and getattr(self.lang, "id", None) == "lang_rust"
                     and self.current_analysis_ep):
                 try:

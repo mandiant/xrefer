@@ -1074,8 +1074,23 @@ class VivisectBackend(BackEnd):
     def get_xrefs_to(self, address: Address) -> Iterator[Xref]:
         yield from self._xrefs_to.get(int(address), [])
 
-    def get_xrefs_from(self, address: Address) -> Iterator[Xref]:
+    def get_xrefs_from(self, address: Address, far_only: bool = False) -> Iterator[Xref]:
+        """Get all references FROM the specified address.
+
+        ``far_only`` is accepted for interface parity and is a no-op here:
+        Vivisect's xref store is built solely from ``vw.getXrefs()`` — REF_CODE
+        (call/jump) and REF_DATA (read/write/offset) refs — so it never contains
+        the per-instruction fall-through flow refs that ``far_only`` is meant to
+        exclude (same situation as the Ghidra backend). Returning everything is
+        therefore already equivalent to returning only far refs.
+        """
         yield from self._xrefs_from.get(int(address), [])
+
+    @property
+    def recover_incomplete_call_graph(self) -> bool:
+        # Vivisect misses indirect / Rust trait-dispatch call edges, so opt into
+        # the Rust EP / clustering repair heuristics (see base class docstring).
+        return True
 
     def read_bytes(self, address: Address, size: int) -> Optional[bytes]:
         va = int(address)

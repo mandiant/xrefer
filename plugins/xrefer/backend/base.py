@@ -882,6 +882,22 @@ class BackEnd(ABC):
         """
         return []
 
+    @property
+    def recover_incomplete_call_graph(self) -> bool:
+        """Whether this backend's static analysis under-connects the call graph
+        (it misses indirect / trait-dispatch edges) and therefore opts into the
+        Rust entry-point / clustering repair heuristics.
+
+        Backends whose static xrefs are complete (IDA, Binary Ninja) inherit
+        this ``False`` default and are left exactly as-is: the Rust connectivity
+        guard in ``lang_rust.get_entry_point`` and the dominator anchor in
+        ``analyzer.analyze_clusters`` are both gated on this flag, so they never
+        fire for backends that don't opt in. Ghidra and Vivisect — which do miss
+        indirect/trait-dispatch edges and so see Rust user code fragment — return
+        True to enable the repair.
+        """
+        return False
+
     #
     # Backend-Specific Implementation Methods
     #

@@ -742,6 +742,14 @@ class LangRust(LanguageBase):
         # whole program degenerates into one edgeless cluster. If the chosen EP is
         # essentially dead, re-root at the dominant reachable function (the real
         # user main). Strictly gated, so well-connected EPs are returned untouched.
+        #
+        # Only applied for backends that actually under-connect the call graph
+        # (recover_incomplete_call_graph == True: Ghidra, Vivisect). IDA / Binary
+        # Ninja resolve these indirect edges statically, so their EP is never dead
+        # for this reason — they inherit False and get the raw selected EP, leaving
+        # their downstream results unchanged.
+        if not self.backend.recover_incomplete_call_graph:
+            return ep
         return self._connectivity_guarded_ep(ep)
 
     def _select_entry_point(self) -> Optional[int]:
