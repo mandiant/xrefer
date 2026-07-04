@@ -1575,21 +1575,12 @@ class XRefer:
             # backstop.
             self.cluster_token_budget_exceeded = None
             self.cluster_analysis_failure = None
-            # Debug short-circuit: XREFER_SKIP_LLM bypasses both the token-budget
-            # pre-check and the LLM call below, substituting a dummy analysis.
-            # Cluster count/shape is already fully formed (decompose ran above);
-            # the LLM only labels. Lets cluster-parity debug runs finish in
-            # minutes. Env-gated -> production path byte-for-byte unchanged.
-            skip_llm = bool(os.environ.get("XREFER_SKIP_LLM"))
             from xrefer.llm.cluster_analyzer import exceeds_context_window
-            if not skip_llm:
-                try:
-                    _estimate = ClusterAnalyzer.estimate_cluster_request(self.clusters, self)
-                except Exception as _budget_err:
-                    _estimate = None
-                    log(f"[-] Token-budget pre-check skipped ({_budget_err.__class__.__name__})")
-            else:
+            try:
+                _estimate = ClusterAnalyzer.estimate_cluster_request(self.clusters, self)
+            except Exception as _budget_err:
                 _estimate = None
+                log(f"[-] Token-budget pre-check skipped ({_budget_err.__class__.__name__})")
             if _estimate is not None and exceeds_context_window(_estimate):
                 self.cluster_token_budget_exceeded = _estimate
                 if getattr(_estimate, "mode", "full") == "hierarchical":
@@ -1621,13 +1612,9 @@ class XRefer:
                 # the ClusterAnalyzer default if the key is missing (old
                 # settings.json without the new analysis_options group).
                 batch_size = self.settings.get("analysis_options", {}).get("cluster_batch_size", 30)
-                if skip_llm:
-                    self.cluster_analysis = ClusterAnalyzer.populate_dummy_cluster_analysis(self.clusters)
-                    log("[CLUSTERDBG] XREFER_SKIP_LLM set — dummy analysis (LLM + budget gate skipped)")
-                else:
-                    self.cluster_analysis = ClusterAnalyzer.analyze_clusters(
-                        self.clusters, self, batch_size=batch_size, force_no_cache=force_no_cache,
-                    )
+                self.cluster_analysis = ClusterAnalyzer.analyze_clusters(
+                    self.clusters, self, batch_size=batch_size, force_no_cache=force_no_cache,
+                )
                 if not self.cluster_analysis:
                     # The budget gate and the auth pre-flight inside the run
                     # also return {} after setting their own flags; don't
