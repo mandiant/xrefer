@@ -22,7 +22,6 @@ dependencies = [
     "dspy>=3.0.3",
     "flare-capa",
     "httpx",                   # imported directly in llm/processor.py (was transitive via dspy)
-    "lief>=0.17.6",            # vivisect backend: ELF/PE symbol + section enrichment
     "litellm",                 # imported directly in llm/* and core/analyzer.py (was transitive via dspy)
     "networkx>=3.5",
     "pydantic>=2.11.7",
@@ -53,6 +52,12 @@ binaryninja = []
 ghidra = [
     "ghidra-stubs>=11.4",
     "pyghidra>=2.2.0",
+]
+vivisect = [
+    # ELF/PE symbol + section enrichment used only by the vivisect backend
+    # (backend/vivisect/backend.py::_extract_lief_data). vivisect itself is
+    # pulled transitively via flare-capa.
+    "lief>=0.17.6",
 ]
 
 [tool.uv]

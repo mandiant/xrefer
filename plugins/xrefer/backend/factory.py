@@ -83,11 +83,32 @@ class GhidraBackendFactory(BackendFactory):
         return GhidraBackend(program=program)
 
 
+class VivisectBackendFactory(BackendFactory):
+    """Factory for Vivisect backend."""
+
+    @property
+    def name(self) -> str:
+        return "Vivisect"
+
+    def is_available(self) -> bool:
+        """Check if Vivisect is available."""
+        return importlib.util.find_spec("vivisect") is not None
+
+    def create_backend(self, path: str = "", **kwargs) -> BackEnd:
+        """Create Vivisect backend instance."""
+        # Deferred import: keeps `import vivisect` (and its module-level cost)
+        # out of plugin startup so IDA/Binja/Ghidra loads don't pull it in.
+        from .vivisect.backend import VivisectBackend
+
+        if not path:
+            raise BackendError("Vivisect backend requires 'path' parameter")
+        return VivisectBackend(path=path)
+
+
 class BackendManager:
     """Manages available backends and provides unified access."""
 
     def __init__(self):
-        from .vivisect.backend import VivisectBackendFactory
         self._factories: Dict[str, BackendFactory] = {
             "ida": IDABackendFactory(),
             "binaryninja": BinaryNinjaBackendFactory(),

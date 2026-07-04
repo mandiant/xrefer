@@ -2,7 +2,6 @@
 
 __all__ = [
     "VivisectBackend",
-    "VivisectBackendFactory",
     "VivisectFunction",
     "VivisectString",
     "VivisectXref",

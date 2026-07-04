@@ -1506,20 +1506,6 @@ class VivisectBackend(BackEnd):
 #  Factory
 # ════════════════════════════════════════════════════════════════════════════
 
-class VivisectBackendFactory:
-
-    @property
-    def name(self) -> str:
-        return 'Vivisect'
-
-    def is_available(self) -> bool:
-        try:
-            import vivisect  # noqa: F401
-            return True
-        except ImportError:
-            return False
-
-    def create_backend(self, path: str = '', **kwargs) -> VivisectBackend:
-        if not path:
-            raise BackendError("Vivisect backend requires 'path' parameter")
-        return VivisectBackend(path=path)
+# NOTE: VivisectBackendFactory now lives in xrefer.backend.factory so that
+# importing the factory registry does not eagerly import vivisect (which this
+# module does at top level). See factory.VivisectBackendFactory.

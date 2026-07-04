@@ -72,14 +72,21 @@ def cleanup_previous_analysis(file_path: Path, backend: str, force: bool = False
             if artifact_file.exists():
                 print(f"[+] Removing previous artifact: {artifact_file}")
                 artifact_file.unlink()
-        # Remove .xrefer output files (plain + backend-qualified, e.g.
-        # <binary>_vivisect.xrefer / _report.html written via output_base)
-        stale = [
-            Path(f"{file_path}.xrefer"),
-            Path(f"{file_path}_report.html"),
-            Path(f"{file_path}_{backend}.xrefer"),
-            Path(f"{file_path}_{backend}_report.html"),
-        ]
+        # Remove the .xrefer + report outputs THIS backend actually writes.
+        # Vivisect emits backend-qualified names (<binary>_vivisect.xrefer /
+        # _vivisect_report.html via output_base); the others emit the plain
+        # <binary>.xrefer / <binary>_report.html. Scoping to the active backend
+        # means a --force run never deletes a different backend's results.
+        if backend == "vivisect":
+            stale = [
+                Path(f"{file_path}_vivisect.xrefer"),
+                Path(f"{file_path}_vivisect_report.html"),
+            ]
+        else:
+            stale = [
+                Path(f"{file_path}.xrefer"),
+                Path(f"{file_path}_report.html"),
+            ]
         for artifact in stale:
             if artifact.exists():
                 print(f"[+] Removing previous XRefer output: {artifact}")
