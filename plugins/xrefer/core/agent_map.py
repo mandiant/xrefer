@@ -35,11 +35,17 @@ abstraction + stdlib, so it runs headless across any backend.
 
 import hashlib
 import json
-from typing import Any, Dict, List, Optional, Set
+import os
+import re
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from xrefer.core.helpers import find_cluster_analysis, log
 
 SCHEMA_VERSION = "2.0.0"
+# Cluster reference token the LLM is instructed to emit in prose relationships
+# (dspy_modules.py:633 "Always follow the format cluster.id.xxxx"). We resolve
+# these to root RVAs at export time so the agent never has to.
+_RUN_REF_RE = re.compile(r"cluster\.id\.(\d+)")
 SENTINEL = "XREFER_ANATOMY_EOF"
 GUESS = "xrefer_llm_guess"
 MAX_SIGNAL_CLUSTERS = 15    # single-file must stay pasteable; beyond this -> omission ledger / tiered bundle
@@ -107,6 +113,58 @@ class _Builder:
             for plist in (x.paths.get(self.ep, {}) or {}).values():
                 for p in plist:
                     self._reach_nodes.update(p)
+        # Resolve per-run cluster ids -> root RVA once (identity is the root; the
+        # numeric/id_str token is only resolvable at export). Covers subclusters.
+        self._id_to_root: Dict[int, int] = {}
+        self._idstr_to_root: Dict[str, int] = {}
+        for c in self._iter_clusters():
+            try:
+                self._id_to_root[c.id] = c.root_node
+                self._idstr_to_root[str(c.id_str)] = c.root_node
+            except Exception:
+                pass
+        # Function-object cache for has_default_name / name (backend-abstracted,
+        # still IDA-free — Address is a plain int subclass on the base backend).
+        self._fn_cache: Dict[int, Any] = {}
+        # Persisted-cluster fallbacks for per-function category/origin. classify_functions()
+        # (and the live backend function queries it needs) only work when the backend is
+        # fully live (in-IDA). In a headless load-from-cache export the backend can be dark,
+        # so we derive category (cluster_member vs shared) and origin (user vs library, via
+        # the LLM is_library verdict) from the persisted cluster membership — all ground
+        # truth from the .xrefer pickle. Live placements always take precedence.
+        self._member_top: Dict[int, int] = {}
+        self._member_lib_only: Dict[int, bool] = {}
+        for c in (x.clusters or []):
+            lib = bool(getattr(c, "is_library", False))
+            seen: Set[int] = set()
+            stack = [c]
+            while stack:
+                cc = stack.pop()
+                seen |= set(cc.nodes)
+                stack.extend(getattr(cc, "subclusters", None) or [])
+            for n in seen:
+                self._member_top[n] = self._member_top.get(n, 0) + 1
+                self._member_lib_only[n] = self._member_lib_only.get(n, True) and lib
+        # One-time probe: are live per-function backend queries available? They are
+        # in-IDA; a headless load-from-cache backend can be dark. Gates has_default_name
+        # (skips hundreds of doomed get_function_at calls) and is surfaced in the map so
+        # the consumer knows when this field is unavailable rather than false.
+        self._backend_live = False
+        try:
+            from xrefer.backend.base import Address
+            probe = None
+            for c in (x.clusters or []):
+                if c.nodes:
+                    probe = next(iter(c.nodes))
+                    break
+            if probe is None and self.ep is not None:
+                probe = self.ep
+            if probe is None and self.gx:
+                probe = next(iter(self.gx))
+            if probe is not None:
+                self._backend_live = self.x._backend.get_function_at(Address(int(probe))) is not None
+        except Exception:
+            self._backend_live = False
 
     # ---------------- addressing ----------------
     def rva(self, ea: int) -> str:
@@ -115,7 +173,12 @@ class _Builder:
     # ---------------- per-function static ----------------
     def _category(self, ea: int) -> str:
         p = self.placements.get(ea)
-        return getattr(p, "category", None) or "cluster_member"
+        cat = getattr(p, "category", None) if p else None
+        if cat:
+            return cat
+        # Fallback from persisted membership (func_lib needs the live backend).
+        c = self._member_top.get(ea, 0)
+        return "shared" if c >= 2 else "cluster_member"
 
     def _entry(self, ea: int, idx: int) -> Dict[str, Any]:
         return self.gx.get(ea, {})[idx] if ea in self.gx else {}
@@ -442,6 +505,593 @@ class _Builder:
             ],
         }
 
+    # =====================================================================
+    # TIERED BUNDLE ("xrefer-agent-map")
+    # ---------------------------------------------------------------------
+    # Same static-truth/llm-hypothesis discipline as the single file, but the
+    # FULL uncurated projection split across lazy-loaded files: a Tier-0
+    # map.json (verdict + ranked queue + indexes-of-everything), one Tier-1
+    # clusters/<root_rva>.json per SIGNAL cluster (full evidence incl. edges),
+    # and Tier-2 indices/ (reverse index, reachability, per-function
+    # classification, full entity catalog, LLM report). Nothing is capped —
+    # the agent fetches only what a given pivot needs.
+    # =====================================================================
+
+    # ---- per-function projections (uncapped) ----
+    def _fn(self, ea: int) -> Any:
+        """Cached backend Function object (or None). IDA-free: Address is a
+        plain int subclass on the backend abstraction."""
+        if ea in self._fn_cache:
+            return self._fn_cache[ea]
+        fn = None
+        try:
+            from xrefer.backend.base import Address
+            fn = self.x._backend.get_function_at(Address(int(ea)))
+        except Exception:
+            fn = None
+        self._fn_cache[ea] = fn
+        return fn
+
+    def _has_default_name(self, ea: int) -> Optional[bool]:
+        if not self._backend_live:
+            return None
+        fn = self._fn(ea)
+        if fn is None:
+            return None
+        try:
+            return bool(fn.has_default_name)
+        except Exception:
+            return None
+
+    def _origin(self, ea: int) -> Optional[str]:
+        p = self.placements.get(ea)
+        o = getattr(p, "origin", None) if p else None
+        if o:
+            return o
+        # Fallback: library only if EVERY containing cluster is is_library (mirrors
+        # classify_functions._origin), else user. None only for unclustered functions.
+        if ea in self._member_lib_only:
+            return "library" if self._member_lib_only[ea] else "user"
+        return None
+
+    def _func_row(self, ea: int) -> Dict[str, Any]:
+        return {
+            "rva": self.rva(ea),
+            "category": self._category(ea),
+            "origin": self._origin(ea),
+            "has_default_name": self._has_default_name(ea),
+            "is_simple_api_thunk": self._safe_thunk(ea),
+            "indirect_artifact_count": self._indirect_count(ea),
+        }
+
+    def _typed_counts(self, ea: int, xt: int) -> Dict[str, int]:
+        e = self._entry(ea, xt)
+        return {
+            "apis": len(e.get("imports", ()) or ()),
+            "strings": len(e.get("strings", ()) or ()),
+            "libs": len(e.get("libs", ()) or ()),
+            "capa": len(e.get("capa", ()) or ()),
+            "api_trace": len(e.get("api_trace", ()) or ()),
+        }
+
+    # ---- cluster-level artifacts (uncapped, merged per entity) ----
+    def _cluster_artifacts_full(self, cluster: Any) -> Dict[str, List[Dict[str, Any]]]:
+        merged: Dict[str, Dict[int, Dict[str, Any]]] = {
+            "apis": {}, "strings": {}, "libs": {}, "capa": {}, "api_trace": {},
+        }
+        for ea in cluster.nodes:
+            d = self._entry(ea, self.DIRECT)
+            if not d:
+                continue
+            for setkey, eakey, outkey in (
+                ("imports", "imports_ea", "apis"), ("strings", "strings_ea", "strings"),
+                ("libs", "libs_ea", "libs"), ("capa", "capa_ea", "capa"),
+                ("api_trace", "api_trace_ea", "api_trace"),
+            ):
+                for idx in d.get(setkey, ()):
+                    try:
+                        name = str(self.entities[idx][1])
+                    except Exception:
+                        name = str(idx)
+                    slot = merged[outkey].get(idx)
+                    if slot is None:
+                        slot = {"entity_idx": idx, "name": name, "call_site_rvas": set()}
+                        merged[outkey][idx] = slot
+                    slot["call_site_rvas"].update(self.rva(a) for a in d.get(eakey, {}).get(idx, ()))
+                    self._referenced.add(idx)
+        out: Dict[str, List[Dict[str, Any]]] = {}
+        for k, m in merged.items():
+            rows = []
+            for idx in sorted(m):
+                row = m[idx]
+                row["call_site_rvas"] = sorted(row["call_site_rvas"])
+                rows.append(row)
+            out[k] = rows
+        return out
+
+    def _artifact_bearing(self, cluster: Any) -> List[int]:
+        out = []
+        for ea in sorted(cluster.nodes):
+            d = self._entry(ea, self.DIRECT)
+            if d and any(d.get(k) for k in ("imports", "strings", "capa", "api_trace")):
+                out.append(ea)
+        return out
+
+    def _resolve_run_refs(self, text: str) -> Tuple[List[Dict[str, str]], List[str]]:
+        """Extract cluster.id.NNNN tokens from an LLM relationships string and
+        resolve each to a root RVA. Surfaces unresolved ids honestly."""
+        resolved: List[Dict[str, str]] = []
+        unresolved: List[str] = []
+        seen: Set[str] = set()
+        for m in _RUN_REF_RE.finditer(text or ""):
+            tok = m.group(1)
+            if tok in seen:
+                continue
+            seen.add(tok)
+            root = self._idstr_to_root.get(tok)
+            if root is None:
+                try:
+                    root = self._id_to_root.get(int(tok))
+                except Exception:
+                    root = None
+            run_ref = f"cluster.id.{tok}"
+            if root is None:
+                unresolved.append(run_ref)
+            else:
+                resolved.append({"run_ref": run_ref, "resolved_to_root_rva": self.rva(root)})
+        return resolved, unresolved
+
+    def _cluster_llm_full(self, cluster: Any, artifacts: Dict[str, List[Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
+        analysis = find_cluster_analysis(self.ca, cluster.id) if self.ca else None
+        if not analysis:
+            return None
+        get = (lambda k: analysis.get(k)) if isinstance(analysis, dict) else (lambda k: getattr(analysis, k, None))
+        raw_mitre = get("mitre_attack") or []
+        mitre = []
+        for e in raw_mitre:
+            ed = e.model_dump() if hasattr(e, "model_dump") else (e if isinstance(e, dict) else None)
+            if not ed or not ed.get("id"):
+                continue
+            mitre.append({"id": str(ed.get("id", "")), "tactic": str(ed.get("tactic", "")),
+                          "name": str(ed.get("name", "")), "rationale": str(ed.get("rationale", ""))})
+        rel_str = str(get("relationships") or "").strip()
+        resolved, unresolved = self._resolve_run_refs(rel_str)
+        bearing = [self.rva(ea) for ea in self._artifact_bearing(cluster)][:8] or [self.rva(cluster.root_node)]
+        key_idxs = sorted({row["entity_idx"] for k in artifacts for row in artifacts[k]})[:12]
+        return {
+            "provenance": "llm",
+            "label": get("label"),
+            "description": get("description"),
+            "function_prefix": get("function_prefix"),
+            "relationships": rel_str or None,
+            "resolved_relationships": resolved,
+            "unresolved_run_ids": unresolved,
+            "mitre": mitre,
+            "verify_against": {"key_function_rvas": bearing, "key_artifact_entity_idxs": key_idxs},
+            "verify": ("r2_decompile the key_function_rvas at their static.artifacts call_site_rvas and "
+                       "confirm the behaviour in the body before citing this label or applying any rename."),
+        }
+
+    def _cluster_detail(self, rec: Dict[str, Any], has_llm: bool) -> Dict[str, Any]:
+        cl = rec["cl"]
+        artifacts = self._cluster_artifacts_full(cl)
+        funcs = [self._func_row(ea) for ea in sorted(cl.nodes)]
+        edges = sorted([[self.rva(a), self.rva(b)] for a, b in (getattr(cl, "edges", None) or [])])
+        subrefs = []
+        for node_ea, child_id in (getattr(cl, "cluster_refs", None) or {}).items():
+            child_root = self._id_to_root.get(child_id)
+            subrefs.append({
+                "at_node_rva": self.rva(node_ea),
+                "child_run_ref": f"cluster.id.{child_id:04d}",
+                "child_root_rva": self.rva(child_root) if child_root is not None else None,
+                "note": "static call linkage from FunctionalCluster.cluster_refs (trustworthy edge; not an LLM guess)",
+            })
+        return {
+            "identity": {
+                "root_rva": rec["root_rva"], "run_ref": f"cluster.id.{cl.id_str}",
+                "parent_root_rva": rec["parent_root_rva"], "is_library": rec["is_lib"],
+                "library_kind": rec["library_kind"], "danger_floor": rec["danger"],
+                "promoted_from_noise": rec["promoted"] or None,
+            },
+            "static": {"functions": funcs, "edges": edges, "subcluster_refs": subrefs, "artifacts": artifacts},
+            "llm": self._cluster_llm_full(cl, artifacts) if has_llm else None,
+        }
+
+    # ---- cluster classification (shared by index / queue / tier-1) ----
+    def _classify(self) -> List[Dict[str, Any]]:
+        records: List[Dict[str, Any]] = []
+        for cl in self._iter_clusters():
+            static_lib = self._static_lib(cl)
+            danger = self._danger_floor(cl)
+            llm_lib = bool(getattr(cl, "is_library", False)) and not static_lib
+            is_lib = static_lib or llm_lib
+            promoted = is_lib and danger is not None
+            signal = (not is_lib) or promoted
+            score, why = self._score(cl, danger)
+            pid = getattr(cl, "parent_cluster_id", None)
+            proot = self._id_to_root.get(pid) if pid is not None else None
+            records.append({
+                "cl": cl, "root_ea": cl.root_node, "root_rva": self.rva(cl.root_node),
+                "static_lib": static_lib, "llm_lib": llm_lib,
+                "library_kind": ("static" if static_lib else ("llm" if llm_lib else None)),
+                "is_lib": is_lib, "danger": danger, "promoted": promoted, "signal": signal,
+                "score": score, "why": why,
+                "parent_root_rva": self.rva(proot) if proot is not None else None,
+            })
+        records.sort(key=lambda r: r["score"], reverse=True)
+        return records
+
+    # ---- Tier-0 map.json blocks ----
+    def _clusters_index(self, records: List[Dict[str, Any]], has_llm: bool) -> List[Dict[str, Any]]:
+        rows = []
+        for r in records:
+            cl = r["cl"]
+            llm = self._cluster_llm_full(cl, {}) if (has_llm and r["signal"]) else None
+            tactics = sorted({m["tactic"] for m in (llm or {}).get("mitre", []) if m.get("tactic")}) if llm else []
+            rows.append({
+                "root_rva": r["root_rva"], "run_ref": f"cluster.id.{cl.id_str}",
+                "is_library": r["is_lib"], "library_kind": r["library_kind"],
+                "danger_floor": r["danger"], "promoted_from_noise": r["promoted"] or None,
+                "node_count": len(cl.nodes), "subcluster_count": len(getattr(cl, "subclusters", None) or []),
+                "parent_root_rva": r["parent_root_rva"],
+                "mitre_tactics": tactics,
+                "label": ({"provenance": "llm", "text": (llm or {}).get("label")} if llm and (llm or {}).get("label") else None),
+                "function_prefix": ({"provenance": "llm", "text": (llm or {}).get("function_prefix")} if llm and (llm or {}).get("function_prefix") else None),
+                "detail_ref": (f"clusters/{r['root_rva']}.json" if r["signal"] else None),
+            })
+        return rows
+
+    def _investigation_queue(self, records: List[Dict[str, Any]], orphans: List[Dict[str, Any]], has_llm: bool) -> List[Dict[str, Any]]:
+        items = []
+        for r in records:
+            if not r["signal"]:
+                continue
+            cl = r["cl"]
+            llm = self._cluster_llm_full(cl, {}) if has_llm else None
+            bearing = self._artifact_bearing(cl)
+            focus = self.rva(bearing[0]) if bearing else r["root_rva"]
+            items.append({
+                "kind": "cluster", "ref": r["root_rva"], "score": round(r["score"], 3),
+                "why": r["why"], "danger_floor": r["danger"], "promoted_from_noise": r["promoted"] or None,
+                "one_line": ({"provenance": "llm", "text": (llm or {}).get("label")} if llm and (llm or {}).get("label") else None),
+                "detail_ref": f"clusters/{r['root_rva']}.json",
+                "first_move": f"open clusters/{r['root_rva']}.json; r2_decompile {focus} at its static.artifacts call_site_rvas",
+            })
+        for o in orphans:
+            items.append({
+                "kind": "orphan", "ref": o["func_rva"], "score": 0.5,
+                "why": ["artifact-bearing but UNREACHABLE from entry (likely callback/TLS/export)"],
+                "danger_floor": None, "promoted_from_noise": None, "one_line": None,
+                "detail_ref": None, "first_move": o["next"],
+            })
+        items.sort(key=lambda q: q["score"], reverse=True)
+        for i, q in enumerate(items, 1):
+            q["rank"] = i
+        return items
+
+    def _mitre_killchain(self, has_llm: bool) -> Optional[Dict[str, Any]]:
+        if not has_llm:
+            return None
+        try:
+            from xrefer.core.mitre import (MITRE_TACTIC_ORDER, aggregate_mitre_matrix, mitre_attack_url)
+            matrix = aggregate_mitre_matrix(self.x.clusters or [], self.ca, hide_library=True)
+        except Exception as e:
+            log(f"[agent_map] mitre aggregation failed: {e}")
+            return None
+        tactics = []
+        for group in matrix.tactics:
+            try:
+                order_index = MITRE_TACTIC_ORDER.index(group.tactic)
+            except ValueError:
+                order_index = len(MITRE_TACTIC_ORDER)
+            techs = []
+            for t in group.techniques:
+                groundings, resolved = [], []
+                for g in t.groundings:
+                    root = self._id_to_root.get(g.cluster_id)
+                    rrva = self.rva(root) if root is not None else None
+                    groundings.append({"cluster_root_rva": rrva, "cluster_label": g.cluster_label, "rationale": g.rationale})
+                    if rrva:
+                        resolved.append(rrva)
+                techs.append({"id": t.id, "name": t.name, "url": mitre_attack_url(t.id),
+                              "groundings": groundings, "cluster_root_rvas": sorted(set(resolved))})
+            tactics.append({"tactic": group.tactic, "order_index": order_index, "techniques": techs})
+        return {
+            "provenance": "llm",
+            "verify": ("MITRE mappings are LLM-extracted; rationale is the ONLY evidence link. r2_decompile "
+                       "each grounding cluster to confirm before repeating a technique claim."),
+            "exporters_available": ["navigator", "stix", "csv"],
+            "tactics_kill_chain_order": tactics,
+            "empty_tactics": list(matrix.uncovered_tactics),
+        }
+
+    def _orphans_index(self) -> List[Dict[str, Any]]:
+        if self.ep is None or not self._reach_nodes:
+            return []
+        members: Set[int] = set()
+        for cl in self._iter_clusters():
+            members.update(cl.nodes)
+        out = []
+        for ea in sorted(members):
+            if ea in self._reach_nodes:
+                continue
+            d = self._entry(ea, self.DIRECT)
+            if not d:
+                continue
+            carried = sorted(set(d.get("imports", ())) | set(d.get("strings", ())) |
+                             set(d.get("capa", ())) | set(d.get("api_trace", ())))
+            if not carried:
+                continue
+            out.append({"func_rva": self.rva(ea), "carried_artifacts": carried[:20],
+                        "why": "artifact_bearing_no_entry_path",
+                        "next": f"r2_xrefs_to {self.rva(ea)} to find the caller r2's static pass missed"})
+        return out
+
+    # ---- Tier-2 index files ----
+    def _reverse_index(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {
+            "_comment": ("entity_xrefs reverse index (provenance: static) = PRECOMPUTED r2_xrefs_to for every "
+                         "artifact. key = entity_idx (see entities.json); value.function_rvas = every function "
+                         "that references it. r2 address = r2_baddr + rva."),
+        }
+        for idx, funcs in (self.x.entity_xrefs or {}).items():
+            if not funcs:
+                continue
+            out[str(idx)] = {"function_rvas": sorted(self.rva(ea) for ea in funcs)}
+        return out
+
+    def _reachability_index(self, target_eas: Set[int]) -> Dict[str, Any]:
+        out: Dict[str, Any] = {
+            "_comment": ("Distilled entry->target reachability (provenance: static). Whole-program shortest path "
+                         "from the entry point. keys = target function RVAs. shortest_path_rvas is ONE "
+                         "representative path; n_paths = how many simple paths exist. reachable:false = orphan "
+                         "(use r2_xrefs_to). r2 address = r2_baddr + rva."),
+            "entry_rva": self.rva(self.ep) if self.ep is not None else None,
+        }
+        for ea in sorted(target_eas):
+            r = self._reachability(ea)
+            out[self.rva(ea)] = {
+                "reachable": r["reachable"], "min_depth": r["min_depth"],
+                "shortest_path_rvas": r["via_path_rvas"], "n_paths": r["n_paths"],
+            }
+        return out
+
+    def _function_index(self, func_eas: Set[int], in_clusters: Dict[int, List[str]], prefixes: Dict[int, str]) -> Dict[str, Any]:
+        out: Dict[str, Any] = {
+            "_comment": ("Per-function projection (provenance: static except function_prefix = llm). Emitted ONLY "
+                         "for in-scope functions (signal clusters / orphans), never the whole binary. `indirect` = "
+                         "artifacts reachable via callees (whole-program propagation); a large indirect count marks "
+                         "a behavior-gating hub/dispatcher worth reading first. r2 address = r2_baddr + rva."),
+        }
+        for ea in sorted(func_eas):
+            row = {
+                "category": self._category(ea), "origin": self._origin(ea),
+                "has_default_name": self._has_default_name(ea), "is_simple_api_thunk": self._safe_thunk(ea),
+                "in_clusters": in_clusters.get(ea, []),
+                "direct": self._typed_counts(ea, self.DIRECT),
+                "indirect": self._typed_counts(ea, self.INDIRECT),
+            }
+            pfx = prefixes.get(ea)
+            if pfx:
+                row["function_prefix"] = {"provenance": "llm", "text": pfx}
+            out[self.rva(ea)] = row
+        return out
+
+    def _entities_catalog_full(self) -> List[Dict[str, Any]]:
+        kinds = {1: "lib", 2: "api", 3: "string", 4: "capa", 5: "api_trace"}
+        out = []
+        for idx in range(len(self.entities)):
+            try:
+                ent = self.entities[idx]
+                group, name, type_id = ent[0], ent[1], ent[2]
+            except Exception:
+                continue
+            try:
+                xc = len(self.x.entity_xrefs.get(idx, ()) or ())
+            except Exception:
+                xc = 0
+            out.append({"idx": idx, "kind": kinds.get(int(type_id), str(type_id)),
+                        "group": (str(group) if group is not None else None), "name": name, "xref_count": xc})
+        return out
+
+    def _report_md(self, has_llm: bool) -> Optional[str]:
+        if not has_llm:
+            return None
+        report = self.ca.get("binary_report") if isinstance(self.ca, dict) else None
+        if not report or str(report).strip() in ("", "No report available."):
+            return None
+        header = ("<!--\n  PROVENANCE: llm  |  REFERENCE ONLY\n"
+                  "  xrefer's LLM-authored narrative (cluster_analysis.binary_report). A Tier-2 pointer target,\n"
+                  "  never your report's spine — using its framing anchors you on xrefer's hypotheses (the\n"
+                  "  'listing is not reverse engineering' failure). Treat every claim as a lead to verify by\n"
+                  "  r2_decompile'ing the body, and cite the address/function behind each claim in your report.\n-->\n\n")
+        return header + str(report)
+
+    # ---- image / meta blocks ----
+    def _sha256(self) -> Optional[str]:
+        try:
+            return self.x._backend.binary_hash
+        except Exception:
+            pass
+        try:
+            with open(self.x._backend.path, "rb") as fh:
+                return hashlib.sha256(fh.read()).hexdigest()
+        except Exception as e:
+            log(f"[agent_map] sha256 unavailable: {e}")
+            return None
+
+    def _image_block(self) -> Dict[str, Any]:
+        path = getattr(self.x._backend, "path", None)
+        fmt = None
+        try:
+            fmt = self.x._backend.filetype()
+        except Exception:
+            pass
+        bits = None
+        for attr in ("is_64bit",):
+            v = getattr(self.x.lang, attr, None) if getattr(self.x, "lang", None) else None
+            if v is not None:
+                bits = 64 if v else 32
+        return {
+            "sha256": self._sha256(),
+            "filename": (os.path.basename(path) if path else None),
+            "format": fmt,
+            "bits": bits,
+            "image_base_va": f"0x{self.ib:x}",
+            "join_key": "rva",
+            "entry_points_rva": [self.rva(self.ep)] if self.ep is not None else [],
+            "recipe": ("r2_addr = r2_baddr + rva. For a normally-mapped image r2_baddr == image_base_va. "
+                       "If your r2 session is rebased (PIE/ASLR/-B), substitute your own baddr and confirm "
+                       "against one known function before trusting the rest."),
+            "note": ("sha256 is the integration key: r2_init_project keys its project by the same sha256, so a "
+                     "map is present iff it matches your sample. *_va fields are informational; *_rva fields are "
+                     "the portable join key. REFUSE to apply RVAs/annotations on a sha256 mismatch."),
+        }
+
+    def _provenance_legend(self) -> Dict[str, Any]:
+        return {
+            "static": "Ground truth from disassembly, imports, xrefs, execution paths, and capa. Safe to state as fact.",
+            "llm": ("A hypothesis from an LLM (cluster labels/descriptions/relationships, binary category/"
+                    "description/report, all MITRE, and the cluster library_or_runtime verdict + per-function "
+                    "origin it drives). Confirm by reading the body before citing or applying."),
+            "values": ["static", "llm"],
+            "rule": ("Filter to provenance=='static' for anything you state as fact. Every llm block names a "
+                     "verify_against pointer -> the exact function(s) to r2_decompile to confirm it."),
+            "correction": ("cluster is_library / library_kind=='llm' and per-function `origin` are LLM-DERIVED "
+                           "(they inherit the LLM library_or_runtime verdict). The genuinely-STATIC library skip "
+                           "signal is category=='func_lib' / is_simple_api_thunk / has_default_name — never skip "
+                           "a function on origin. A danger_floor cluster is force-kept even if flagged library."),
+        }
+
+    def build_bundle(self) -> Dict[str, Any]:
+        """Assemble the full tiered bundle as in-memory objects. Returns a dict
+        the exporter serializes to files: {'map', 'clusters', 'indices',
+        'entities', 'report_md', 'signal_order'}."""
+        has_llm = bool(self.ca)
+        records = self._classify()
+        orphans = self._orphans_index()
+
+        # Tier-1: one detail file per signal cluster.
+        clusters_out: Dict[str, Dict[str, Any]] = {}
+        signal_order: List[str] = []
+        prefixes: Dict[int, str] = {}
+        in_clusters: Dict[int, List[str]] = {}
+        scope_funcs: Set[int] = set()
+        for r in records:
+            cl = r["cl"]
+            for ea in cl.nodes:
+                in_clusters.setdefault(ea, [])
+                if r["root_rva"] not in in_clusters[ea]:
+                    in_clusters[ea].append(r["root_rva"])
+            if not r["signal"]:
+                continue
+            detail = self._cluster_detail(r, has_llm)
+            clusters_out[r["root_rva"]] = detail
+            signal_order.append(r["root_rva"])
+            scope_funcs.update(cl.nodes)
+            pfx = ((detail.get("llm") or {}).get("function_prefix")) if has_llm else None
+            if pfx:
+                for ea in cl.nodes:
+                    prefixes.setdefault(ea, pfx)
+
+        orphan_eas = set()
+        for o in orphans:
+            try:
+                orphan_eas.add(int(o["func_rva"], 16) + self.ib)
+            except Exception:
+                pass
+        scope_funcs |= orphan_eas
+        # Reachability targets = signal cluster roots + orphan functions.
+        target_eas = set(r["root_ea"] for r in records if r["signal"]) | orphan_eas
+
+        queue = self._investigation_queue(records, orphans, has_llm)
+        clusters_index = self._clusters_index(records, has_llm)
+
+        indices = {
+            "reverse_index.json": self._reverse_index(),
+            "reachability.json": self._reachability_index(target_eas),
+            "functions.json": self._function_index(scope_funcs, in_clusters, prefixes),
+        }
+        entities = self._entities_catalog_full()
+        report_md = self._report_md(has_llm)
+
+        try:
+            from xrefer import __version__ as _ver
+        except Exception:
+            _ver = "unknown"
+
+        clusters_signal = sum(1 for r in records if r["signal"])
+        lib_funcs = sum(1 for ea in self.gx if self._category(ea) == "func_lib")
+        functions_total = len(self.gx)
+        stats = {
+            "functions_total": functions_total,
+            "user_functions": functions_total - lib_funcs,
+            "library_functions": lib_funcs,
+            "clusters_total": len(records),
+            "clusters_signal": clusters_signal,
+            "clusters_library": len(records) - clusters_signal,
+            "clusters_excluded_from_tier1": len(records) - clusters_signal,
+            "entities_total": len(self.entities),
+            "orphan_count": len(orphans),
+            "has_api_trace": any(int(self.entities[i][2]) == 5 for i in range(len(self.entities))),
+            "backend_live": self._backend_live,
+            "note": ("Library/noise clusters are flagged, excluded from the queue and Tier-1 dossiers, but still "
+                     "listed in clusters_index and one fetch away. A 'library' cluster is recoverable if you "
+                     "suspect mislabeling. backend_live=false means this was a headless load-from-cache export: "
+                     "per-function has_default_name is null and category/origin come from persisted cluster "
+                     "membership (static func_lib detection needs the live backend, i.e. the in-tool export)."),
+        }
+
+        top_roots = [r["root_rva"] for r in records if r["signal"]][:5]
+        mp: Dict[str, Any] = {
+            "schema": {
+                "format": "xrefer-agent-map", "schema_version": SCHEMA_VERSION,
+                "generator": f"xrefer {_ver}", "has_llm_layer": has_llm,
+                "address_encoding": "hex-string RVA relative to image_base; see image.recipe",
+                "workflow_binding": {
+                    "target_skill": "format_binary (persistent radare2 project, sha256-keyed)",
+                    "note": ("This map pre-computes format_binary Step 2 (triage) and Step 3 (indicator->code "
+                             "pivots), delivering you into Step 4 (read the bodies). It does NOT satisfy the hard "
+                             "gate: every llm value is a 'listing' hypothesis you must confirm by r2_decompile'ing "
+                             "the body before you claim it or apply an annotation."),
+                    "section_to_step": {
+                        "investigation_queue": "Step 2/3: your ranked shortlist of functions that matter",
+                        "indices/reverse_index.json": "Step 3: precomputed r2_xrefs_to (artifact -> functions)",
+                        "indices/reachability.json": "Step 3: whole-program entry->function paths",
+                        "clusters/<root_rva>.json static.artifacts.call_site_rvas": "Step 4: exact addresses to r2_decompile",
+                        "clusters/<root_rva>.json llm.verify_against": "Step 4: the must-read functions to confirm the label",
+                    },
+                },
+            },
+            "image": self._image_block(),
+            "entry_anchor": {
+                "entry_points_rva": [self.rva(self.ep)] if self.ep is not None else [],
+                "application_roots_rva": top_roots,
+                "read_first_rva": ([queue[0]["ref"]] if queue else []),
+                "runtime_note": ("Application logic lives in the signal clusters (application_roots_rva); clusters "
+                                 "flagged is_library are runtime/library. For a Go or stripped sample, read the "
+                                 "highest-scored signal roots first and treat library clusters as ignorable."),
+            },
+            "provenance_legend": self._provenance_legend(),
+            "stats": stats,
+            "binary": {
+                "provenance": "llm",
+                "category": self.ca.get("binary_category") if has_llm else None,
+                "description": self.ca.get("binary_description") if has_llm else None,
+                "report_ref": ("indices/report.md" if report_md else None),
+                "report_present": bool(report_md),
+                "verify": ("category/description are LLM verdicts. Confirm against the clusters and your own "
+                           "r2_decompile output before repeating them."),
+            },
+            "investigation_queue": queue,
+            "clusters_index": clusters_index,
+            "mitre": self._mitre_killchain(has_llm),
+            "orphans_index": orphans,
+            "manifest": None,  # filled by the exporter once file sizes are known
+        }
+        return {"map": mp, "clusters": clusters_out, "indices": indices,
+                "entities": entities, "report_md": report_md, "signal_order": signal_order}
+
 
 def build_anatomy(xrefer: Any) -> Dict[str, Any]:
     """Return the anatomy dict for an analysed XRefer instance."""
@@ -467,3 +1117,85 @@ def export_anatomy(xrefer: Any, out_path: str) -> str:
     log(f"[agent_map] wrote {out_path} ({len(raw.encode('utf-8'))} bytes, "
         f"{len(data['clusters'])} signal clusters, has_llm={data['meta']['has_llm_layer']})")
     return out_path
+
+
+def build_agent_map(xrefer: Any) -> Dict[str, Any]:
+    """Return the in-memory tiered bundle for an analysed XRefer instance."""
+    return _Builder(xrefer).build_bundle()
+
+
+def export_agent_map(xrefer: Any, out_dir: str) -> str:
+    """Write the tiered ``xrefer-agent-map`` bundle under ``out_dir``.
+
+    Layout::
+
+        <out_dir>/map.json                    Tier-0 (verdict, ranked queue, indexes)
+        <out_dir>/clusters/<root_rva>.json     Tier-1 (one per signal cluster, full evidence)
+        <out_dir>/indices/reverse_index.json   Tier-2 (artifact -> functions)
+        <out_dir>/indices/reachability.json    Tier-2 (entry -> function shortest paths)
+        <out_dir>/indices/functions.json       Tier-2 (per-function classification + counts)
+        <out_dir>/indices/entities.json        Tier-2 (full artifact catalog)
+        <out_dir>/indices/report.md            Tier-2 (LLM narrative; reference only)
+
+    Tier-1/2 files are pretty-printed (lazy-loaded, human-readable, not
+    chat-pasteable). ``map.json``'s manifest is finalized last, once the
+    sizes of every other file are known. Returns the bundle directory.
+    """
+    bundle = build_agent_map(xrefer)
+    clusters_dir = os.path.join(out_dir, "clusters")
+    indices_dir = os.path.join(out_dir, "indices")
+    os.makedirs(clusters_dir, exist_ok=True)
+    os.makedirs(indices_dir, exist_ok=True)
+
+    def _write(path: str, obj: Any) -> int:
+        raw = json.dumps(obj, ensure_ascii=False, indent=2)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(raw)
+        return len(raw.encode("utf-8"))
+
+    # Tier-1: cluster dossiers (emitted in queue/score order).
+    tier1_files: List[Dict[str, Any]] = []
+    for root_rva in bundle["signal_order"]:
+        rel = f"clusters/{root_rva}.json"
+        nbytes = _write(os.path.join(out_dir, rel), bundle["clusters"][root_rva])
+        tier1_files.append({"path": rel, "root_rva": root_rva, "bytes": nbytes})
+
+    # Tier-2: indices + entities + report.
+    tier2: List[Dict[str, Any]] = []
+    _load_when = {
+        "reverse_index.json": "you need every function that references an artifact/IOC (precomputed r2_xrefs_to)",
+        "reachability.json": "you need how execution reaches a function from entry (whole-program, not an r2 call)",
+        "functions.json": "you need classification or DIRECT/INDIRECT artifact counts for an in-scope function",
+    }
+    for fname, obj in bundle["indices"].items():
+        rel = f"indices/{fname}"
+        nbytes = _write(os.path.join(out_dir, rel), obj)
+        tier2.append({"path": rel, "bytes": nbytes, "load_when": _load_when.get(fname, "")})
+    rel = "indices/entities.json"
+    nbytes = _write(os.path.join(out_dir, rel), bundle["entities"])
+    tier2.append({"path": rel, "bytes": nbytes,
+                  "load_when": "you need the full artifact catalog / to resolve an entity_idx to a name"})
+    if bundle["report_md"] is not None:
+        rel = "indices/report.md"
+        raw = bundle["report_md"]
+        with open(os.path.join(out_dir, rel), "w", encoding="utf-8") as fh:
+            fh.write(raw)
+        tier2.append({"path": rel, "bytes": len(raw.encode("utf-8")),
+                      "load_when": "you want xrefer's LLM narrative (reference only — do NOT use as your report's spine)"})
+
+    # Finalize the manifest and write Tier-0 map.json.
+    bundle["map"]["manifest"] = {
+        "tier1_dir": "clusters/",
+        "tier1_files": tier1_files,
+        "tier2": tier2,
+        "read_order": ["map.json", "top investigation_queue items -> their detail_ref -> Step 4 r2_decompile",
+                       "indices/* only to run a specific pivot"],
+    }
+    map_path = os.path.join(out_dir, "map.json")
+    map_bytes = _write(map_path, bundle["map"])
+
+    total = map_bytes + sum(f["bytes"] for f in tier1_files) + sum(f["bytes"] for f in tier2)
+    log(f"[agent_map] wrote tiered bundle to {out_dir}/ "
+        f"({len(tier1_files)} signal clusters, {len(tier2)} index files, {total} bytes total, "
+        f"has_llm={bundle['map']['schema']['has_llm_layer']})")
+    return out_dir
