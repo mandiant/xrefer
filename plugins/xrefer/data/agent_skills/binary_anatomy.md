@@ -52,14 +52,42 @@ The JSON may arrive as chat text and can be silently clipped by a length limit. 
 Read `_readme.provenance`. Two kinds of value live in this file:
 - **Bare values = STATIC ground truth.** RVAs, imports/strings/capa names, `call_site_rvas`,
   `reachability.via_path_rvas`, `entities[]`, `danger_floor`, `noise.static_lib_*`,
-  `coverage.omitted.notable_rvas`, and the static per-function skip signals `category=="func_lib"` /
-  `is_simple_api_thunk`. You may state these as fact.
+  `coverage.omitted.notable_rvas`, `dependency_bom` (the crate parts list) and each function's
+  `artifacts.libs` (cluster-local crate refs), and the static per-function skip signals
+  `category=="func_lib"` / `is_simple_api_thunk`. You may state these as fact — a linked crate name
+  is a symbol-table fact, not a guess.
 - **Any object shaped `{"v": ..., "src": "xrefer_llm_guess"}` = a HYPOTHESIS.** Every LLM value is
   wrapped this way (the `verdict` block, each cluster's `llm` block, `llm_lib`). The `src` tag travels
   with the value even if you lift a sub-object in isolation, so a quoted `"keylogger"` still shows it
   is a guess. It confirms nothing until you read the body.
 - **NOT static, despite looking plain:** cluster `llm_lib` and (in the cluster `llm` block) any
   library framing inherit the LLM `library_or_runtime` verdict. Never treat them as skip authority.
+
+## 2b. The dependency BOM — the static crate parts list (crypto discipline)
+
+`dependency_bom` is a **static** inventory of the crates/libraries the binary is built from, taken from
+linked symbols — the most authoritative evidence of what primitives are actually present. Two lists:
+- **`signal`** = cluster-local crates (crypto, compression, parsers, the sample's own modules), ranked
+  most-specific first. Each row has `xrefs`, `n_clusters`, and `clusters_rva` → the exact cluster(s)
+  that use it, so a crate name pivots straight to code to read.
+- **`pervasive`** = crates spread across most clusters (language runtime / the sample's ubiquitous
+  core), listed for completeness. The split is by reference **spread**, never by a hard-coded name
+  list, so a novel or renamed crypto crate lands in `signal` like any other.
+
+**Crypto-claim discipline — this list is where the "it uses RC4" tunnel-vision failure is caught:**
+- **Report EVERY cipher/crypto crate in `signal`, not just the first or loudest one.** A ransomware
+  build routinely links several (e.g. `chacha20` + `aes` + `ctr`/`cipher` for the file encryptor and
+  `rsa` for key wrapping). Enumerate them all before you characterize the scheme.
+- **Distinguish primary vs secondary by evidence, not by xref count.** Follow each crate's
+  `clusters_rva` to the cluster, read the `must_read_rvas` bodies, and decide from behavior which cipher
+  encrypts victim data (primary) vs. wraps keys / hashes / obfuscates strings (secondary). A crate with
+  few xrefs can still be the primary bulk encryptor.
+- **A statically-linked crypto crate is EVIDENCE, not noise.** It has no CryptoAPI import to trip
+  `danger_floor`, so its cluster may rank mid-queue — do not let the ranking talk you out of it. If
+  `dependency_bom.signal` shows a cipher, the binary has that cipher; your job is to confirm *how* it is
+  used, never *whether* it is present.
+- Per-function `artifacts.libs` carries the same crate refs at the call sites inside each cluster —
+  use them to confirm the crate is invoked in the body you are reading, not merely linked.
 
 ## 3. The capability gate — ALWAYS applies (`_readme.capability_gate_applies` is always true)
 
@@ -149,8 +177,11 @@ Follow `report_scaffold.output_contract`. Your report is checkable by re-reading
 ## Fields NOT in this format (do not look for them)
 
 To keep the single file pasteable, an anatomy JSON deliberately omits: decompiled code, cluster call
-graph `edges` (recover with `r2_callees` from the root), per-function `libs` artifacts, the full
-entity catalog (`entities[]` is referenced-only), staged rename/comment suggestions, crypto
-carve-target blobs, and any binary-level prose report. When you need those, use the tiered
+graph `edges` (recover with `r2_callees` from the root), the full entity catalog (`entities[]` is
+referenced-only), staged rename/comment suggestions, crypto carve-target blobs, and any binary-level
+prose report. Per-function `artifacts.libs` and `dependency_bom` ARE present, but filtered to
+cluster-local (signal) crates — pervasive runtime crates are collapsed into `dependency_bom.pervasive`.
+When you need the omitted material or the unfiltered per-function `libs`, use the tiered
 `xrefer-agent-map` bundle (its `clusters/<root_rva>.json` carries edges + full artifacts, and
-`indices/` carries the reverse index, reachability, and full entity catalog).
+`indices/` carries the reverse index, reachability, and full entity catalog; `map.json.dependency_bom`
+mirrors this BOM with `entity_idxs`).

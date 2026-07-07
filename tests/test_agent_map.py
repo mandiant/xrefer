@@ -33,7 +33,7 @@ from xrefer.core.agent_map import (
 )
 
 # Entity type ids (mirror EntityType: 1=lib 2=import 3=string 4=capa 5=api_trace).
-IMPORT, STRING, CAPA = 2, 3, 4
+LIB, IMPORT, STRING, CAPA = 1, 2, 3, 4
 
 IB = 0x400000
 EP = 0x401000
@@ -76,8 +76,8 @@ class _Backend:
         return None
 
 
-def _dxref(imports=None, strings=None, capa=None, imports_ea=None,
-           strings_ea=None, capa_ea=None):
+def _dxref(imports=None, strings=None, capa=None, libs=None, imports_ea=None,
+           strings_ea=None, capa_ea=None, libs_ea=None):
     z = {"libs": set(), "imports": set(), "strings": set(), "capa": set(),
          "api_trace": set(), "libs_ea": {}, "imports_ea": {}, "strings_ea": {},
          "capa_ea": {}, "api_trace_ea": {}}
@@ -87,9 +87,12 @@ def _dxref(imports=None, strings=None, capa=None, imports_ea=None,
         z["strings"] = set(strings)
     if capa:
         z["capa"] = set(capa)
+    if libs:
+        z["libs"] = set(libs)
     z["imports_ea"] = imports_ea or {}
     z["strings_ea"] = strings_ea or {}
     z["capa_ea"] = capa_ea or {}
+    z["libs_ea"] = libs_ea or {}
     return z
 
 
@@ -114,6 +117,7 @@ class _XRefer:
             ("kernel32", "WriteProcessMemory", IMPORT),  # 1
             ("rdata", "http://c2.example/beacon", STRING),  # 2
             ("host-interaction/process/inject", "inject process", CAPA),  # 3
+            ("crypto", "chacha20::chacha", LIB),         # 4 (cluster-local crate = BOM signal)
         ]
 
         # Signal cluster A: root 0x402000, member 0x402100 bears the artifacts.
@@ -130,16 +134,18 @@ class _XRefer:
         self.global_xrefs = {
             0x402000: [_dxref(), _dxref(imports={0, 1}, capa={3})],  # indirect hub
             0x402100: [
-                _dxref(imports={0, 1}, strings={2}, capa={3},
+                _dxref(imports={0, 1}, strings={2}, capa={3}, libs={4},
                        imports_ea={0: {0x402130}, 1: {0x402150}},
                        strings_ea={2: {0x402120}},
-                       capa_ea={3: {0x402150}}),
+                       capa_ea={3: {0x402150}},
+                       libs_ea={4: {0x402160}}),
                 _dxref(),
             ],
             0x403000: [_dxref(), _dxref()],
         }
 
-        self.entity_xrefs = {0: {0x402100}, 1: {0x402100}, 2: {0x402100}, 3: {0x402100}}
+        self.entity_xrefs = {0: {0x402100}, 1: {0x402100}, 2: {0x402100},
+                             3: {0x402100}, 4: {0x402100}}
 
         # paths from entry reach the signal root at depth 2.
         self.paths = {EP: {0x402000: [[EP, 0x401800, 0x402000]],
@@ -295,6 +301,35 @@ def test_category_and_origin_fallback_without_live_backend():
     assert row["category"] == "cluster_member"
     assert row["origin"] == "user"          # signal (non-library) cluster
     assert row["has_default_name"] is None  # needs live backend
+
+
+def test_dependency_bom_surfaces_crates_both_formats():
+    """The crate BOM (option ii) surfaces a cluster-local crypto crate in both
+    formats, and per-function libs (option i) re-appear on the artifact-bearing
+    member of the single file, signal-filtered."""
+    # single-file
+    d = build_anatomy(_XRefer())
+    bom = d["dependency_bom"]
+    sig = {r["crate"]: r for r in bom["signal"]}
+    assert "chacha20" in sig, "linked crypto crate must be a BOM signal entry"
+    assert sig["chacha20"]["clusters_rva"] == [rva(0x402000)]  # crate -> cluster bridge
+    assert sig["chacha20"]["n_clusters"] == 1
+    assert "entity_idxs" not in sig["chacha20"]                # lean single-file BOM
+    # tiny stub is below the pervasive-cluster floor, so nothing is demoted
+    assert bom["pervasive"] == []
+    assert d["_readme"]["counts"]["dependency_crates_signal"] >= 1
+    # option (i): the crate ref is back on the member function, at its call site
+    inj = next(c for c in d["clusters"] if c["root_rva"] == rva(0x402000))
+    member = next(f for f in inj["static"]["functions"] if f["rva"] == rva(0x402100))
+    libs = {l["name"]: l for l in member["artifacts"].get("libs", [])}
+    assert "chacha20::chacha" in libs
+    assert libs["chacha20::chacha"]["call_site_rvas"] == [rva(0x402160)]
+
+    # tiered map.json mirrors the BOM and carries entity_idxs (its full catalog resolves them)
+    mp = build_agent_map(_XRefer())["map"]
+    msig = {r["crate"]: r for r in mp["dependency_bom"]["signal"]}
+    assert "chacha20" in msig
+    assert 4 in msig["chacha20"]["entity_idxs"]
 
 
 def test_no_bare_llm_values_at_top_level():

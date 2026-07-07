@@ -34,8 +34,9 @@ hypothesis (each queue item's `must_read_rvas`, = `llm.verify_against.key_functi
 `static.artifacts.*.call_site_rvas`). A report assembled from this map alone is the "listing is not
 reverse engineering" failure. Facts you may state
 directly are only the `"provenance":"static"` ones (RVAs, artifact names, xrefs, paths, capa,
-classification). See `provenance_legend` — and its `correction`: cluster `is_library` /
-`library_kind=="llm"` and per-function `origin` are LLM-DERIVED, not skip authority.
+classification, and `dependency_bom` — the linked-crate parts list). See `provenance_legend` — and its
+`correction`: cluster `is_library` / `library_kind=="llm"` and per-function `origin` are LLM-DERIVED,
+not skip authority.
 
 ## 3. Addressing, keys, and binding
 
@@ -58,6 +59,19 @@ kill-chain. Check `stats.backend_live` (see §7).
 `indices/entities.json` (curated, de-noised) instead of raw `r2_imports`/`r2_find_regex`. This is the
 fix for the Go / statically-linked **blind-regex failure**: xrefer already separated signal from the
 tens-of-thousands-of-strings noise. Spot-check with `r2_find_regex` only if the map looks thin.
+
+Read **`dependency_bom`** here first — it is the static crate/library parts list (from linked symbols),
+`signal` = cluster-local deps (crypto/compression/parsers/the sample's own modules, each with an
+`entity_idxs` and a `clusters_rva` → the cluster(s) that use it) and `pervasive` = language/runtime
+crates. **Crypto-claim discipline (where the "it only uses RC4" tunnel-vision fails):** report EVERY
+cipher/crypto crate in `signal`, not just the loudest — a ransomware build routinely links several
+(e.g. `chacha20` + `aes` + `ctr`/`cipher` for the file encryptor and `rsa` for key wrapping). Follow
+each crate's `clusters_rva` to its dossier, read the `must_read_rvas` bodies, and decide primary
+(encrypts victim data) vs secondary (key wrap / hashing / string obfuscation) from **behavior, not
+xref count** — a low-xref crate can be the primary bulk encryptor. A statically-linked crypto crate has
+no CryptoAPI import, so its cluster can rank mid-queue and its `danger_floor` can be null; that is not
+license to skip it. If `dependency_bom.signal` names a cipher, the binary HAS it — confirm *how* it is
+used, never *whether* it is present.
 
 **Step 3 (pivot) — precomputed.** `indices/reverse_index.json["<entity_idx>"].function_rvas` is your
 `r2_xrefs_to` result (artifact → referencing functions). A large `indices/functions.json[fn].indirect`
@@ -109,6 +123,8 @@ not confirm as unverified. Pivot IOCs through `get_context_for_hash` / `get_ioc_
 - *An artifact-bearing function with no path from entry?* → `orphans_index[]`; `r2_xrefs_to` it (the
   item's `next` field) to find the caller r2's static pass missed.
 - *Resolve an entity_idx to a name/group/xref count?* → `indices/entities.json`.
+- *What crypto / third-party crates does the binary link, and where?* → `map.json.dependency_bom.signal`
+  → each crate's `clusters_rva` → open that dossier and read its `must_read_rvas`.
 
 ## 6. Noise, library demotion, completeness
 
