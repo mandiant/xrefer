@@ -652,13 +652,29 @@ class _Builder:
 
     def _report_scaffold(self) -> Dict[str, Any]:
         return {
-            "output_contract": [
-                "Emit a coverage header FIRST, computed from the functions you actually r2_decompile'd.",
-                "Every capability sentence MUST quote the decompiled body excerpt at its cited RVA.",
-                "Attribute every xrefer hypothesis ('xrefer proposed X; I confirmed via r2_decompile @RVA' or 'UNCONFIRMED').",
-                "Do NOT write 'benign'/completeness while any coverage.omitted.notable_rvas RVA is unread.",
-                "Speak MITRE technique-ids for the TTP section.",
+            "deliverable": ("A standard malware analysis report in your malware_analysis format — NOT a "
+                            "verification log, disposition ledger, or coverage table. This map governs only "
+                            "WHAT you may claim and the evidence you cite for it; the report itself is the "
+                            "sections below."),
+            "sections": [
+                "executive_summary — what the sample is, its purpose, and severity, in a few sentences",
+                "identification — sha256/filename/size/format/arch + language/compiler/packer (bind_check, image)",
+                "capabilities — the core analysis, organized BY BEHAVIOR (execution, persistence, "
+                "privilege-escalation, defense-evasion, credential-access, discovery, collection, "
+                "cryptography, command-and-control, exfiltration, impact), NOT cluster by cluster",
+                "host_based_indicators — files, registry keys, mutexes, services, processes, paths",
+                "network_based_indicators — C2 endpoints, URLs, protocols, ports",
+                "mitre_attack — technique IDs mapped to the behaviors you confirmed",
+                "conclusion — overall assessment, likely family/attribution if evident, and confidence",
             ],
+            "evidence_rule": ("Write every capability and IOC in behavioral terms and carry, INLINE, the "
+                              "function RVA (at its call_site) whose decompiled body proves it — not in a "
+                              "separate table. State an xrefer hypothesis only after you confirm it in the "
+                              "body; omit or mark 'unconfirmed' anything you could not verify. Do NOT emit a "
+                              "standalone disposition ledger or coverage header — the deliverable is the report."),
+            "scope_rule": ("Investigate every investigation_queue item before you write, and do not assert "
+                           "benign-ness or completeness while any danger_floor cluster is unread — but keep "
+                           "this coverage discipline internal; it is not a report section."),
         }
 
     # =====================================================================

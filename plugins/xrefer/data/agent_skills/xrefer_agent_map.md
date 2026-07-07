@@ -80,10 +80,11 @@ count is xrefer naming the dispatcher/hub you would otherwise hunt with `r2_call
 (a whole-program path from entry — not a single r2 call).
 
 **Step 4 (read the bodies) — THIS IS STILL YOUR JOB.** Walk `investigation_queue` top-down. **`score`
-sets the ORDER you work in, not a skip license — every queue item must be dispositioned** (Step 6);
-the queue is xrefer's triaged shortlist, so a dropped item is signal you chose not to look at. Each
-item's `must_read_rvas` is the bounded depth floor and `detail_ref` names its Tier-1 file. For each
-item open `clusters/<root_rva>.json`:
+sets the ORDER you work in, not a skip license — investigate every queue item to a resolution
+(confirmed / dismissed-with-evidence / blocked) before you write.** This is internal coverage, not a
+report section (Step 6); the queue is xrefer's triaged shortlist, so a dropped item is signal you chose
+not to look at. Each item's `must_read_rvas` is the bounded depth floor and `detail_ref` names its
+Tier-1 file. For each item open `clusters/<root_rva>.json`:
 - `r2_decompile` the root **and every `must_read_rvas` function** (= `llm.verify_against.key_function_
   rvas` — the artifact-bearing members), jumping to `static.artifacts.*.call_site_rvas`. **The root
   alone is not a disposition** — it is often just a dispatcher; the body that *makes* the call is
@@ -101,17 +102,30 @@ item open `clusters/<root_rva>.json`:
 a hypothesis, not a name to apply blind). Never apply a name you have not earned by reading the body.
 `r2_save_project` at the end of a block.
 
-**Step 6 (report)** — open with a **disposition ledger: one row per `investigation_queue` item**
-(`confirmed` = root + all `must_read_rvas` read / `dismissed` = read enough to justify, state the
-evidence / `blocked` = tooling failure, give the error+RVA). **No queue item may be silently absent.**
-Cite the specific **member** RVA (at its call site) whose body proves each capability — not the cluster
-root. State which demoted set you did not open (`stats.clusters_library`); the queue is not the whole
-binary. Speak MITRE technique-ids aligned with the kill-chain (`tactics_kill_chain_order`; each
-technique's `groundings[].cluster_root_rva` + `rationale` point at the cluster to confirm and the exact
-claim to test; `empty_tactics` = the LLM mapped no technique there, NOT proof of absence — a static
-`danger_floor` overrides it). Build the report from **static counts + behaviors you confirmed** —
-**not** from `indices/report.md` (LLM narrative, reference only). Mark any xrefer hypothesis you could
-not confirm as unverified. Pivot IOCs through `get_context_for_hash` / `get_ioc_assessment`.
+**Step 6 (report) — a malware analysis report, NOT a verification log.** Produce a **standard malware
+analysis report in your `malware_analysis` format**, self-contained in these sections: **executive
+summary** (what the sample is, purpose, severity) → **identification** (sha256/filename/size/format/arch
++ language/packer, from `image`) → **capabilities** → **host-based indicators** (files/registry/mutexes/
+services/processes) → **network-based indicators** (C2/URLs/protocols/ports) → **MITRE ATT&CK** →
+**conclusion** (assessment + likely family/attribution + confidence). **Do NOT open with a disposition
+ledger or a coverage header** — the map governs what you may claim, not your report shape. Verification
+lives *inline*:
+- Organize **capabilities by behavior** (execution, persistence, privilege-escalation, defense-evasion,
+  credential-access, discovery, collection, cryptography, C2, exfiltration, impact) — **not cluster by
+  cluster.** Synthesize; do not echo the map.
+- Every capability and IOC carries, inline, the **member** RVA (at its call site) whose decompiled body
+  proves it — never the cluster root alone, never a bare claim.
+- State an xrefer hypothesis only after confirming it in a body; omit or mark "unconfirmed" the rest.
+  Build from **behaviors you confirmed**, NOT from `indices/report.md` (LLM narrative, reference only).
+- **Report every crypto crate** from `dependency_bom` — name each cipher and say which is primary vs
+  secondary from the bodies.
+- Map MITRE technique-ids to confirmed behavior via the kill-chain (`tactics_kill_chain_order`; each
+  technique's `groundings[].cluster_root_rva` + `rationale` is the cluster + claim to test; `empty_
+  tactics` = unmapped, NOT proof of absence — a static `danger_floor` overrides it). Pivot IOCs through
+  `get_context_for_hash` / `get_ioc_assessment`.
+- **Coverage is internal discipline, not a section:** don't claim complete/benign while a `danger_floor`
+  cluster is unread (`stats.clusters_library` is what you demoted) — but that governs your analysis, it
+  is not printed.
 
 ## 5. Query cookbook (map field → next r2 call)
 
@@ -130,7 +144,7 @@ not confirm as unverified. Pivot IOCs through `get_context_for_hash` / `get_ioc_
 
 Do not conclude "clean" just because the queue is short — the safety net is **static**. And note:
 **budget-saving means leaving demoted `clusters_index` rows unread — never an `investigation_queue`
-item** (every queue item must be dispositioned, Step 6).
+item** (investigate every queue item; Step 4).
 - `clusters_index` lists **every** cluster (signal + demoted). A row with `is_library:true` and
   `detail_ref:null` was excluded from the queue and Tier-1. `library_kind` distinguishes `"static"`
   (deterministic FUNC_LIB — safe to leave unread) from `"llm"` (the `library_or_runtime` guess — the

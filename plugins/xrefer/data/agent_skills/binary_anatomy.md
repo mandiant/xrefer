@@ -104,8 +104,10 @@ but `investigation_queue[].why` and the static evidence are still only LEADS (wh
 ## 4. The loop — process EVERY queue item; score is order, not a skip license
 
 Walk `investigation_queue` top to bottom. **`static_score` sets the ORDER you work in; it does NOT
-license skipping.** Every queue item must end in a disposition (§6) — the queue is already xrefer's
-triaged shortlist, so an item you drop is signal you chose not to look at. For each item:
+license skipping.** Investigate every queue item to a resolution (confirmed / dismissed-with-evidence /
+blocked) before you write — this is internal coverage discipline, **not** a section you print (§6). The
+queue is already xrefer's triaged shortlist, so an item you drop is signal you chose not to look at. For
+each item:
 - Open `clusters[]` (match `root_rva == ref_rva`). `r2_decompile` the root **and every
   `must_read_rvas` function**, jumping to each function's `artifacts.*.call_site_rvas` (the exact
   instructions). `first_move` is the ready call.
@@ -140,26 +142,38 @@ and even that has a static safety net:
   mislabeled payload cannot hide. Never skip on the LLM library flag when a static `danger_floor`
   disagrees.
 
-## 6. OUTPUT CONTRACT (this is where the gate is enforced)
+## 6. THE DELIVERABLE — a malware analysis report (NOT a verification log)
 
-Follow `report_scaffold.output_contract`. Your report is checkable by re-reading it:
-1. **Disposition ledger FIRST — one row per `investigation_queue` item**, with a status: `confirmed`
-   (you read the root + all its `must_read_rvas`), `dismissed` (you read enough to justify it — state
-   the evidence, e.g. "root + members are statically-linked zlib"), or `blocked` (a tooling failure —
-   give the exact error and RVA). **No queue item may be silently absent.** A ledger with unexplained
-   gaps is an incomplete analysis.
-2. **Coverage header** computed from what you actually decompiled — e.g. *"12 confirmed / 2 dismissed /
-   1 blocked of 15 queued; unread danger-floor RVAs: none."*
-3. **Every capability sentence cites the specific member RVA (at its call site) whose body proves it,
-   with the decompiled excerpt** — a claim citing only the cluster root, or with no body quote, is
-   rejected.
-4. **Attribute every hypothesis:** "xrefer proposed X; I confirmed via r2_decompile @RVA" or "xrefer
-   proposed X; UNCONFIRMED" — never a bare `xrefer_llm_guess` value as fact.
-5. **The queue is not the whole binary.** No "benign"/completeness verdict while any
-   `coverage.omitted.notable_rvas` RVA is unread, and state plainly which demoted set you did not open
-   (`_readme.counts.clusters_llm_lib` / `clusters_static_lib`).
-6. Speak MITRE technique-ids for the TTP section; pivot IOCs via `get_context_for_hash` /
-   `get_ioc_assessment` and drop noisy ones. List unverified xrefer hypotheses explicitly.
+Follow `report_scaffold`. The output is a **standard malware analysis report in your `malware_analysis`
+format** — an intelligence product, not a table of what you verified. This map governs only *what you
+may claim and the evidence behind each claim*; it does **not** replace your report format. **Do not emit
+a disposition ledger or a coverage header** — verification is expressed *inside* the report as the
+evidence attached to each finding. Sections (`report_scaffold.sections`):
+1. **Executive summary** — what the sample is, its purpose, and severity, in a few sentences.
+2. **Identification** — sha256 / filename / size / format / arch, plus language / compiler / packer
+   (from `bind_check` + `image`).
+3. **Capabilities** — the core, organized **by behavior** (execution, persistence, privilege-escalation,
+   defense-evasion, credential-access, discovery, collection, cryptography, command-and-control,
+   exfiltration, impact) — **not cluster by cluster.** Synthesize; do not echo the map's structure.
+4. **Host-based indicators** — files, registry keys, mutexes, services, processes, paths.
+5. **Network-based indicators** — C2 endpoints, URLs, protocols, ports.
+6. **MITRE ATT&CK** — technique-ids mapped to the behaviors you confirmed.
+7. **Conclusion** — overall assessment, likely family/attribution if evident, and your confidence.
+
+**Evidence discipline, applied inline (this is where the gate lives):**
+- Every capability and IOC is written in behavioral terms and **carries the function RVA (at its call
+  site) whose decompiled body proves it** — inline, e.g. *"encrypts victim files with ChaCha20
+  (member `0x…` in cluster `0xea390`)"* — never a bare claim, never citing only the cluster root.
+- **State an xrefer hypothesis only after you confirm it in a body.** One you could not verify is either
+  omitted or flagged inline as "unconfirmed" — never laundered as fact (its `xrefer_llm_guess` tag does
+  not become truth by being repeated).
+- **Report ALL cryptography** from `dependency_bom` (§2b): name every cipher and say which is primary vs
+  secondary from the bodies you read; a statically-linked crypto crate is a finding, not noise.
+- Pivot IOCs via `get_context_for_hash` / `get_ioc_assessment`; drop noisy ones.
+
+**Coverage is internal discipline, not a section:** investigate every `investigation_queue` item before
+writing, and do not assert "benign"/complete while any `coverage.omitted.notable_rvas` RVA is unread —
+but this governs your *analysis*; it is not something you print.
 
 ## 7. Identity, degraded mode, anti-patterns
 
