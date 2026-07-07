@@ -48,7 +48,9 @@ SCHEMA_VERSION = "2.0.0"
 _RUN_REF_RE = re.compile(r"cluster\.id\.(\d+)")
 SENTINEL = "XREFER_ANATOMY_EOF"
 GUESS = "xrefer_llm_guess"
-MAX_SIGNAL_CLUSTERS = 15    # single-file must stay pasteable; beyond this -> omission ledger / tiered bundle
+# NOTE: no cluster-count cap — every SIGNAL cluster is emitted so a ranked-low payload
+# (e.g. an embedded-crypto engine whose danger floor never fired) is never dropped. The
+# file grows with the count of real signal clusters; use the tiered bundle for huge binaries.
 MAX_FUNCS_PER_CLUSTER = 6   # curation: keep the most artifact-dense functions per cluster (+ root)
 MAX_CALL_SITES = 3          # curation: call-site RVAs kept per artifact
 MAX_ARTIFACTS_PER_TYPE = 5  # curation: apis/strings/capa/api_trace kept per function
@@ -337,7 +339,11 @@ class _Builder:
             scored.append((score, cl, static_lib, llm_lib, danger, why))
         scored.sort(key=lambda t: t[0], reverse=True)
 
-        shown = 0
+        # No cluster cap: every SIGNAL cluster is shown (only library/noise is demoted).
+        # Curation stays per-cluster (funcs/artifacts capped) so the file grows with the
+        # count of real signal clusters, not the whole 168-cluster projection — but a
+        # ranked-below-15 payload (e.g. an embedded-crypto engine whose danger floor never
+        # fired) is never silently dropped from the pasteable file.
         for score, cl, static_lib, llm_lib, danger, why in scored:
             root_rva = self.rva(cl.root_node)
             # library handling
@@ -352,12 +358,6 @@ class _Builder:
             promoted = (static_lib or llm_lib) and danger is not None
             if promoted:
                 promoted_out.append(root_rva)
-            # cap: signal clusters beyond MAX go to the omission ledger (danger-floor ones flagged)
-            if shown >= MAX_SIGNAL_CLUSTERS:
-                if danger is not None:
-                    omitted_notable.append({"rva": root_rva, "why": f"truncated; statically reaches danger floor: {danger}", "static": True})
-                continue
-            shown += 1
             node = {
                 "root_rva": root_rva,
                 "parent_cluster_id": cl.parent_cluster_id,
