@@ -635,6 +635,10 @@ class _Builder:
         n_perv = sum(1 for s in idx.values() if s["pervasive"])
         return {
             "format": "xrefer-binary-anatomy",
+            "prerequisite": ("FIRST confirm the malware_analysis and format_binary skills are active in "
+                             "this session, and activate them if not. This file augments that workflow — "
+                             "malware_analysis owns the report format and RE doctrine, format_binary drives "
+                             "radare2 — it does not replace them."),
             "what": ("A single-file investigation PLAN produced by xrefer. NOT a finished analysis and "
                      "contains NO decompiled code. Ranks where to point radare2 first; xrefer's "
                      "interpretations are null-verdict hypotheses you must confirm by reading the body."),
@@ -662,6 +666,9 @@ class _Builder:
                 "capabilities — the core analysis, organized BY BEHAVIOR (execution, persistence, "
                 "privilege-escalation, defense-evasion, credential-access, discovery, collection, "
                 "cryptography, command-and-control, exfiltration, impact), NOT cluster by cluster",
+                "details — a comprehensive technical walkthrough of the ENTIRE malware: its execution "
+                "flow from entry through every major component, covering the full binary (not only the "
+                "headline behaviors), each with the function RVAs and decompiled evidence behind it",
                 "host_based_indicators — files, registry keys, mutexes, services, processes, paths",
                 "network_based_indicators — C2 endpoints, URLs, protocols, ports",
                 "mitre_attack — technique IDs mapped to the behaviors you confirmed",

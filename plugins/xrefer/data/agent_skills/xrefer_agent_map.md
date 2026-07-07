@@ -11,6 +11,13 @@ description: >-
 
 # xrefer-agent-map (a format_binary accelerator)
 
+## 0. Prerequisite — activate your analysis skills first
+
+Before anything below, **confirm the `malware_analysis` and `format_binary` skills are active** in this
+session, and **activate them if they are not.** This skill only augments that workflow: `malware_analysis`
+owns the report format and reverse-engineering doctrine, `format_binary` drives radare2, and this map
+pre-computes their triage and pivots. If those skills are unavailable, say so before proceeding.
+
 ## 1. What it is and where it fits
 
 This is **not** a replacement for `format_binary` — it plugs into it. xrefer already ran whole-program
@@ -105,14 +112,18 @@ a hypothesis, not a name to apply blind). Never apply a name you have not earned
 **Step 6 (report) — a malware analysis report, NOT a verification log.** Produce a **standard malware
 analysis report in your `malware_analysis` format**, self-contained in these sections: **executive
 summary** (what the sample is, purpose, severity) → **identification** (sha256/filename/size/format/arch
-+ language/packer, from `image`) → **capabilities** → **host-based indicators** (files/registry/mutexes/
-services/processes) → **network-based indicators** (C2/URLs/protocols/ports) → **MITRE ATT&CK** →
-**conclusion** (assessment + likely family/attribution + confidence). **Do NOT open with a disposition
-ledger or a coverage header** — the map governs what you may claim, not your report shape. Verification
-lives *inline*:
++ language/packer, from `image`) → **capabilities** → **details** → **host-based indicators**
+(files/registry/mutexes/services/processes) → **network-based indicators** (C2/URLs/protocols/ports) →
+**MITRE ATT&CK** → **conclusion** (assessment + likely family/attribution + confidence). **Do NOT open
+with a disposition ledger or a coverage header** — the map governs what you may claim, not your report
+shape. Verification lives *inline*:
 - Organize **capabilities by behavior** (execution, persistence, privilege-escalation, defense-evasion,
   credential-access, discovery, collection, cryptography, C2, exfiltration, impact) — **not cluster by
   cluster.** Synthesize; do not echo the map.
+- The **details** section is a comprehensive technical walkthrough of the **entire** malware — its
+  execution flow from entry through every major component, covering the full binary (not only the
+  headline behaviors), each with its function RVAs and decompiled evidence. Capabilities is the summary;
+  details is the in-depth analysis.
 - Every capability and IOC carries, inline, the **member** RVA (at its call site) whose decompiled body
   proves it — never the cluster root alone, never a bare claim.
 - State an xrefer hypothesis only after confirming it in a body; omit or mark "unconfirmed" the rest.

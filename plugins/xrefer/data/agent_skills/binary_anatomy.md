@@ -12,6 +12,13 @@ description: >-
 
 # binary_anatomy — consuming a single-file xrefer map
 
+## Prerequisite — activate your analysis skills first
+
+Before anything below, **confirm the `malware_analysis` and `format_binary` skills are active** in this
+session, and **activate them if they are not.** This skill only augments that workflow: `malware_analysis`
+owns the report format and the reverse-engineering doctrine, `format_binary` drives radare2, and this map
+pre-computes their triage and pivots. If those skills are unavailable, say so before proceeding.
+
 ## What this is (and is not)
 
 An `xrefer-binary-anatomy` JSON is a **plan**, not an analysis. It is xrefer's ranked answer to
@@ -155,10 +162,14 @@ evidence attached to each finding. Sections (`report_scaffold.sections`):
 3. **Capabilities** — the core, organized **by behavior** (execution, persistence, privilege-escalation,
    defense-evasion, credential-access, discovery, collection, cryptography, command-and-control,
    exfiltration, impact) — **not cluster by cluster.** Synthesize; do not echo the map's structure.
-4. **Host-based indicators** — files, registry keys, mutexes, services, processes, paths.
-5. **Network-based indicators** — C2 endpoints, URLs, protocols, ports.
-6. **MITRE ATT&CK** — technique-ids mapped to the behaviors you confirmed.
-7. **Conclusion** — overall assessment, likely family/attribution if evident, and your confidence.
+4. **Details** — a comprehensive technical walkthrough of the **entire** malware: its execution flow from
+   entry through every major component, covering the full binary (not only the headline behaviors), each
+   with the function RVAs and decompiled evidence behind it. This is the in-depth analysis; the
+   Capabilities section is its behavioral summary.
+5. **Host-based indicators** — files, registry keys, mutexes, services, processes, paths.
+6. **Network-based indicators** — C2 endpoints, URLs, protocols, ports.
+7. **MITRE ATT&CK** — technique-ids mapped to the behaviors you confirmed.
+8. **Conclusion** — overall assessment, likely family/attribution if evident, and your confidence.
 
 **Evidence discipline, applied inline (this is where the gate lives):**
 - Every capability and IOC is written in behavioral terms and **carries the function RVA (at its call
