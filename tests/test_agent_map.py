@@ -230,8 +230,27 @@ def test_investigation_queue_is_static_ranked():
     # first_move must target the cluster's own root (regression: it used to point at the
     # lowest-address shared member, which was wrong for most clusters)
     assert top["ref"] in top["first_move"]
+    # the depth floor is surfaced IN the queue and is the artifact-bearing member (0x402100),
+    # NOT the root — so the agent can't stop at the root without opening the dossier
+    assert top["must_read_rvas"] == [rva(0x402100)]
+    assert "must_read_rvas" in top["first_move"]
     # the label is NOT duplicated onto the queue; it lives once on clusters_index
     assert "one_line" not in top
+
+
+def test_must_read_rvas_matches_verify_against_both_formats():
+    b = build_agent_map(_XRefer())
+    q_top = b["map"]["investigation_queue"][0]
+    detail = b["clusters"][rva(0x402000)]
+    # the queue's depth floor and the dossier's verify_against are the SAME artifact-bearing set
+    assert q_top["must_read_rvas"] == detail["llm"]["verify_against"]["key_function_rvas"]
+    # single-file: verify_against is now artifact-bearing too (not sorted(nodes)[:6]) and the
+    # queue surfaces the same must_read_rvas
+    d = build_anatomy(_XRefer())
+    inj = next(c for c in d["clusters"] if c["root_rva"] == rva(0x402000))
+    aq = next(x for x in d["investigation_queue"] if x["ref_rva"] == rva(0x402000))
+    assert inj["llm"]["verify_against"]["key_function_rvas"] == [rva(0x402100)]
+    assert aq["must_read_rvas"] == [rva(0x402100)]
 
 
 def test_tier1_verify_against_points_at_real_functions():

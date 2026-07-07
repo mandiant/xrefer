@@ -302,8 +302,9 @@ class _Builder:
                 continue
             mitre.append({"id": str(ed.get("id", "")), "tactic": str(ed.get("tactic", "")),
                           "name": str(ed.get("name", "")), "rationale": str(ed.get("rationale", ""))})
-        # verify_against RVAs come from the STATIC side (cluster members), never the prose.
-        va = [self.rva(ea) for ea in sorted(cluster.nodes)][:6]
+        # verify_against = the artifact-bearing members (the functions that make the calls),
+        # from the STATIC side — never the prose, and never just the root.
+        va = self._must_read_rvas(cluster)
         return {
             "provenance": "llm",
             "label": get("label"),
@@ -312,7 +313,7 @@ class _Builder:
             "relationships": get("relationships"),
             "mitre": mitre,
             "verify_against": {"key_function_rvas": va},
-            "verify": "Confirm by r2_decompile'ing the key_function_rvas at their call_site_rvas before citing.",
+            "verify": "This cluster is not dispositioned until you r2_decompile EVERY key_function_rvas at its call_site_rvas. The root alone is not enough.",
         }
 
     # ---------------- assembly ----------------
@@ -369,10 +370,13 @@ class _Builder:
                 "llm": self._cluster_llm(cl) if has_llm else None,
             }
             clusters_out.append(node)
+            must_read = self._must_read_rvas(cl)
             queue.append({
                 "kind": "cluster", "ref_rva": root_rva, "static_score": round(score, 3),
                 "danger_floor": danger, "promoted_from_noise": promoted or None,
-                "why": why, "first_move": f"r2_decompile {root_rva}",
+                "why": why, "must_read_rvas": must_read,
+                "first_move": (f"r2_decompile {root_rva} (root) AND every must_read_rvas function at its "
+                               f"call_site_rvas — the root alone is not a disposition"),
             })
 
         queue.sort(key=lambda q: q["static_score"], reverse=True)
@@ -615,6 +619,14 @@ class _Builder:
                 out.append(ea)
         return out
 
+    def _must_read_rvas(self, cluster: Any) -> List[str]:
+        """The bounded per-cluster required-read set: the artifact-bearing member
+        functions (the ones that actually make the API calls / hold the strings),
+        not the root. Shared by verify_against (both formats) and the queue's
+        must_read_rvas so the agent's depth floor is one consistent list."""
+        bearing = [self.rva(ea) for ea in self._artifact_bearing(cluster)]
+        return bearing[:8] or [self.rva(cluster.root_node)]
+
     def _resolve_run_refs(self, text: str) -> Tuple[List[Dict[str, str]], List[str]]:
         """Extract cluster.id.NNNN tokens from an LLM relationships string and
         resolve each to a root RVA. Surfaces unresolved ids honestly."""
@@ -654,7 +666,7 @@ class _Builder:
                           "name": str(ed.get("name", "")), "rationale": str(ed.get("rationale", ""))})
         rel_str = str(get("relationships") or "").strip()
         resolved, unresolved = self._resolve_run_refs(rel_str)
-        bearing = [self.rva(ea) for ea in self._artifact_bearing(cluster)][:8] or [self.rva(cluster.root_node)]
+        bearing = self._must_read_rvas(cluster)
         key_idxs = sorted({row["entity_idx"] for k in artifacts for row in artifacts[k]})[:12]
         return {
             "provenance": "llm",
@@ -742,19 +754,23 @@ class _Builder:
         for r in records:
             if not r["signal"]:
                 continue
-            # first_move targets the cluster ROOT (the r2 jump target). The label lives
-            # once on clusters_index[]; do not duplicate it here.
+            # must_read_rvas surfaces the depth floor (the artifact-bearing members) IN the
+            # queue so the agent cannot stop at the root without opening the dossier.
+            must_read = self._must_read_rvas(r["cl"])
             items.append({
                 "kind": "cluster", "ref": r["root_rva"], "score": round(r["score"], 3),
                 "why": r["why"], "danger_floor": r["danger"], "promoted_from_noise": r["promoted"] or None,
+                "must_read_rvas": must_read,
                 "detail_ref": f"clusters/{r['root_rva']}.json",
-                "first_move": f"open clusters/{r['root_rva']}.json; r2_decompile {r['root_rva']} (the cluster root), then its static.artifacts call_site_rvas",
+                "first_move": (f"open clusters/{r['root_rva']}.json; r2_decompile {r['root_rva']} (root) AND every "
+                               f"must_read_rvas function at its call_site_rvas — the root alone is not a disposition"),
             })
         for o in orphans:
             items.append({
                 "kind": "orphan", "ref": o["func_rva"], "score": 0.5,
                 "why": ["artifact-bearing but UNREACHABLE from entry (likely callback/TLS/export)"],
                 "danger_floor": None, "promoted_from_noise": None,
+                "must_read_rvas": [o["func_rva"]],
                 "detail_ref": None, "first_move": o["next"],
             })
         items.sort(key=lambda q: q["score"], reverse=True)

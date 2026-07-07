@@ -30,8 +30,9 @@ Everything with `"provenance":"llm"` — cluster `label`, `function_prefix`, `mi
 verdict — is a **"listing": a hypothesis that satisfies your gate for nothing.** Your
 rule is unchanged: *no capability claim without a function body read; no confirmed function left
 unnamed; rename only on evidence.* The map's value is that it names **exactly which body** proves each
-hypothesis (`llm.verify_against.key_function_rvas` / `static.artifacts.*.call_site_rvas`). A report
-assembled from this map alone is the "listing is not reverse engineering" failure. Facts you may state
+hypothesis (each queue item's `must_read_rvas`, = `llm.verify_against.key_function_rvas`, at their
+`static.artifacts.*.call_site_rvas`). A report assembled from this map alone is the "listing is not
+reverse engineering" failure. Facts you may state
 directly are only the `"provenance":"static"` ones (RVAs, artifact names, xrefs, paths, capa,
 classification). See `provenance_legend` — and its `correction`: cluster `is_library` /
 `library_kind=="llm"` and per-function `origin` are LLM-DERIVED, not skip authority.
@@ -64,32 +65,39 @@ count is xrefer naming the dispatcher/hub you would otherwise hunt with `r2_call
 `indices/reachability.json["<rva>"]` gives `reachable` / `min_depth` / `shortest_path_rvas` / `n_paths`
 (a whole-program path from entry — not a single r2 call).
 
-**Step 4 (read the bodies) — THIS IS STILL YOUR JOB.** Walk `investigation_queue` top-down (it is
-score-ranked; each item's `first_move` is a ready r2 call and `detail_ref` names its Tier-1 file). For
-each item open `clusters/<root_rva>.json`:
-- `r2_decompile` the functions in `static.functions`, jumping to `static.artifacts.*.call_site_rvas`
-  (the exact instructions). **Skip a function only on the STATIC signals** `category=="func_lib"` /
-  `is_simple_api_thunk` (prioritize `origin:"user"`), never on the LLM library framing.
-- `static.edges` is the cluster's real call graph; `static.subcluster_refs` are trustworthy call
-  linkages into child clusters (`child_root_rva`).
-- Use `llm.verify_against.key_function_rvas` as the must-read set and `llm.mitre[].rationale` as the
-  claim to confirm. `llm.resolved_relationships` pre-resolves the cluster's prose `cluster.id.NNNN`
-  references to root RVAs; `llm.unresolved_run_ids` is an honest gap — do not invent that edge.
+**Step 4 (read the bodies) — THIS IS STILL YOUR JOB.** Walk `investigation_queue` top-down. **`score`
+sets the ORDER you work in, not a skip license — every queue item must be dispositioned** (Step 6);
+the queue is xrefer's triaged shortlist, so a dropped item is signal you chose not to look at. Each
+item's `must_read_rvas` is the bounded depth floor and `detail_ref` names its Tier-1 file. For each
+item open `clusters/<root_rva>.json`:
+- `r2_decompile` the root **and every `must_read_rvas` function** (= `llm.verify_against.key_function_
+  rvas` — the artifact-bearing members), jumping to `static.artifacts.*.call_site_rvas`. **The root
+  alone is not a disposition** — it is often just a dispatcher; the body that *makes* the call is
+  usually a member. Skip a function only on the STATIC `category=="func_lib"` / `is_simple_api_thunk`
+  (prioritize `origin:"user"`), never on the LLM library framing.
+- **Follow the behavior down the call chain.** `static.edges` is the cluster's real call graph and
+  `static.subcluster_refs` (`child_root_rva`) are trustworthy linkages into child clusters — step into
+  any child that consumes a parameter you care about.
+- `llm.mitre[].rationale` is the exact claim to confirm. `llm.resolved_relationships` pre-resolves the
+  cluster's prose `cluster.id.NNNN` references to root RVAs; `llm.unresolved_run_ids` is an honest gap
+  — do not invent that edge.
 
 **Step 5 (annotate) — on evidence.** After you confirm a function, name it what the body does with
 `r2_rename` and `r2_set_comments` (xrefer supplies `llm.function_prefix` as a *suggested* prefix only —
 a hypothesis, not a name to apply blind). Never apply a name you have not earned by reading the body.
 `r2_save_project` at the end of a block.
 
-**Step 6 (report)** — re-check the hard gate: every capability must trace to a body you read. Speak
-MITRE technique-ids aligned with the `mitre` kill-chain (`tactics_kill_chain_order`; each technique's
-`groundings[].cluster_root_rva` + `rationale` point at the cluster to confirm and the exact claim to
-test; `empty_tactics` = the LLM mapped no technique there, NOT proof of absence — a static
-`danger_floor` on a cluster overrides it). Build the report from **static counts + behaviors you
-confirmed**, citing
-addresses/functions — **not** from `indices/report.md` (LLM narrative, reference only; its header says
-so). Mark any xrefer hypothesis you could not confirm as unverified. Pivot IOCs through
-`get_context_for_hash` / `get_ioc_assessment` and drop noisy ones.
+**Step 6 (report)** — open with a **disposition ledger: one row per `investigation_queue` item**
+(`confirmed` = root + all `must_read_rvas` read / `dismissed` = read enough to justify, state the
+evidence / `blocked` = tooling failure, give the error+RVA). **No queue item may be silently absent.**
+Cite the specific **member** RVA (at its call site) whose body proves each capability — not the cluster
+root. State which demoted set you did not open (`stats.clusters_library`); the queue is not the whole
+binary. Speak MITRE technique-ids aligned with the kill-chain (`tactics_kill_chain_order`; each
+technique's `groundings[].cluster_root_rva` + `rationale` point at the cluster to confirm and the exact
+claim to test; `empty_tactics` = the LLM mapped no technique there, NOT proof of absence — a static
+`danger_floor` overrides it). Build the report from **static counts + behaviors you confirmed** —
+**not** from `indices/report.md` (LLM narrative, reference only). Mark any xrefer hypothesis you could
+not confirm as unverified. Pivot IOCs through `get_context_for_hash` / `get_ioc_assessment`.
 
 ## 5. Query cookbook (map field → next r2 call)
 
@@ -104,11 +112,13 @@ so). Mark any xrefer hypothesis you could not confirm as unverified. Pivot IOCs 
 
 ## 6. Noise, library demotion, completeness
 
-Do not conclude "clean" just because the queue is short — the safety net is **static**:
+Do not conclude "clean" just because the queue is short — the safety net is **static**. And note:
+**budget-saving means leaving demoted `clusters_index` rows unread — never an `investigation_queue`
+item** (every queue item must be dispositioned, Step 6).
 - `clusters_index` lists **every** cluster (signal + demoted). A row with `is_library:true` and
   `detail_ref:null` was excluded from the queue and Tier-1. `library_kind` distinguishes `"static"`
-  (deterministic FUNC_LIB — safe to skip) from `"llm"` (the `library_or_runtime` guess — a **budget
-  lever**: skip to save decompiler budget, but it is visible, not triaged).
+  (deterministic FUNC_LIB — safe to leave unread) from `"llm"` (the `library_or_runtime` guess — the
+  **budget lever**: leave unread to save budget, but it is visible, not triaged).
 - Any cluster with `danger_floor` set (process-injection / crypto / net-exfil / cred-access imports) or
   `promoted_from_noise:true` reaches the danger set statically and is force-kept in the queue even if
   the LLM called it library — so a mislabeled payload cannot hide. Never skip on the LLM library flag

@@ -63,59 +63,74 @@ Read `_readme.provenance`. Two kinds of value live in this file:
 
 ## 3. The capability gate — ALWAYS applies (`_readme.capability_gate_applies` is always true)
 
-**No capability sentence in your report without a decompiled body behind it.** For each cluster's
-`llm.verify_against.key_function_rvas`, `r2_decompile` every RVA, read the body, and only then may you
-repeat the cluster's `label`/`description`/`mitre`. This holds in degraded mode too: with
-`meta.has_llm_layer == false` there are no hypotheses to confirm, but `investigation_queue[].why` and
-the static evidence are still only LEADS (where to point r2), never findings.
+**No capability sentence in your report without a decompiled body behind it — and that body is
+usually a cluster *member*, not the root.** Every queue item carries `must_read_rvas` (the same set as
+the cluster's `llm.verify_against.key_function_rvas`): the artifact-bearing functions that actually
+make the API calls / hold the strings. **A cluster is NOT dispositioned until you `r2_decompile` every
+one of its `must_read_rvas` at its `call_site_rvas`.** Decompiling only `ref_rva` (the root) is an
+incomplete triage — the root is frequently just a dispatcher, and the behavior lives one or more hops
+down. Only after reading the member bodies may you repeat the cluster's `label`/`description`/`mitre`.
+This holds in degraded mode too: with `meta.has_llm_layer == false` there are no hypotheses to confirm,
+but `investigation_queue[].why` and the static evidence are still only LEADS (where to point r2).
 
-## 4. The loop
+## 4. The loop — process EVERY queue item; score is order, not a skip license
 
-Walk `investigation_queue` — a ranked to-do list, each item's `first_move` is a literal starting r2
-call and `ref_rva` is the cluster root (= the address to `r2_decompile`). For each item:
-- Open the matching entry in `clusters[]` (match `root_rva == ref_rva`).
-- `r2_decompile` its `static.functions`, jumping to each function's `artifacts.*.call_site_rvas` (the
-  exact instructions). **Skip a function only on the STATIC signals** `category=="func_lib"` /
-  `is_simple_api_thunk` unless a lead points in. Do NOT skip on library framing from the LLM layer —
-  it can hide a mislabeled malicious function.
-- `indirect_artifact_count` on a function marks a behavior-gating hub/dispatcher — high count = read
-  it first.
-- `reachability.via_path_rvas` is one static path from entry to the root; `n_paths` is how many exist.
-- `static.subcluster_refs[].at_node_rva`→`child_cluster_id` are real call linkages (trustworthy).
-- Use `llm.verify_against.key_function_rvas` as the must-read set and `llm.mitre[].rationale` as the
-  claim to confirm. Note `static.functions_omitted` > 0 means the single file dropped low-signal
-  members of this cluster — the tiered bundle (or `r2_callees` from the root) has the rest.
+Walk `investigation_queue` top to bottom. **`static_score` sets the ORDER you work in; it does NOT
+license skipping.** Every queue item must end in a disposition (§6) — the queue is already xrefer's
+triaged shortlist, so an item you drop is signal you chose not to look at. For each item:
+- Open `clusters[]` (match `root_rva == ref_rva`). `r2_decompile` the root **and every
+  `must_read_rvas` function**, jumping to each function's `artifacts.*.call_site_rvas` (the exact
+  instructions). `first_move` is the ready call.
+- **Follow the behavior down the call chain — do not stop at the root.** The single file drops the
+  cluster `edges` for size and caps its member list (`static.functions_omitted > 0` says how many were
+  dropped), so recover the rest with `r2_callees` from the root and step into any child that consumes a
+  parameter you care about. Trace how the root passes data to the leaf API calls; the body that *makes*
+  the call is what proves the capability, and it is frequently a child.
+- Skip a *function inside a cluster* only on the STATIC signals `category=="func_lib"` /
+  `is_simple_api_thunk`. Never skip on LLM library framing — it can hide a mislabeled payload.
+- `indirect_artifact_count` marks a behavior-gating hub — read it first. `reachability.via_path_rvas`
+  shows how entry reaches the root (its second-to-last node is the caller = the trigger).
+  `static.subcluster_refs[].at_node_rva`→`child_cluster_id` are real call linkages.
+- Use `llm.mitre[].rationale` as the exact claim to confirm in the body.
 
-## 5. Anti-hiding — you cannot conclude "clean" on a curated map
+## 5. Anti-hiding — the budget lever is the noise ledger, NOT the queue
 
-A single file can't hold a big binary, so clusters are curated and library-demoted. The safety net is
-**static**, not the LLM's opinion:
+**Budget-saving means skipping the demoted `noise` ledger below — never an `investigation_queue`
+item.** The queue is the must-do set (§4). The `noise` block is what you are allowed to leave unread,
+and even that has a static safety net:
+- `noise.static_lib_count` / `static_lib_sample_rvas` (every member hit the static FUNC_LIB/thunk path)
+  is deterministic library code, collapsed to a count — safe to skip.
+- `noise.llm_lib_demoted` (LLM `library_or_runtime` guess, `{v,src}`-tagged, NOT statically confirmed)
+  is the actual budget lever: you **MAY leave these unread to save decompiler budget** — that is their
+  purpose — **but they are visible, not triaged.** Open one if a lead points into it or it appears in
+  `coverage.omitted.notable_rvas`.
 - `coverage.omitted.notable_rvas` lists, by RVA, every omitted cluster that **statically** reaches a
   danger floor (process-injection / crypto / net-exfil / cred-access imports). You **must r2-triage
   every one** before any completeness or "benign" verdict (see `coverage.omitted.note`).
-- `noise.promoted_out`, and any queue/cluster item with `promoted_from_noise:true`, are clusters the
-  LLM called "library" but that statically reach the danger set — treat them as normal queue items.
-- `noise.static_lib_count` / `static_lib_sample_rvas` (every member hit the static FUNC_LIB/thunk
-  path) is deterministic library code, collapsed to a count — safe to skip.
-- `noise.llm_lib_demoted` (LLM `library_or_runtime` guess, `{v,src}`-tagged, NOT statically confirmed)
-  is the budget lever: you **MAY skip these to save decompiler budget** — that is their purpose — **but
-  they are visible, not triaged.** Analyze one if budget allows, a lead points into it, or it shows up
-  in `coverage.omitted.notable_rvas`. Any llm_lib cluster reaching a danger floor is already
-  force-promoted (`promoted_out`), so a payload the LLM mislabeled "library" cannot hide here. Never
-  skip on the LLM library flag when a static danger signal disagrees.
+- `noise.promoted_out`, and any item with `promoted_from_noise:true`, are clusters the LLM called
+  "library" but that statically reach the danger set — already force-kept in the queue, so a
+  mislabeled payload cannot hide. Never skip on the LLM library flag when a static `danger_floor`
+  disagrees.
 
 ## 6. OUTPUT CONTRACT (this is where the gate is enforced)
 
 Follow `report_scaffold.output_contract`. Your report is checkable by re-reading it:
-1. **First block is a coverage header**, computed from the functions you actually decompiled — e.g.
-   *"Coverage: 4 clusters confirmed via r2 / 15 shown / N omitted (unread danger-floor RVAs: none)."*
-   An agent that skipped decompiling shows "0 confirmed" and the incompleteness is visible.
-2. **Every capability sentence quotes the decompiled body excerpt at its cited RVA.** No body quote,
-   no claim.
-3. **Attribute every hypothesis:** "xrefer proposed X; I confirmed via r2_decompile @RVA" or "xrefer
+1. **Disposition ledger FIRST — one row per `investigation_queue` item**, with a status: `confirmed`
+   (you read the root + all its `must_read_rvas`), `dismissed` (you read enough to justify it — state
+   the evidence, e.g. "root + members are statically-linked zlib"), or `blocked` (a tooling failure —
+   give the exact error and RVA). **No queue item may be silently absent.** A ledger with unexplained
+   gaps is an incomplete analysis.
+2. **Coverage header** computed from what you actually decompiled — e.g. *"12 confirmed / 2 dismissed /
+   1 blocked of 15 queued; unread danger-floor RVAs: none."*
+3. **Every capability sentence cites the specific member RVA (at its call site) whose body proves it,
+   with the decompiled excerpt** — a claim citing only the cluster root, or with no body quote, is
+   rejected.
+4. **Attribute every hypothesis:** "xrefer proposed X; I confirmed via r2_decompile @RVA" or "xrefer
    proposed X; UNCONFIRMED" — never a bare `xrefer_llm_guess` value as fact.
-4. **No "benign"/completeness** while any `coverage.omitted.notable_rvas` RVA is unread.
-5. Speak MITRE technique-ids for the TTP section; pivot IOCs via `get_context_for_hash` /
+5. **The queue is not the whole binary.** No "benign"/completeness verdict while any
+   `coverage.omitted.notable_rvas` RVA is unread, and state plainly which demoted set you did not open
+   (`_readme.counts.clusters_llm_lib` / `clusters_static_lib`).
+6. Speak MITRE technique-ids for the TTP section; pivot IOCs via `get_context_for_hash` /
    `get_ioc_assessment` and drop noisy ones. List unverified xrefer hypotheses explicitly.
 
 ## 7. Identity, degraded mode, anti-patterns
