@@ -27,7 +27,7 @@ is for binaries too large for the single-file `binary_anatomy`: everything is sp
 ## 2. THE HARD GATE STILL APPLIES (read this twice)
 
 Everything with `"provenance":"llm"` — cluster `label`, `function_prefix`, `mitre`, the `binary`
-verdict, each `one_line` — is a **"listing": a hypothesis that satisfies your gate for nothing.** Your
+verdict — is a **"listing": a hypothesis that satisfies your gate for nothing.** Your
 rule is unchanged: *no capability claim without a function body read; no confirmed function left
 unnamed; rename only on evidence.* The map's value is that it names **exactly which body** proves each
 hypothesis (`llm.verify_against.key_function_rvas` / `static.artifacts.*.call_site_rvas`). A report
@@ -43,8 +43,9 @@ classification). See `provenance_legend` — and its `correction`: cluster `is_l
   one known function first.
 - The bundle matches this sample **iff `image.sha256` == your `r2_init_project` sha256.** If it does
   not, do not apply these RVAs or any rename — it is a different sample.
-- **Cluster identity is `root_rva`** (also the address to `r2_decompile`). `run_ref` (`cluster.id.NNNN`)
-  is run-local — never use it as a stable key.
+- **Cluster identity is `root_rva`** (also the address to `r2_decompile`). The `cluster.id.NNNN` tokens
+  that appear inside a cluster's `llm.relationships` are run-local — never use them as keys; each is
+  pre-resolved to a `root_rva` for you in that cluster's `llm.resolved_relationships`.
 
 ## 4. Step-by-step: how the map folds into format_binary
 
@@ -82,8 +83,10 @@ a hypothesis, not a name to apply blind). Never apply a name you have not earned
 
 **Step 6 (report)** — re-check the hard gate: every capability must trace to a body you read. Speak
 MITRE technique-ids aligned with the `mitre` kill-chain (`tactics_kill_chain_order`; each technique's
-`groundings[].cluster_root_rva` + `cluster_root_rvas` point at the clusters to confirm; `empty_tactics`
-are unmapped). Build the report from **static counts + behaviors you confirmed**, citing
+`groundings[].cluster_root_rva` + `rationale` point at the cluster to confirm and the exact claim to
+test; `empty_tactics` = the LLM mapped no technique there, NOT proof of absence — a static
+`danger_floor` on a cluster overrides it). Build the report from **static counts + behaviors you
+confirmed**, citing
 addresses/functions — **not** from `indices/report.md` (LLM narrative, reference only; its header says
 so). Mark any xrefer hypothesis you could not confirm as unverified. Pivot IOCs through
 `get_context_for_hash` / `get_ioc_assessment` and drop noisy ones.
@@ -110,8 +113,8 @@ Do not conclude "clean" just because the queue is short — the safety net is **
   `promoted_from_noise:true` reaches the danger set statically and is force-kept in the queue even if
   the LLM called it library — so a mislabeled payload cannot hide. Never skip on the LLM library flag
   when a static `danger_floor` disagrees.
-- `stats.clusters_excluded_from_tier1` tells you how many clusters were demoted; a mislabeled cluster
-  is recoverable — re-examine one if you suspect it (`stats.note`).
+- `stats.clusters_library` tells you how many clusters were demoted (excluded from the queue and
+  Tier-1); a mislabeled cluster is recoverable — re-examine one if you suspect it.
 
 ## 7. Degraded mode and backend_live
 
@@ -130,15 +133,15 @@ Do not conclude "clean" just because the queue is short — the safety net is **
 ## 8. Anti-patterns
 
 Do NOT: report a capability you only saw in the map (no body read); apply a `function_prefix` before
-verifying; treat `label`/`mitre`/the `binary` verdict as fact; use absolute VAs or `run_ref` as stable
-keys; ask the map for a full callgraph or all-paths you can get from r2; or treat the map as exhaustive
-(library/orphan functions it demotes still exist — `stats.clusters_excluded_from_tier1` names what was
-skipped).
+verifying; treat `label`/`mitre`/the `binary` verdict as fact; use absolute VAs or run-local
+`cluster.id.NNNN` tokens as stable keys; ask the map for a full callgraph or all-paths you can get from
+r2; or treat the map as exhaustive (library/orphan functions it demotes still exist —
+`stats.clusters_library` names what was skipped).
 
 ## Fields NOT in this bundle (do not look for them)
 
 The shipped bundle deliberately omits fields that have no non-fabricated static source: per-cluster
 `recipe`/`pattern` strings, crypto `carve_targets`, staged `suggested_annotations`, and `all_paths_ref`
 sidecars. Confirm crypto by decompiling the routine and carving its data references yourself; recover
-extra paths with `r2_callees`. `indices/entities.json` carries no LLM `enrichment` — kind/group/name/
-xref_count are the static facts.
+extra paths with `r2_callees`. `indices/entities.json` carries only static facts — `idx`/`kind`/`name`/
+`xref_count` (plus a static capa `namespace` on capa entities); no LLM category/enrichment.

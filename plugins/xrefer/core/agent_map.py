@@ -359,7 +359,6 @@ class _Builder:
             shown += 1
             node = {
                 "root_rva": root_rva,
-                "run_ref": f"cluster.id.{cl.id_str}",
                 "parent_cluster_id": cl.parent_cluster_id,
                 "static_lib": static_lib,
                 "llm_lib": _llm(True) if llm_lib else None,
@@ -373,7 +372,7 @@ class _Builder:
             queue.append({
                 "kind": "cluster", "ref_rva": root_rva, "static_score": round(score, 3),
                 "danger_floor": danger, "promoted_from_noise": promoted or None,
-                "why": why, "first_move": f"r2_decompile {root_rva}", "done": False,
+                "why": why, "first_move": f"r2_decompile {root_rva}",
             })
 
         queue.sort(key=lambda q: q["static_score"], reverse=True)
@@ -391,8 +390,7 @@ class _Builder:
             "entry_anchor": {"application_roots_rva": [c["root_rva"] for c in clusters_out[:5]],
                              "read_first_rva": [queue[0]["ref_rva"]] if queue else []},
             "verdict": {"claim": {"v": self.ca.get("binary_category") if has_llm else None, "src": GUESS,
-                                  "verdict": None,
-                                  "description": _llm(self.ca.get("binary_description")) if has_llm else None}},
+                                  "verdict": None}},
             "investigation_queue": queue,
             "clusters": clusters_out,
             "noise": {"static_lib_count": len(static_lib_roots),
@@ -682,13 +680,11 @@ class _Builder:
             child_root = self._id_to_root.get(child_id)
             subrefs.append({
                 "at_node_rva": self.rva(node_ea),
-                "child_run_ref": f"cluster.id.{child_id:04d}",
                 "child_root_rva": self.rva(child_root) if child_root is not None else None,
-                "note": "static call linkage from FunctionalCluster.cluster_refs (trustworthy edge; not an LLM guess)",
             })
         return {
             "identity": {
-                "root_rva": rec["root_rva"], "run_ref": f"cluster.id.{cl.id_str}",
+                "root_rva": rec["root_rva"],
                 "parent_root_rva": rec["parent_root_rva"], "is_library": rec["is_lib"],
                 "library_kind": rec["library_kind"], "danger_floor": rec["danger"],
                 "promoted_from_noise": rec["promoted"] or None,
@@ -729,7 +725,7 @@ class _Builder:
             llm = self._cluster_llm_full(cl, {}) if (has_llm and r["signal"]) else None
             tactics = sorted({m["tactic"] for m in (llm or {}).get("mitre", []) if m.get("tactic")}) if llm else []
             rows.append({
-                "root_rva": r["root_rva"], "run_ref": f"cluster.id.{cl.id_str}",
+                "root_rva": r["root_rva"],
                 "is_library": r["is_lib"], "library_kind": r["library_kind"],
                 "danger_floor": r["danger"], "promoted_from_noise": r["promoted"] or None,
                 "node_count": len(cl.nodes), "subcluster_count": len(getattr(cl, "subclusters", None) or []),
@@ -746,22 +742,19 @@ class _Builder:
         for r in records:
             if not r["signal"]:
                 continue
-            cl = r["cl"]
-            llm = self._cluster_llm_full(cl, {}) if has_llm else None
-            bearing = self._artifact_bearing(cl)
-            focus = self.rva(bearing[0]) if bearing else r["root_rva"]
+            # first_move targets the cluster ROOT (the r2 jump target). The label lives
+            # once on clusters_index[]; do not duplicate it here.
             items.append({
                 "kind": "cluster", "ref": r["root_rva"], "score": round(r["score"], 3),
                 "why": r["why"], "danger_floor": r["danger"], "promoted_from_noise": r["promoted"] or None,
-                "one_line": ({"provenance": "llm", "text": (llm or {}).get("label")} if llm and (llm or {}).get("label") else None),
                 "detail_ref": f"clusters/{r['root_rva']}.json",
-                "first_move": f"open clusters/{r['root_rva']}.json; r2_decompile {focus} at its static.artifacts call_site_rvas",
+                "first_move": f"open clusters/{r['root_rva']}.json; r2_decompile {r['root_rva']} (the cluster root), then its static.artifacts call_site_rvas",
             })
         for o in orphans:
             items.append({
                 "kind": "orphan", "ref": o["func_rva"], "score": 0.5,
                 "why": ["artifact-bearing but UNREACHABLE from entry (likely callback/TLS/export)"],
-                "danger_floor": None, "promoted_from_noise": None, "one_line": None,
+                "danger_floor": None, "promoted_from_noise": None,
                 "detail_ref": None, "first_move": o["next"],
             })
         items.sort(key=lambda q: q["score"], reverse=True)
@@ -786,21 +779,17 @@ class _Builder:
                 order_index = len(MITRE_TACTIC_ORDER)
             techs = []
             for t in group.techniques:
-                groundings, resolved = [], []
+                groundings = []
                 for g in t.groundings:
                     root = self._id_to_root.get(g.cluster_id)
                     rrva = self.rva(root) if root is not None else None
-                    groundings.append({"cluster_root_rva": rrva, "cluster_label": g.cluster_label, "rationale": g.rationale})
-                    if rrva:
-                        resolved.append(rrva)
+                    # cluster_root_rva is the verify pointer (resolve the label via clusters_index).
+                    groundings.append({"cluster_root_rva": rrva, "rationale": g.rationale})
                 techs.append({"id": t.id, "name": t.name, "url": mitre_attack_url(t.id),
-                              "groundings": groundings, "cluster_root_rvas": sorted(set(resolved))})
+                              "groundings": groundings})
             tactics.append({"tactic": group.tactic, "order_index": order_index, "techniques": techs})
         return {
             "provenance": "llm",
-            "verify": ("MITRE mappings are LLM-extracted; rationale is the ONLY evidence link. r2_decompile "
-                       "each grounding cluster to confirm before repeating a technique claim."),
-            "exporters_available": ["navigator", "stix", "csv"],
             "tactics_kill_chain_order": tactics,
             "empty_tactics": list(matrix.uncovered_tactics),
         }
@@ -890,8 +879,13 @@ class _Builder:
                 xc = len(self.x.entity_xrefs.get(idx, ()) or ())
             except Exception:
                 xc = 0
-            out.append({"idx": idx, "kind": kinds.get(int(type_id), str(type_id)),
-                        "group": (str(group) if group is not None else None), "name": name, "xref_count": xc})
+            kind = kinds.get(int(type_id), str(type_id))
+            row = {"idx": idx, "kind": kind, "name": name, "xref_count": xc}
+            # entity[0] is the capa NAMESPACE for capa (static, useful) but the LLM-assigned
+            # category for api/lib and "UNCATEGORIZED" for strings — keep only the static one.
+            if kind == "capa" and group is not None:
+                row["namespace"] = str(group)
+            out.append(row)
         return out
 
     def _report_md(self, has_llm: bool) -> Optional[str]:
@@ -938,14 +932,10 @@ class _Builder:
             "format": fmt,
             "bits": bits,
             "image_base_va": f"0x{self.ib:x}",
-            "join_key": "rva",
             "entry_points_rva": [self.rva(self.ep)] if self.ep is not None else [],
             "recipe": ("r2_addr = r2_baddr + rva. For a normally-mapped image r2_baddr == image_base_va. "
                        "If your r2 session is rebased (PIE/ASLR/-B), substitute your own baddr and confirm "
-                       "against one known function before trusting the rest."),
-            "note": ("sha256 is the integration key: r2_init_project keys its project by the same sha256, so a "
-                     "map is present iff it matches your sample. *_va fields are informational; *_rva fields are "
-                     "the portable join key. REFUSE to apply RVAs/annotations on a sha256 mismatch."),
+                       "against one known function. sha256 is the bind key: REFUSE to apply RVAs on a mismatch."),
         }
 
     def _provenance_legend(self) -> Dict[str, Any]:
@@ -1025,21 +1015,17 @@ class _Builder:
         functions_total = len(self.gx)
         stats = {
             "functions_total": functions_total,
-            "user_functions": functions_total - lib_funcs,
             "library_functions": lib_funcs,
             "clusters_total": len(records),
             "clusters_signal": clusters_signal,
             "clusters_library": len(records) - clusters_signal,
-            "clusters_excluded_from_tier1": len(records) - clusters_signal,
             "entities_total": len(self.entities),
             "orphan_count": len(orphans),
             "has_api_trace": any(int(self.entities[i][2]) == 5 for i in range(len(self.entities))),
             "backend_live": self._backend_live,
-            "note": ("Library/noise clusters are flagged, excluded from the queue and Tier-1 dossiers, but still "
-                     "listed in clusters_index and one fetch away. A 'library' cluster is recoverable if you "
-                     "suspect mislabeling. backend_live=false means this was a headless load-from-cache export: "
-                     "per-function has_default_name is null and category/origin come from persisted cluster "
-                     "membership (static func_lib detection needs the live backend, i.e. the in-tool export)."),
+            "backend_live_note": ("false = headless load-from-cache: has_default_name is null and "
+                                  "category/origin come from persisted membership (static func_lib detection "
+                                  "and library_functions need the live backend)."),
         }
 
         top_roots = [r["root_rva"] for r in records if r["signal"]][:5]
@@ -1050,10 +1036,6 @@ class _Builder:
                 "address_encoding": "hex-string RVA relative to image_base; see image.recipe",
                 "workflow_binding": {
                     "target_skill": "format_binary (persistent radare2 project, sha256-keyed)",
-                    "note": ("This map pre-computes format_binary Step 2 (triage) and Step 3 (indicator->code "
-                             "pivots), delivering you into Step 4 (read the bodies). It does NOT satisfy the hard "
-                             "gate: every llm value is a 'listing' hypothesis you must confirm by r2_decompile'ing "
-                             "the body before you claim it or apply an annotation."),
                     "section_to_step": {
                         "investigation_queue": "Step 2/3: your ranked shortlist of functions that matter",
                         "indices/reverse_index.json": "Step 3: precomputed r2_xrefs_to (artifact -> functions)",
@@ -1065,23 +1047,15 @@ class _Builder:
             },
             "image": self._image_block(),
             "entry_anchor": {
-                "entry_points_rva": [self.rva(self.ep)] if self.ep is not None else [],
                 "application_roots_rva": top_roots,
                 "read_first_rva": ([queue[0]["ref"]] if queue else []),
-                "runtime_note": ("Application logic lives in the signal clusters (application_roots_rva); clusters "
-                                 "flagged is_library are runtime/library. For a Go or stripped sample, read the "
-                                 "highest-scored signal roots first and treat library clusters as ignorable."),
             },
             "provenance_legend": self._provenance_legend(),
             "stats": stats,
             "binary": {
                 "provenance": "llm",
                 "category": self.ca.get("binary_category") if has_llm else None,
-                "description": self.ca.get("binary_description") if has_llm else None,
                 "report_ref": ("indices/report.md" if report_md else None),
-                "report_present": bool(report_md),
-                "verify": ("category/description are LLM verdicts. Confirm against the clusters and your own "
-                           "r2_decompile output before repeating them."),
             },
             "investigation_queue": queue,
             "clusters_index": clusters_index,
@@ -1182,7 +1156,7 @@ def export_agent_map(xrefer: Any, out_dir: str) -> str:
     for root_rva in bundle["signal_order"]:
         rel = f"clusters/{root_rva}.json"
         nbytes = _write(os.path.join(out_dir, rel), bundle["clusters"][root_rva])
-        tier1_files.append({"path": rel, "root_rva": root_rva, "bytes": nbytes})
+        tier1_files.append({"path": rel, "bytes": nbytes})
 
     # Tier-2: indices + entities + report.
     tier2: List[Dict[str, Any]] = []
@@ -1217,7 +1191,6 @@ def export_agent_map(xrefer: Any, out_dir: str) -> str:
 
     # Finalize the manifest and write Tier-0 map.json.
     bundle["map"]["manifest"] = {
-        "tier1_dir": "clusters/",
         "tier1_files": tier1_files,
         "tier2": tier2,
         "skill": ("SKILL.md" if skill_present else None),

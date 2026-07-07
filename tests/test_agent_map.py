@@ -227,8 +227,11 @@ def test_investigation_queue_is_static_ranked():
     top = q[0]
     assert top["ref"] == rva(0x402000)
     assert top["danger_floor"] == "process_injection"
-    # one_line is an llm hypothesis, tagged
-    assert top["one_line"]["provenance"] == "llm"
+    # first_move must target the cluster's own root (regression: it used to point at the
+    # lowest-address shared member, which was wrong for most clusters)
+    assert top["ref"] in top["first_move"]
+    # the label is NOT duplicated onto the queue; it lives once on clusters_index
+    assert "one_line" not in top
 
 
 def test_tier1_verify_against_points_at_real_functions():
@@ -298,12 +301,12 @@ def test_degrade_without_llm_layer():
     mp = b["map"]
     assert mp["schema"]["has_llm_layer"] is False
     assert mp["binary"]["category"] is None
-    assert mp["binary"]["report_present"] is False
+    assert mp["binary"]["report_ref"] is None
     assert mp["mitre"] is None
     assert b["report_md"] is None
-    # queue is still populated and purely static-scored
+    # queue is still populated and purely static-scored, with no LLM label duplicated in
     assert mp["investigation_queue"], "static queue must survive without LLM"
-    assert mp["investigation_queue"][0]["one_line"] is None
+    assert "one_line" not in mp["investigation_queue"][0]
     # signal cluster detail carries no llm block but full static evidence
     detail = b["clusters"][rva(0x402000)]
     assert detail["llm"] is None

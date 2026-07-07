@@ -120,16 +120,16 @@ Follow `report_scaffold.output_contract`. Your report is checkable by re-reading
 
 ## 7. Identity, degraded mode, anti-patterns
 
-- **Cluster identity is `root_rva`.** `run_ref` (`cluster.id.NNNN`) is run-local — never a stable key.
-  A cluster `llm.relationships` string may name other `cluster.id.NNNN`; resolve those to a root
-  yourself only via the tiered bundle's resolver — do not invent an edge from prose.
+- **Cluster identity is `root_rva`.** A cluster `llm.relationships` string may name other clusters as
+  run-local `cluster.id.NNNN` tokens — never use those as stable keys, and do not invent an edge from
+  the prose; identity is always `root_rva`.
 - **Degraded (`meta.has_llm_layer:false`):** `verdict`, every cluster `llm` block, and `llm_lib`
   collapse to null; the queue is scored purely on static signals. The static skeleton (clusters,
   reachability, artifacts+call_site_rvas, danger_floor, coverage.omitted) is still a complete
   Step-2/3 accelerator — proceed on structure and derive the verdict yourself.
 - Do NOT: report from the paste (any capability without a body quote); treat `noise`/omission as
-  "already triaged"; conclude "clean" with unread `notable_rvas`; use `run_ref` as a key; assume the
-  base equals `image_base`.
+  "already triaged"; conclude "clean" with unread `notable_rvas`; use a run-local `cluster.id.NNNN`
+  token as a key; assume the base equals `image_base`.
 
 ## Fields NOT in this format (do not look for them)
 
