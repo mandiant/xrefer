@@ -42,7 +42,11 @@ from xrefer.core.helpers import find_cluster_analysis, log
 SCHEMA_VERSION = "2.0.0"
 SENTINEL = "XREFER_ANATOMY_EOF"
 GUESS = "xrefer_llm_guess"
-MAX_SIGNAL_CLUSTERS = 40  # single-file cap; beyond this -> omission ledger + fallback advice
+MAX_SIGNAL_CLUSTERS = 15    # single-file must stay pasteable; beyond this -> omission ledger / tiered bundle
+MAX_FUNCS_PER_CLUSTER = 6   # curation: keep the most artifact-dense functions per cluster (+ root)
+MAX_CALL_SITES = 3          # curation: call-site RVAs kept per artifact
+MAX_ARTIFACTS_PER_TYPE = 5  # curation: apis/strings/capa/api_trace kept per function
+MAX_STR_LEN = 80            # curation: truncate long string/artifact names
 
 # Deterministic danger-floor API-name sets, matched on the lowercased API basename.
 # STATIC: independent of any LLM flag. A cluster reaching one of these is never
@@ -95,6 +99,8 @@ class _Builder:
         except Exception as e:  # pragma: no cover - defensive
             log(f"[agent_map] classify_functions failed ({e}); origin left best-effort")
             self.placements = {}
+        # entity indices actually cited by shown functions (drives a lean entities catalog)
+        self._referenced: Set[int] = set()
         # reachable-node set for orphan detection
         self._reach_nodes: Set[int] = set()
         if self.ep is not None:
@@ -126,18 +132,24 @@ class _Builder:
         d = self._entry(ea, self.DIRECT)
         if not d:
             return out
+        # Curation: drop library refs (low signal); keep apis/strings/capa/api_trace, capped per type.
         for setkey, eakey, outkey in (
             ("imports", "imports_ea", "apis"), ("strings", "strings_ea", "strings"),
-            ("libs", "libs_ea", "libs"), ("capa", "capa_ea", "capa"),
-            ("api_trace", "api_trace_ea", "api_trace"),
+            ("capa", "capa_ea", "capa"), ("api_trace", "api_trace_ea", "api_trace"),
         ):
-            for idx in sorted(d.get(setkey, ())):
+            idxs = sorted(d.get(setkey, ()))
+            for idx in idxs[:MAX_ARTIFACTS_PER_TYPE]:
                 try:
-                    name = self.entities[idx][1]
+                    name = str(self.entities[idx][1])
                 except Exception:
                     name = str(idx)
+                if len(name) > MAX_STR_LEN:
+                    name = name[:MAX_STR_LEN] + "…"
                 sites = sorted(self.rva(a) for a in d.get(eakey, {}).get(idx, ()))
-                out[outkey].append({"entity_idx": idx, "name": name, "call_site_rvas": sites})
+                entry = {"entity_idx": idx, "name": name, "call_site_rvas": sites[:MAX_CALL_SITES]}
+                if len(sites) > MAX_CALL_SITES:
+                    entry["call_sites_omitted"] = len(sites) - MAX_CALL_SITES
+                out[outkey].append(entry)
         return {k: v for k, v in out.items() if v}
 
     # ---------------- cluster-level static ----------------
@@ -174,9 +186,23 @@ class _Builder:
         }
 
     def _cluster_static(self, cluster: Any) -> Dict[str, Any]:
-        funcs = []
+        root = cluster.root_node
+        raw = []
         for ea in sorted(cluster.nodes):
             arts = self._direct_artifacts(ea)
+            n_direct = sum(len(v) for v in arts.values())
+            raw.append((ea, arts, n_direct))
+        # Curation (single-file must stay pasteable): keep the root + artifact-bearing
+        # functions, densest first, capped. Pure call-graph filler is dropped (the agent
+        # decompiles the root and follows edges itself).
+        keep = [t for t in raw if t[2] > 0 or t[0] == root]
+        keep.sort(key=lambda t: (t[0] != root, -t[2], -self._indirect_count(t[0])))
+        shown = keep[:MAX_FUNCS_PER_CLUSTER]
+        funcs = []
+        for ea, arts, _n in shown:
+            for lst in arts.values():
+                for a in lst:
+                    self._referenced.add(a["entity_idx"])
             funcs.append({
                 "rva": self.rva(ea),
                 "category": self._category(ea),
@@ -184,10 +210,14 @@ class _Builder:
                 "indirect_artifact_count": self._indirect_count(ea),
                 "artifacts": arts,
             })
-        edges = [[self.rva(s), self.rva(t)] for (s, t) in getattr(cluster, "edges", [])]
+        # Edges dropped for single-file (the agent recovers the call graph with r2_callees);
+        # the cluster grouping + subcluster refs are the non-reproducible part we keep.
         subrefs = [{"at_node_rva": self.rva(n), "child_cluster_id": cid}
                    for n, cid in getattr(cluster, "cluster_refs", {}).items()]
-        return {"functions": funcs, "edges": edges, "subcluster_refs": subrefs}
+        return {"functions": funcs, "function_count": len(cluster.nodes),
+                "artifact_bearing_shown": len(funcs),
+                "functions_omitted": max(0, len(keep) - len(shown)),
+                "subcluster_refs": subrefs}
 
     def _safe_thunk(self, ea: int) -> bool:
         try:
@@ -349,9 +379,11 @@ class _Builder:
         return score, why
 
     def _entities_catalog(self) -> List[Dict[str, Any]]:
+        # Lean: only entities actually cited by a shown function (not the whole ~3k catalog).
         out = []
-        for idx, ent in enumerate(self.entities):
+        for idx in sorted(self._referenced):
             try:
+                ent = self.entities[idx]
                 name, type_id = ent[1], ent[2]
             except Exception:
                 continue
@@ -419,15 +451,17 @@ def build_anatomy(xrefer: Any) -> Dict[str, Any]:
 def export_anatomy(xrefer: Any, out_path: str) -> str:
     """Write the single-file anatomy JSON to ``out_path``; returns the path."""
     data = build_anatomy(xrefer)
+    # Compact JSON so the single file stays chat-pasteable.
+    _dump = lambda o: json.dumps(o, ensure_ascii=False, separators=(",", ":"))
     # fixed-point declared_bytes so the integrity trailer is exact
     data["_end"]["declared_bytes"] = 0
-    raw = json.dumps(data, indent=2)
+    raw = _dump(data)
     cur = len(raw.encode("utf-8"))
     n = cur
     for _ in range(6):
         n = cur - 1 + len(str(n))
     data["_end"]["declared_bytes"] = n
-    raw = json.dumps(data, indent=2)
+    raw = _dump(data)
     with open(out_path, "w", encoding="utf-8") as fh:
         fh.write(raw)
     log(f"[agent_map] wrote {out_path} ({len(raw.encode('utf-8'))} bytes, "
