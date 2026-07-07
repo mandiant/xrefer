@@ -29,6 +29,7 @@ from xrefer.core.agent_map import (
     build_agent_map,
     build_anatomy,
     export_agent_map,
+    export_anatomy,
 )
 
 # Entity type ids (mirror EntityType: 1=lib 2=import 3=string 4=capa 5=api_trace).
@@ -329,6 +330,21 @@ def test_export_writes_bundle_with_consistent_manifest(tmp_path):
             assert (out / c["detail_ref"]).exists()
     # report.md present with the llm layer
     assert (out / "indices" / "report.md").exists()
+    # the consumer skill ships inside the bundle and is named in the manifest
+    assert (out / "SKILL.md").exists()
+    assert mp["manifest"]["skill"] == "SKILL.md"
+    assert "xrefer-agent-map" in (out / "SKILL.md").read_text()  # the real skill content
+
+
+def test_export_anatomy_writes_json_and_companion_skill(tmp_path):
+    out = tmp_path / "anatomy.json"
+    export_anatomy(_XRefer(), str(out))
+    d = json.loads(out.read_text())
+    assert d["_end"]["sentinel"] == "XREFER_ANATOMY_EOF"
+    # the single-file consumer skill lands beside the JSON (one-time install)
+    skill = tmp_path / "binary_anatomy.SKILL.md"
+    assert skill.exists()
+    assert "binary_anatomy" in skill.read_text()
 
 
 def test_export_degrade_omits_report(tmp_path):

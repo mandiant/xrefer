@@ -1098,8 +1098,26 @@ def build_anatomy(xrefer: Any) -> Dict[str, Any]:
     return _Builder(xrefer).build()
 
 
+def _read_agent_skill(filename: str) -> Optional[str]:
+    """Read a packaged agent-skill markdown from ``data/agent_skills/`` (same
+    mechanism as ``data/report_tmpl.html``). Returns None if unavailable so an
+    export never fails just because the skill file is missing."""
+    try:
+        path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                            "data", "agent_skills", filename)
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read()
+    except Exception as e:
+        log(f"[agent_map] agent skill {filename} unavailable: {e}")
+        return None
+
+
 def export_anatomy(xrefer: Any, out_path: str) -> str:
-    """Write the single-file anatomy JSON to ``out_path``; returns the path."""
+    """Write the single-file anatomy JSON to ``out_path``; returns the path.
+
+    Also drops the ``binary_anatomy`` consumer skill next to the JSON (a
+    static, one-time-install document — the JSON itself stays a single
+    pasteable file)."""
     data = build_anatomy(xrefer)
     # Compact JSON so the single file stays chat-pasteable.
     _dump = lambda o: json.dumps(o, ensure_ascii=False, separators=(",", ":"))
@@ -1116,6 +1134,12 @@ def export_anatomy(xrefer: Any, out_path: str) -> str:
         fh.write(raw)
     log(f"[agent_map] wrote {out_path} ({len(raw.encode('utf-8'))} bytes, "
         f"{len(data['clusters'])} signal clusters, has_llm={data['meta']['has_llm_layer']})")
+    skill = _read_agent_skill("binary_anatomy.md")
+    if skill is not None:
+        skill_path = os.path.join(os.path.dirname(os.path.abspath(out_path)), "binary_anatomy.SKILL.md")
+        with open(skill_path, "w", encoding="utf-8") as fh:
+            fh.write(skill)
+        log(f"[agent_map] wrote consumer skill to {skill_path}")
     return out_path
 
 
@@ -1183,12 +1207,22 @@ def export_agent_map(xrefer: Any, out_dir: str) -> str:
         tier2.append({"path": rel, "bytes": len(raw.encode("utf-8")),
                       "load_when": "you want xrefer's LLM narrative (reference only — do NOT use as your report's spine)"})
 
+    # Ship the consumer skill inside the bundle so it is self-describing.
+    skill_present = False
+    skill = _read_agent_skill("xrefer_agent_map.md")
+    if skill is not None:
+        with open(os.path.join(out_dir, "SKILL.md"), "w", encoding="utf-8") as fh:
+            fh.write(skill)
+        skill_present = True
+
     # Finalize the manifest and write Tier-0 map.json.
     bundle["map"]["manifest"] = {
         "tier1_dir": "clusters/",
         "tier1_files": tier1_files,
         "tier2": tier2,
-        "read_order": ["map.json", "top investigation_queue items -> their detail_ref -> Step 4 r2_decompile",
+        "skill": ("SKILL.md" if skill_present else None),
+        "read_order": ["SKILL.md (how to consume this bundle)", "map.json",
+                       "top investigation_queue items -> their detail_ref -> Step 4 r2_decompile",
                        "indices/* only to run a specific pivot"],
     }
     map_path = os.path.join(out_dir, "map.json")
