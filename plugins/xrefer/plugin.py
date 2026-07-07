@@ -80,6 +80,7 @@ class XReferPlugin(idaapi.plugin_t):
             register_menu_action("Edit/XRefer/Organize Functions/", "XRefer:organize_folders", "Organize into Folders (library/user)", OrganizeFoldersHandler())
             register_menu_action("Edit/XRefer/Organize Functions/", "XRefer:remove_all_folders", "Remove All Folders", RemoveAllFoldersHandler())
             register_menu_action("Edit/XRefer/", "XRefer:generate_html_report", "Generate HTML Report", GenerateHtmlReportHandler())
+            register_menu_action("Edit/XRefer/", "XRefer:generate_agent_anatomy", "Export Agent Anatomy (JSON)", GenerateAgentAnatomyHandler())
             register_menu_action("Edit/XRefer/", "XRefer:view_attack_matrix", "View ATT&CK Matrix", ViewAttackMatrixHandler())
             register_menu_action("Edit/XRefer/Configure", "XRefer:Rust:configure", "Configure", XReferSettingsHandler())
             register_menu_action("Edit/XRefer/About", "XRefer:Rust:about", "About", AboutDialogHandler())
