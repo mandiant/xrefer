@@ -51,23 +51,21 @@ GUESS = "xrefer_llm_guess"
 # SINGLE-FILE ONLY cap on emitted signal clusters (the tiered bundle emits every cluster). Keeps the
 # pasteable file bounded; set (21) so a ranked-low payload — e.g. an embedded-crypto engine whose danger
 # floor never fired (typically ~#20) — still makes the file. Danger-floor clusters cut by the cap are
-# flagged in coverage.omitted.notable_rvas, and dependency_bom surfaces crypto crates regardless of the
-# cap, so the crypto-miss the removed 15-cap caused cannot recur here.
+# flagged in coverage.omitted.notable_rvas (anti-hiding); a signal cluster below the cap with no danger
+# floor is not flagged, so keep this generous.
 MAX_SINGLE_FILE_CLUSTERS = 21
 MAX_FUNCS_PER_CLUSTER = 6   # curation: keep the most artifact-dense functions per cluster (+ root)
 MAX_CALL_SITES = 3          # curation: call-site RVAs kept per artifact
 MAX_ARTIFACTS_PER_TYPE = 5  # curation: apis/strings/capa/api_trace kept per function
 MAX_STR_LEN = 80            # curation: truncate long string/artifact names
 
-# Dependency-BOM tiering (options i + ii). A crate root referenced across a large fraction
-# of clusters is pervasive infrastructure (language runtime, or the sample's own ubiquitous
-# core) and is demoted to a compact appendix + filtered out of per-function libs; a
-# cluster-local crate is a SIGNAL dependency (crypto/compression/parsers/…) surfaced first.
-# The split is by reference SPREAD, never by crate NAME, so a novel/renamed crypto crate
-# surfaces exactly like a known one. The floor keeps tiny binaries from over-demoting.
+# Per-cluster libs filter. A crate root referenced across a large fraction of clusters is pervasive
+# infrastructure (language runtime, or the sample's own ubiquitous core) and is dropped from the
+# per-function libs so it does not drown the signal; a cluster-local crate (crypto/compression/parsers/…)
+# is kept. The split is by reference SPREAD, never by crate NAME, so a novel/renamed crypto crate is
+# kept exactly like a known one. The floor keeps tiny binaries from over-demoting.
 RUNTIME_CRATE_MIN_CLUSTERS = 8
 RUNTIME_CRATE_CLUSTER_FRACTION = 0.30
-MAX_BOM_CLUSTERS_PER_CRATE = 6   # cap the crate->cluster pointer list (single-file leanness)
 
 # Deterministic danger-floor API-name sets, matched on the lowercased API basename.
 # STATIC: independent of any LLM flag. A cluster reaching one of these is never
@@ -304,36 +302,17 @@ class _Builder:
         return name.split("::", 1)[0] if name else None
 
     def _crate_index(self) -> Dict[str, Dict[str, Any]]:
-        """Static crate dependency index keyed by crate root, aggregated across the whole
-        binary: reference volume, distinct clusters, entity idxs. Cached.
+        """Static crate index keyed by crate root, over the crates referenced inside clusters:
+        each root's distinct-cluster spread and a pervasive/signal flag. Cached.
 
         A crate referenced across a large fraction of clusters is pervasive infrastructure
         (language runtime, or the sample's own ubiquitous core); a cluster-local crate is a
-        SIGNAL dependency (crypto/compression/parsers). The split is by reference SPREAD,
-        never by crate name, so an embedded crypto crate (chacha20/aes/rsa) surfaces the same
-        way a named one would. Drives the dependency BOM and the per-function libs filter."""
+        SIGNAL dependency (crypto/compression/parsers). The split is by reference SPREAD, never
+        by crate name, so an embedded crypto crate (chacha20/aes/rsa) is kept the same way a
+        named one would be. Drives the per-function libs filter (`_runtime_roots`)."""
         if self._crate_cache is not None:
             return self._crate_cache
         index: Dict[str, Dict[str, Any]] = {}
-        # Reference volume + entity idxs across ALL functions (completeness: includes crates
-        # referenced only by unclustered code).
-        for ea in self.gx:
-            for idx in self._entry(ea, self.DIRECT).get("libs", ()):
-                root = self._crate_root(idx)
-                if root is None:
-                    continue
-                s = index.get(root)
-                if s is None:
-                    s = {"crate": root, "xrefs": 0, "entity_idxs": set(), "clusters": set()}
-                    index[root] = s
-                s["entity_idxs"].add(idx)
-        for s in index.values():
-            for idx in s["entity_idxs"]:
-                try:
-                    s["xrefs"] += len(self.x.entity_xrefs.get(idx, ()) or ())
-                except Exception:
-                    pass
-        # Cluster spread = the pervasiveness signal (and the crate->cluster bridge).
         total_clusters = 0
         for cl in self._iter_clusters():
             total_clusters += 1
@@ -345,8 +324,7 @@ class _Builder:
                     if root is not None:
                         seen.add(root)
             for root in seen:
-                if root in index:
-                    index[root]["clusters"].add(rrva)
+                index.setdefault(root, {"crate": root, "clusters": set()})["clusters"].add(rrva)
         self._crate_cutoff = max(float(RUNTIME_CRATE_MIN_CLUSTERS),
                                  RUNTIME_CRATE_CLUSTER_FRACTION * total_clusters)
         for s in index.values():
@@ -361,44 +339,6 @@ class _Builder:
         if self._runtime_cache is None:
             self._runtime_cache = {r for r, s in self._crate_index().items() if s["pervasive"]}
         return self._runtime_cache
-
-    def _dependency_bom(self, lean: bool) -> Dict[str, Any]:
-        """Binary-level crate/library parts list (option ii). `signal` = cluster-local
-        dependencies (the authoritative view — a linked crypto crate is EVIDENCE here, not
-        noise), ranked most-specific first; `pervasive` = crates spread across most clusters
-        (runtime/infra), kept for completeness. Present in both formats; `lean` drops
-        entity_idxs for the single file (its lean entity catalog would not carry them)."""
-        index = self._crate_index()
-        signal: List[Dict[str, Any]] = []
-        pervasive: List[Dict[str, Any]] = []
-        for s in index.values():
-            if s["pervasive"]:
-                pervasive.append({"crate": s["crate"], "xrefs": s["xrefs"], "n_clusters": s["n_clusters"]})
-                continue
-            row: Dict[str, Any] = {"crate": s["crate"], "xrefs": s["xrefs"], "n_clusters": s["n_clusters"]}
-            clist = sorted(s["clusters"])
-            row["clusters_rva"] = clist[:MAX_BOM_CLUSTERS_PER_CRATE]
-            if len(clist) > MAX_BOM_CLUSTERS_PER_CRATE:
-                row["clusters_omitted"] = len(clist) - MAX_BOM_CLUSTERS_PER_CRATE
-            if not lean:
-                row["entity_idxs"] = sorted(s["entity_idxs"])[:12]
-            signal.append(row)
-        signal.sort(key=lambda r: (r["n_clusters"], -r["xrefs"], r["crate"]))
-        pervasive.sort(key=lambda r: (-r["xrefs"], r["crate"]))
-        return {
-            "_comment": ("Static crate/library dependency inventory (provenance: static, from linked "
-                         "symbols). `signal` = cluster-local dependencies (crypto, compression, parsers, "
-                         "the sample's own modules) ranked most-specific first — the authoritative parts "
-                         "list; a statically-linked crypto crate here is EVIDENCE, not noise. `pervasive` "
-                         "= crates referenced across most clusters (language/runtime, or the sample's own "
-                         "ubiquitous core), listed for completeness. Split by reference spread, never by "
-                         "crate name. clusters_rva points to the cluster(s) that use the crate. REPORT "
-                         "EVERY cipher/crypto crate here; confirm which is primary vs secondary by reading "
-                         "the bodies at those clusters."),
-            "signal": signal,
-            "pervasive": pervasive,
-            "pervasive_threshold_clusters": round(self._crate_cutoff, 2),
-        }
 
     def _cluster_static(self, cluster: Any) -> Dict[str, Any]:
         root = cluster.root_node
@@ -491,8 +431,7 @@ class _Builder:
 
         # Single-file cap: top-N signal clusters by static score are shown; the rest are omitted
         # (danger-floor ones flagged in coverage.omitted.notable_rvas). SINGLE FILE ONLY — the tiered
-        # bundle emits every cluster. The cap is generous (30) so a ranked-low payload survives, and
-        # dependency_bom surfaces crypto crates independently of it.
+        # bundle emits every cluster. The cap is kept generous so a ranked-low payload survives.
         shown = 0
         for score, cl, static_lib, llm_lib, danger, why in scored:
             root_rva = self.rva(cl.root_node)
@@ -509,7 +448,7 @@ class _Builder:
             if promoted:
                 promoted_out.append(root_rva)
             # cap: signal clusters beyond MAX go to the omission ledger (danger-floor ones flagged
-            # so the anti-hiding net survives; dependency_bom still carries any crypto crates).
+            # so the anti-hiding net survives).
             if shown >= MAX_SINGLE_FILE_CLUSTERS:
                 if danger is not None:
                     omitted_notable.append({"rva": root_rva,
@@ -554,7 +493,6 @@ class _Builder:
                              "read_first_rva": [queue[0]["ref_rva"]] if queue else []},
             "verdict": {"claim": {"v": self.ca.get("binary_category") if has_llm else None, "src": GUESS,
                                   "verdict": None}},
-            "dependency_bom": self._dependency_bom(lean=True),
             "investigation_queue": queue,
             "clusters": clusters_out,
             "noise": {"static_lib_count": len(static_lib_roots),
@@ -642,9 +580,6 @@ class _Builder:
                 "on_mismatch": "REFUSE: wrong sample or wrong base. Do not r2_decompile these RVAs or apply an annotation."}
 
     def _readme(self, shown: int, total: int, static_lib: int, llm_lib: int) -> Dict[str, Any]:
-        idx = self._crate_index()
-        n_sig = sum(1 for s in idx.values() if not s["pervasive"])
-        n_perv = sum(1 for s in idx.values() if s["pervasive"])
         return {
             "format": "xrefer-binary-anatomy",
             "prerequisite": ("FIRST confirm the malware_analysis and format_binary skills are active in "
@@ -657,13 +592,12 @@ class _Builder:
             "provenance": ("BARE values = STATIC ground truth (RVAs, imports, xrefs, paths, capa, "
                            "category=='func_lib'/is_simple_api_thunk). Objects with src=='xrefer_llm_guess' = "
                            "HYPOTHESIS. NOTE: cluster is_library/llm_lib and per-function origin are LLM-derived; "
-                           "the static library signal is category=='func_lib'. dependency_bom + per-function "
-                           "artifacts.libs are STATIC crate refs, filtered to cluster-local (signal) crates. "
+                           "the static library signal is category=='func_lib'. Per-function artifacts.libs are "
+                           "STATIC crate refs, filtered to cluster-local (signal) crates. "
                            "type_id: 1=lib 2=api 3=string 4=capa 5=api_trace."),
             "capability_gate_applies": True,
             "counts": {"clusters_shown": shown, "clusters_total": total,
-                       "clusters_static_lib": static_lib, "clusters_llm_lib": llm_lib,
-                       "dependency_crates_signal": n_sig, "dependency_crates_pervasive": n_perv},
+                       "clusters_static_lib": static_lib, "clusters_llm_lib": llm_lib},
         }
 
     def _report_scaffold(self) -> Dict[str, Any]:
@@ -1257,7 +1191,6 @@ class _Builder:
             },
             "provenance_legend": self._provenance_legend(),
             "stats": stats,
-            "dependency_bom": self._dependency_bom(lean=False),
             "binary": {
                 "provenance": "llm",
                 "category": self.ca.get("binary_category") if has_llm else None,

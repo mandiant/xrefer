@@ -59,10 +59,9 @@ The JSON may arrive as chat text and can be silently clipped by a length limit. 
 Read `_readme.provenance`. Two kinds of value live in this file:
 - **Bare values = STATIC ground truth.** RVAs, imports/strings/capa names, `call_site_rvas`,
   `reachability.via_path_rvas`, `entities[]`, `danger_floor`, `noise.static_lib_*`,
-  `coverage.omitted.notable_rvas`, `dependency_bom` (the crate parts list) and each function's
-  `artifacts.libs` (cluster-local crate refs), and the static per-function skip signals
-  `category=="func_lib"` / `is_simple_api_thunk`. You may state these as fact — a linked crate name
-  is a symbol-table fact, not a guess.
+  `coverage.omitted.notable_rvas`, each function's `artifacts.libs` (cluster-local crate refs), and the
+  static per-function skip signals `category=="func_lib"` / `is_simple_api_thunk`. You may state these
+  as fact — a linked crate name is a symbol-table fact, not a guess.
 - **Any object shaped `{"v": ..., "src": "xrefer_llm_guess"}` = a HYPOTHESIS.** Every LLM value is
   wrapped this way (the `verdict` block, each cluster's `llm` block, `llm_lib`). The `src` tag travels
   with the value even if you lift a sub-object in isolation, so a quoted `"keylogger"` still shows it
@@ -70,31 +69,29 @@ Read `_readme.provenance`. Two kinds of value live in this file:
 - **NOT static, despite looking plain:** cluster `llm_lib` and (in the cluster `llm` block) any
   library framing inherit the LLM `library_or_runtime` verdict. Never treat them as skip authority.
 
-## 2b. The dependency BOM — the static crate parts list (crypto discipline)
+## 2b. Per-function crate refs (`artifacts.libs`) — crypto discipline
 
-`dependency_bom` is a **static** inventory of the crates/libraries the binary is built from, taken from
-linked symbols — the most authoritative evidence of what primitives are actually present. Two lists:
-- **`signal`** = cluster-local crates (crypto, compression, parsers, the sample's own modules), ranked
-  most-specific first. Each row has `xrefs`, `n_clusters`, and `clusters_rva` → the exact cluster(s)
-  that use it, so a crate name pivots straight to code to read.
-- **`pervasive`** = crates spread across most clusters (language runtime / the sample's ubiquitous
-  core), listed for completeness. The split is by reference **spread**, never by a hard-coded name
-  list, so a novel or renamed crypto crate lands in `signal` like any other.
+Each shown cluster carries the crates its functions link, on `static.functions[].artifacts.libs` — a
+**static** list of `{entity_idx, name, call_site_rvas}` for every cluster-local crate (crypto,
+compression, parsers, the sample's own modules), at the exact call sites. Pervasive runtime crates
+(`std`/`alloc`/`core`, referenced across most clusters) are filtered out so the signal survives; the
+split is by reference **spread**, never a hard-coded name list, so a novel or renamed crypto crate is
+kept like any other. A linked crate name is symbol-table ground truth.
 
-**Crypto-claim discipline — this list is where the "it uses RC4" tunnel-vision failure is caught:**
-- **Report EVERY cipher/crypto crate in `signal`, not just the first or loudest one.** A ransomware
-  build routinely links several (e.g. `chacha20` + `aes` + `ctr`/`cipher` for the file encryptor and
-  `rsa` for key wrapping). Enumerate them all before you characterize the scheme.
-- **Distinguish primary vs secondary by evidence, not by xref count.** Follow each crate's
-  `clusters_rva` to the cluster, read the `must_read_rvas` bodies, and decide from behavior which cipher
-  encrypts victim data (primary) vs. wraps keys / hashes / obfuscates strings (secondary). A crate with
-  few xrefs can still be the primary bulk encryptor.
+**Crypto-claim discipline — this is where the "it uses RC4" tunnel-vision failure is caught:**
+- **Report EVERY cipher/crypto crate you see in `artifacts.libs`, not just the first or loudest one.** A
+  ransomware build routinely links several (e.g. `chacha20` + `aes` + `ctr`/`cipher` for the file
+  encryptor and `rsa` for key wrapping). Enumerate them all before you characterize the scheme.
+- **Distinguish primary vs secondary by evidence, not by frequency.** Read the body at each crate's
+  `call_site_rvas` and decide from behavior which cipher encrypts victim data (primary) vs. wraps keys /
+  hashes / obfuscates strings (secondary). A rarely-referenced crate can still be the primary encryptor.
 - **A statically-linked crypto crate is EVIDENCE, not noise.** It has no CryptoAPI import to trip
-  `danger_floor`, so its cluster may rank mid-queue — do not let the ranking talk you out of it. If
-  `dependency_bom.signal` shows a cipher, the binary has that cipher; your job is to confirm *how* it is
-  used, never *whether* it is present.
-- Per-function `artifacts.libs` carries the same crate refs at the call sites inside each cluster —
-  use them to confirm the crate is invoked in the body you are reading, not merely linked.
+  `danger_floor`, so its cluster may rank mid-queue — do not let the ranking talk you out of it. If a
+  cipher crate is on a function, the binary has that cipher; confirm *how* it is used, never *whether*.
+- **Coverage caveat:** `artifacts.libs` only covers the clusters this file shows (top-N by score — see
+  `_readme.counts`). A crate used only by unclustered code or a below-cap cluster will not appear here,
+  so if you suspect crypto/networking the map does not surface, confirm with `r2_imports` /
+  `r2_find_regex` against the actual binary rather than assuming absence.
 
 ## 3. The capability gate — ALWAYS applies (`_readme.capability_gate_applies` is always true)
 
@@ -178,8 +175,8 @@ evidence attached to each finding. Sections (`report_scaffold.sections`):
 - **State an xrefer hypothesis only after you confirm it in a body.** One you could not verify is either
   omitted or flagged inline as "unconfirmed" — never laundered as fact (its `xrefer_llm_guess` tag does
   not become truth by being repeated).
-- **Report ALL cryptography** from `dependency_bom` (§2b): name every cipher and say which is primary vs
-  secondary from the bodies you read; a statically-linked crypto crate is a finding, not noise.
+- **Report ALL cryptography** from the clusters' `artifacts.libs` (§2b): name every cipher and say which
+  is primary vs secondary from the bodies you read; a statically-linked crypto crate is a finding, not noise.
 - Pivot IOCs via `get_context_for_hash` / `get_ioc_assessment`; drop noisy ones.
 
 **Coverage is internal discipline, not a section:** investigate every `investigation_queue` item before
@@ -203,10 +200,10 @@ but this governs your *analysis*; it is not something you print.
 
 To keep the single file pasteable, an anatomy JSON deliberately omits: decompiled code, cluster call
 graph `edges` (recover with `r2_callees` from the root), the full entity catalog (`entities[]` is
-referenced-only), staged rename/comment suggestions, crypto carve-target blobs, and any binary-level
-prose report. Per-function `artifacts.libs` and `dependency_bom` ARE present, but filtered to
-cluster-local (signal) crates — pervasive runtime crates are collapsed into `dependency_bom.pervasive`.
-When you need the omitted material or the unfiltered per-function `libs`, use the tiered
-`xrefer-agent-map` bundle (its `clusters/<root_rva>.json` carries edges + full artifacts, and
-`indices/` carries the reverse index, reachability, and full entity catalog; `map.json.dependency_bom`
-mirrors this BOM with `entity_idxs`).
+referenced-only), staged rename/comment suggestions, crypto carve-target blobs, any binary-level prose
+report, and any binary-wide crate/dependency inventory. Per-function `artifacts.libs` IS present but
+filtered to cluster-local (signal) crates on the clusters this file shows — pervasive runtime crates are
+dropped, and crates used only by unclustered/below-cap code are not listed at all. When you need the
+omitted material or the unfiltered per-function `libs`, use the tiered `xrefer-agent-map` bundle (its
+`clusters/<root_rva>.json` carries edges + full artifacts, and `indices/` carries the reverse index,
+reachability, and full entity catalog).

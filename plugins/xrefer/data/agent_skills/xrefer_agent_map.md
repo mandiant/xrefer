@@ -41,9 +41,9 @@ hypothesis (each queue item's `must_read_rvas`, = `llm.verify_against.key_functi
 `static.artifacts.*.call_site_rvas`). A report assembled from this map alone is the "listing is not
 reverse engineering" failure. Facts you may state
 directly are only the `"provenance":"static"` ones (RVAs, artifact names, xrefs, paths, capa,
-classification, and `dependency_bom` — the linked-crate parts list). See `provenance_legend` — and its
-`correction`: cluster `is_library` / `library_kind=="llm"` and per-function `origin` are LLM-DERIVED,
-not skip authority.
+classification, and each cluster's `static.artifacts.libs` — the linked crate refs). See
+`provenance_legend` — and its `correction`: cluster `is_library` / `library_kind=="llm"` and
+per-function `origin` are LLM-DERIVED, not skip authority.
 
 ## 3. Addressing, keys, and binding
 
@@ -67,18 +67,16 @@ kill-chain. Check `stats.backend_live` (see §7).
 fix for the Go / statically-linked **blind-regex failure**: xrefer already separated signal from the
 tens-of-thousands-of-strings noise. Spot-check with `r2_find_regex` only if the map looks thin.
 
-Read **`dependency_bom`** here first — it is the static crate/library parts list (from linked symbols),
-`signal` = cluster-local deps (crypto/compression/parsers/the sample's own modules, each with an
-`entity_idxs` and a `clusters_rva` → the cluster(s) that use it) and `pervasive` = language/runtime
-crates. **Crypto-claim discipline (where the "it only uses RC4" tunnel-vision fails):** report EVERY
-cipher/crypto crate in `signal`, not just the loudest — a ransomware build routinely links several
-(e.g. `chacha20` + `aes` + `ctr`/`cipher` for the file encryptor and `rsa` for key wrapping). Follow
-each crate's `clusters_rva` to its dossier, read the `must_read_rvas` bodies, and decide primary
-(encrypts victim data) vs secondary (key wrap / hashing / string obfuscation) from **behavior, not
-xref count** — a low-xref crate can be the primary bulk encryptor. A statically-linked crypto crate has
-no CryptoAPI import, so its cluster can rank mid-queue and its `danger_floor` can be null; that is not
-license to skip it. If `dependency_bom.signal` names a cipher, the binary HAS it — confirm *how* it is
-used, never *whether* it is present.
+Each cluster dossier lists the crates its functions link, on `static.artifacts.libs` (crate name +
+`call_site_rvas`) — static, symbol-table ground truth. **Crypto-claim discipline (where the "it only
+uses RC4" tunnel-vision fails):** as you read the queue's dossiers, report EVERY cipher/crypto crate you
+see, not just the loudest — a ransomware build routinely links several (e.g. `chacha20` + `aes` +
+`ctr`/`cipher` for the file encryptor and `rsa` for key wrapping). Read the body at each crate's
+`call_site_rvas` and decide primary (encrypts victim data) vs secondary (key wrap / hashing / string
+obfuscation) from **behavior, not frequency** — a rarely-referenced crate can be the primary bulk
+encryptor. A statically-linked crypto crate has no CryptoAPI import, so its cluster can rank mid-queue
+and its `danger_floor` can be null; that is not license to skip it. If a cipher crate is on a function,
+the binary HAS that cipher — confirm *how* it is used, never *whether* it is present.
 
 **Step 3 (pivot) — precomputed.** `indices/reverse_index.json["<entity_idx>"].function_rvas` is your
 `r2_xrefs_to` result (artifact → referencing functions). A large `indices/functions.json[fn].indirect`
@@ -128,8 +126,8 @@ shape. Verification lives *inline*:
   proves it — never the cluster root alone, never a bare claim.
 - State an xrefer hypothesis only after confirming it in a body; omit or mark "unconfirmed" the rest.
   Build from **behaviors you confirmed**, NOT from `indices/report.md` (LLM narrative, reference only).
-- **Report every crypto crate** from `dependency_bom` — name each cipher and say which is primary vs
-  secondary from the bodies.
+- **Report every crypto crate** from the clusters' `static.artifacts.libs` — name each cipher and say
+  which is primary vs secondary from the bodies.
 - Map MITRE technique-ids to confirmed behavior via the kill-chain (`tactics_kill_chain_order`; each
   technique's `groundings[].cluster_root_rva` + `rationale` is the cluster + claim to test; `empty_
   tactics` = unmapped, NOT proof of absence — a static `danger_floor` overrides it). Pivot IOCs through
@@ -148,8 +146,8 @@ shape. Verification lives *inline*:
 - *An artifact-bearing function with no path from entry?* → `orphans_index[]`; `r2_xrefs_to` it (the
   item's `next` field) to find the caller r2's static pass missed.
 - *Resolve an entity_idx to a name/group/xref count?* → `indices/entities.json`.
-- *What crypto / third-party crates does the binary link, and where?* → `map.json.dependency_bom.signal`
-  → each crate's `clusters_rva` → open that dossier and read its `must_read_rvas`.
+- *What crypto / third-party crates does a cluster link, and where?* → its
+  `clusters/<root_rva>.json` → `static.artifacts.libs` (crate name + `call_site_rvas`).
 
 ## 6. Noise, library demotion, completeness
 

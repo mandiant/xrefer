@@ -320,33 +320,22 @@ def test_category_and_origin_fallback_without_live_backend():
     assert row["has_default_name"] is None  # needs live backend
 
 
-def test_dependency_bom_surfaces_crates_both_formats():
-    """The crate BOM (option ii) surfaces a cluster-local crypto crate in both
-    formats, and per-function libs (option i) re-appear on the artifact-bearing
-    member of the single file, signal-filtered."""
-    # single-file
+def test_signal_libs_on_cluster_functions_and_no_top_bom():
+    """Per-function libs re-appear on the artifact-bearing member (signal-filtered,
+    at their call sites) and there is NO separate top-level dependency_bom in either
+    format (it was reverted to keep libs only inside the clusters)."""
     d = build_anatomy(_XRefer())
-    bom = d["dependency_bom"]
-    sig = {r["crate"]: r for r in bom["signal"]}
-    assert "chacha20" in sig, "linked crypto crate must be a BOM signal entry"
-    assert sig["chacha20"]["clusters_rva"] == [rva(0x402000)]  # crate -> cluster bridge
-    assert sig["chacha20"]["n_clusters"] == 1
-    assert "entity_idxs" not in sig["chacha20"]                # lean single-file BOM
-    # tiny stub is below the pervasive-cluster floor, so nothing is demoted
-    assert bom["pervasive"] == []
-    assert d["_readme"]["counts"]["dependency_crates_signal"] >= 1
-    # option (i): the crate ref is back on the member function, at its call site
+    # the crate ref is on the member function, at its call site
     inj = next(c for c in d["clusters"] if c["root_rva"] == rva(0x402000))
     member = next(f for f in inj["static"]["functions"] if f["rva"] == rva(0x402100))
     libs = {l["name"]: l for l in member["artifacts"].get("libs", [])}
     assert "chacha20::chacha" in libs
     assert libs["chacha20::chacha"]["call_site_rvas"] == [rva(0x402160)]
-
-    # tiered map.json mirrors the BOM and carries entity_idxs (its full catalog resolves them)
-    mp = build_agent_map(_XRefer())["map"]
-    msig = {r["crate"]: r for r in mp["dependency_bom"]["signal"]}
-    assert "chacha20" in msig
-    assert 4 in msig["chacha20"]["entity_idxs"]
+    # no top-level BOM in the single file
+    assert "dependency_bom" not in d
+    assert "dependency_crates_signal" not in d["_readme"]["counts"]
+    # no top-level BOM in the tiered map either
+    assert "dependency_bom" not in build_agent_map(_XRefer())["map"]
 
 
 def test_no_bare_llm_values_at_top_level():
