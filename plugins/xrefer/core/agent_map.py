@@ -1173,16 +1173,7 @@ class _Builder:
                 "format": "xrefer-agent-map", "schema_version": SCHEMA_VERSION,
                 "generator": f"xrefer {_ver}", "has_llm_layer": has_llm,
                 "address_encoding": "hex-string RVA relative to image_base; see image.recipe",
-                "workflow_binding": {
-                    "target_skill": "format_binary (persistent radare2 project, sha256-keyed)",
-                    "section_to_step": {
-                        "investigation_queue": "Step 2/3: your ranked shortlist of functions that matter",
-                        "indices/reverse_index.json": "Step 3: precomputed r2_xrefs_to (artifact -> functions)",
-                        "indices/reachability.json": "Step 3: whole-program entry->function paths",
-                        "clusters/<root_rva>.json static.artifacts.call_site_rvas": "Step 4: exact addresses to r2_decompile",
-                        "clusters/<root_rva>.json llm.verify_against": "Step 4: the must-read functions to confirm the label",
-                    },
-                },
+                "target_skill": "format_binary (persistent radare2 project, sha256-keyed)",
             },
             "image": self._image_block(),
             "entry_anchor": {
