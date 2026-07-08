@@ -1,5 +1,5 @@
 ---
-name: xrefer-agent-map
+name: xrefer_binary_anatomy
 description: >-
   Augments the format_binary (radare2) workflow. When an xrefer-agent-map bundle exists for the
   sample's sha256 (a map.json plus clusters/ and indices/ directories), it pre-computes your triage
@@ -9,7 +9,7 @@ description: >-
   body before you claim it.
 ---
 
-# xrefer-agent-map (a format_binary accelerator)
+# xrefer_binary_anatomy — the tiered xrefer-agent-map bundle (a format_binary accelerator)
 
 ## 0. Prerequisite
 
