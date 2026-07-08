@@ -49,11 +49,11 @@ _RUN_REF_RE = re.compile(r"cluster\.id\.(\d+)")
 SENTINEL = "XREFER_ANATOMY_EOF"
 GUESS = "xrefer_llm_guess"
 # SINGLE-FILE ONLY cap on emitted signal clusters (the tiered bundle emits every cluster). Keeps the
-# pasteable file bounded; set generously (30) so a ranked-low payload — e.g. an embedded-crypto engine
-# whose danger floor never fired (typically ~#20) — still makes the file. Danger-floor clusters cut by
-# the cap are flagged in coverage.omitted.notable_rvas, and dependency_bom surfaces crypto crates
-# regardless of the cap, so the crypto-miss the removed 15-cap caused cannot recur here.
-MAX_SINGLE_FILE_CLUSTERS = 30
+# pasteable file bounded; set (21) so a ranked-low payload — e.g. an embedded-crypto engine whose danger
+# floor never fired (typically ~#20) — still makes the file. Danger-floor clusters cut by the cap are
+# flagged in coverage.omitted.notable_rvas, and dependency_bom surfaces crypto crates regardless of the
+# cap, so the crypto-miss the removed 15-cap caused cannot recur here.
+MAX_SINGLE_FILE_CLUSTERS = 21
 MAX_FUNCS_PER_CLUSTER = 6   # curation: keep the most artifact-dense functions per cluster (+ root)
 MAX_CALL_SITES = 3          # curation: call-site RVAs kept per artifact
 MAX_ARTIFACTS_PER_TYPE = 5  # curation: apis/strings/capa/api_trace kept per function
