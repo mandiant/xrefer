@@ -956,14 +956,16 @@ class _Builder:
         return out
 
     # ---- Tier-2 index files ----
-    def _reverse_index(self) -> Dict[str, Any]:
+    def _reverse_index(self, in_scope: Set[int]) -> Dict[str, Any]:
         out: Dict[str, Any] = {
-            "_comment": ("entity_xrefs reverse index (provenance: static) = PRECOMPUTED r2_xrefs_to for every "
-                         "artifact. key = entity_idx (see entities.json); value.function_rvas = every function "
-                         "that references it. r2 address = r2_baddr + rva."),
+            "_comment": ("entity_xrefs reverse index (provenance: static) = PRECOMPUTED r2_xrefs_to, SCOPED to "
+                         "the in-scope artifacts (those cited by a signal cluster or orphan) — the ones you "
+                         "actually pivot on. key = entity_idx (see entities.json); value.function_rvas = every "
+                         "function that references it. For an out-of-scope entity, run r2_xrefs_to yourself. "
+                         "r2 address = r2_baddr + rva."),
         }
         for idx, funcs in (self.x.entity_xrefs or {}).items():
-            if not funcs:
+            if idx not in in_scope or not funcs:
                 continue
             out[str(idx)] = {"function_rvas": sorted(self.rva(ea) for ea in funcs)}
         return out
@@ -1136,8 +1138,16 @@ class _Builder:
         queue = self._investigation_queue(records, orphans, has_llm)
         clusters_index = self._clusters_index(records, has_llm)
 
+        # In-scope entities = those cited by a signal cluster (self._referenced, populated while
+        # building the dossiers above) plus anything an orphan carries. The reverse index is scoped
+        # to these — the artifacts the agent actually pivots on — instead of the whole-binary catalog;
+        # r2_xrefs_to covers any out-of-scope entity.
+        in_scope_entities: Set[int] = set(self._referenced)
+        for o in orphans:
+            in_scope_entities.update(o.get("carried_artifacts", ()))
+
         indices = {
-            "reverse_index.json": self._reverse_index(),
+            "reverse_index.json": self._reverse_index(in_scope_entities),
             "reachability.json": self._reachability_index(target_eas),
             "functions.json": self._function_index(scope_funcs, in_clusters, prefixes),
         }
@@ -1291,7 +1301,7 @@ def export_agent_map(xrefer: Any, out_dir: str) -> str:
     # Tier-2: indices + entities + report.
     tier2: List[Dict[str, Any]] = []
     _load_when = {
-        "reverse_index.json": "you need every function that references an artifact/IOC (precomputed r2_xrefs_to)",
+        "reverse_index.json": "you need every function that references an in-scope artifact/IOC (precomputed r2_xrefs_to; use r2_xrefs_to for out-of-scope)",
         "reachability.json": "you need how execution reaches a function from entry (whole-program, not an r2 call)",
         "functions.json": "you need classification or DIRECT/INDIRECT artifact counts for an in-scope function",
     }

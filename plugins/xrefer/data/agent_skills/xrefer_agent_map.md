@@ -76,7 +76,7 @@ comes from the bodies, not frequency; a linked crypto crate is evidence even wit
 | you need… | open |
 |---|---|
 | the ranked functions that matter | `map.json` → `investigation_queue` (+ each `detail_ref`) |
-| which functions reference an API/IOC (precomputed `r2_xrefs_to`) | `indices/reverse_index.json["<entity_idx>"].function_rvas` |
+| which functions reference an API/IOC (precomputed `r2_xrefs_to`) | `indices/reverse_index.json["<entity_idx>"].function_rvas` (scoped to in-scope artifacts; `r2_xrefs_to` for others) |
 | how entry reaches function Y | `indices/reachability.json["<Y>"]` → `shortest_path_rvas` / `n_paths` |
 | the dispatcher / config-gating hub | highest `indices/functions.json[fn].indirect` in scope |
 | an artifact-bearing function with no path from entry | `orphans_index[]` → `r2_xrefs_to` it (its `next`) |
