@@ -48,9 +48,12 @@ SCHEMA_VERSION = "2.0.0"
 _RUN_REF_RE = re.compile(r"cluster\.id\.(\d+)")
 SENTINEL = "XREFER_ANATOMY_EOF"
 GUESS = "xrefer_llm_guess"
-# NOTE: no cluster-count cap — every SIGNAL cluster is emitted so a ranked-low payload
-# (e.g. an embedded-crypto engine whose danger floor never fired) is never dropped. The
-# file grows with the count of real signal clusters; use the tiered bundle for huge binaries.
+# SINGLE-FILE ONLY cap on emitted signal clusters (the tiered bundle emits every cluster). Keeps the
+# pasteable file bounded; set generously (30) so a ranked-low payload — e.g. an embedded-crypto engine
+# whose danger floor never fired (typically ~#20) — still makes the file. Danger-floor clusters cut by
+# the cap are flagged in coverage.omitted.notable_rvas, and dependency_bom surfaces crypto crates
+# regardless of the cap, so the crypto-miss the removed 15-cap caused cannot recur here.
+MAX_SINGLE_FILE_CLUSTERS = 30
 MAX_FUNCS_PER_CLUSTER = 6   # curation: keep the most artifact-dense functions per cluster (+ root)
 MAX_CALL_SITES = 3          # curation: call-site RVAs kept per artifact
 MAX_ARTIFACTS_PER_TYPE = 5  # curation: apis/strings/capa/api_trace kept per function
@@ -486,11 +489,11 @@ class _Builder:
             scored.append((score, cl, static_lib, llm_lib, danger, why))
         scored.sort(key=lambda t: t[0], reverse=True)
 
-        # No cluster cap: every SIGNAL cluster is shown (only library/noise is demoted).
-        # Curation stays per-cluster (funcs/artifacts capped) so the file grows with the
-        # count of real signal clusters, not the whole 168-cluster projection — but a
-        # ranked-below-15 payload (e.g. an embedded-crypto engine whose danger floor never
-        # fired) is never silently dropped from the pasteable file.
+        # Single-file cap: top-N signal clusters by static score are shown; the rest are omitted
+        # (danger-floor ones flagged in coverage.omitted.notable_rvas). SINGLE FILE ONLY — the tiered
+        # bundle emits every cluster. The cap is generous (30) so a ranked-low payload survives, and
+        # dependency_bom surfaces crypto crates independently of it.
+        shown = 0
         for score, cl, static_lib, llm_lib, danger, why in scored:
             root_rva = self.rva(cl.root_node)
             # library handling
@@ -505,6 +508,15 @@ class _Builder:
             promoted = (static_lib or llm_lib) and danger is not None
             if promoted:
                 promoted_out.append(root_rva)
+            # cap: signal clusters beyond MAX go to the omission ledger (danger-floor ones flagged
+            # so the anti-hiding net survives; dependency_bom still carries any crypto crates).
+            if shown >= MAX_SINGLE_FILE_CLUSTERS:
+                if danger is not None:
+                    omitted_notable.append({"rva": root_rva,
+                                            "why": f"truncated (single-file top-{MAX_SINGLE_FILE_CLUSTERS}); statically reaches danger floor: {danger}",
+                                            "static": True})
+                continue
+            shown += 1
             node = {
                 "root_rva": root_rva,
                 "parent_cluster_id": cl.parent_cluster_id,

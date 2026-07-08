@@ -201,6 +201,23 @@ def test_anatomy_builds_and_has_static_truth():
     assert inj["llm"]["provenance"] == "llm"
 
 
+def test_single_file_cluster_cap_is_single_file_only(monkeypatch):
+    """The top-N cap bounds the single file (danger-floor clusters cut by it are
+    flagged, never silently dropped) and does NOT touch the tiered bundle."""
+    import xrefer.core.agent_map as am
+    monkeypatch.setattr(am, "MAX_SINGLE_FILE_CLUSTERS", 0)  # force the one signal cluster past the cap
+    d = build_anatomy(_XRefer())
+    assert d["clusters"] == []
+    assert d["investigation_queue"] == []
+    # the capped cluster reaches a danger floor -> surfaced in the anti-hiding ledger, not hidden
+    notable = {n["rva"] for n in d["coverage"]["omitted"]["notable_rvas"]}
+    assert rva(0x402000) in notable
+    # the tiered bundle ignores the single-file cap entirely
+    mp = build_agent_map(_XRefer())["map"]
+    assert any(c["ref"] == rva(0x402000) for c in mp["investigation_queue"])
+    assert rva(0x402000) in build_agent_map(_XRefer())["clusters"]
+
+
 # --------------------------------------------------------------------------
 # tiered bundle: structure + provenance + cross-refs
 # --------------------------------------------------------------------------
