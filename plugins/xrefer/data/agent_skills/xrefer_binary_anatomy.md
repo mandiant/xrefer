@@ -1,5 +1,5 @@
 ---
-name: binary_anatomy
+name: xrefer_binary_anatomy
 description: >-
   Consume an xrefer "binary anatomy" — a single, chat-pasteable JSON map of a native binary
   (recognizable by _readme.format == "xrefer-binary-anatomy" and the _end.sentinel
@@ -9,7 +9,7 @@ description: >-
   replaces reading bodies: every claim still requires an r2_decompile (or r2_disasm when that fails).
 ---
 
-# binary_anatomy — consuming a single-file xrefer map
+# xrefer_binary_anatomy — consuming a single-file xrefer map
 
 ## Prerequisite
 

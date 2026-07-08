@@ -1229,7 +1229,7 @@ def _read_agent_skill(filename: str) -> Optional[str]:
 def export_anatomy(xrefer: Any, out_path: str) -> str:
     """Write the single-file anatomy JSON to ``out_path``; returns the path.
 
-    Also drops the ``binary_anatomy`` consumer skill next to the JSON (a
+    Also drops the ``xrefer_binary_anatomy`` consumer skill next to the JSON (a
     static, one-time-install document — the JSON itself stays a single
     pasteable file)."""
     data = build_anatomy(xrefer)
@@ -1248,9 +1248,9 @@ def export_anatomy(xrefer: Any, out_path: str) -> str:
         fh.write(raw)
     log(f"[agent_map] wrote {out_path} ({len(raw.encode('utf-8'))} bytes, "
         f"{len(data['clusters'])} signal clusters, has_llm={data['meta']['has_llm_layer']})")
-    skill = _read_agent_skill("binary_anatomy.md")
+    skill = _read_agent_skill("xrefer_binary_anatomy.md")
     if skill is not None:
-        skill_path = os.path.join(os.path.dirname(os.path.abspath(out_path)), "binary_anatomy.SKILL.md")
+        skill_path = os.path.join(os.path.dirname(os.path.abspath(out_path)), "xrefer_binary_anatomy.SKILL.md")
         with open(skill_path, "w", encoding="utf-8") as fh:
             fh.write(skill)
         log(f"[agent_map] wrote consumer skill to {skill_path}")

@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """Tests for the agent-facing exports (core/agent_map): the single-file
-``binary_anatomy`` and the tiered ``xrefer-agent-map`` bundle.
+``xrefer_binary_anatomy`` and the tiered ``xrefer-agent-map`` bundle.
 
 Everything runs on lightweight stubs (fake clusters + a hand-built
 global_xrefs / entities / paths / cluster_analysis + a dark backend). No IDA,
@@ -405,9 +405,9 @@ def test_export_anatomy_writes_json_and_companion_skill(tmp_path):
     d = json.loads(out.read_text())
     assert d["_end"]["sentinel"] == "XREFER_ANATOMY_EOF"
     # the single-file consumer skill lands beside the JSON (one-time install)
-    skill = tmp_path / "binary_anatomy.SKILL.md"
+    skill = tmp_path / "xrefer_binary_anatomy.SKILL.md"
     assert skill.exists()
-    assert "binary_anatomy" in skill.read_text()
+    assert "xrefer_binary_anatomy" in skill.read_text()
 
 
 def test_export_degrade_omits_report(tmp_path):
