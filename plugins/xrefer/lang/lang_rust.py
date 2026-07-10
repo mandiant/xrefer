@@ -350,8 +350,8 @@ class LangRust(LanguageBase):
         user_xrefs (List[Tuple[int, int]]): User-defined cross-references
     """
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, backend=None):
+        super().__init__(backend)
         self.id = "lang_rust"
         self.strings = None
         self.ep_annotation = None

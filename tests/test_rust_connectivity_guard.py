@@ -56,8 +56,11 @@ def _lang(adjacency, recover=True):
     fvas = set(adjacency)
     for callees in adjacency.values():
         fvas.update(callees)
-    lang = LangRust()
-    lang.backend = _Backend(sorted(fvas), recover=recover)
+    # Pass the stub through the constructor. LangRust() with no backend would
+    # resolve the global current backend at init (get_current_backend()), which
+    # only exists inside a live IDA/Ghidra session — off that box it raises, so
+    # the tests must never let the base __init__ reach for the global.
+    lang = LangRust(backend=_Backend(sorted(fvas), recover=recover))
 
     def _callees(fva, cache, _adj=adjacency):
         if fva in cache:
@@ -146,3 +149,47 @@ def test_reroots_genuinely_dead_ep_via_10x_rule():
     # total = 4 + 200 + 600 = 804 -> majority 402; MAIN 200 < 402 (not majority)
     # but 200 >= 10*4=40 -> re-root via the dwarf rule
     assert lang._connectivity_guarded_ep(EP) == MAIN
+
+
+# --- The gate itself -------------------------------------------------------
+# The tests above call _connectivity_guarded_ep directly, so they verify the
+# re-root LOGIC but not the GATE: if someone deleted the
+# recover_incomplete_call_graph check in get_entry_point tomorrow, every test
+# above would still pass while IDA / Binary Ninja silently started running the
+# guard. The two tests below go through get_entry_point and pin the one
+# invariant that must never regress — the guard runs iff the backend opts in.
+
+def _gated_lang(recover):
+    """A LangRust wired to reach the gate in get_entry_point without a real
+    backend: lang_match() forced True and _select_entry_point() returns EP so
+    the only remaining decision is whether the connectivity guard runs."""
+    lang = LangRust(backend=_Backend([EP], recover=recover))
+    lang.lang_match = lambda: True
+    lang._select_entry_point = lambda: EP
+    return lang
+
+
+def test_gate_off_returns_raw_ep_without_touching_graph():
+    """recover=False (IDA / Binary Ninja): get_entry_point must return the raw
+    selected EP and NEVER enter the guard or probe the call graph."""
+    lang = _gated_lang(recover=False)
+
+    def _tripwire(*args, **kwargs):
+        raise AssertionError(
+            "connectivity guard / call-graph probed on a recover=False backend")
+
+    lang._connectivity_guarded_ep = _tripwire
+    lang._func_callees = _tripwire
+
+    assert lang.get_entry_point() == EP
+
+
+def test_gate_on_runs_guard():
+    """recover=True (Ghidra / Vivisect): get_entry_point must route the selected
+    EP through the connectivity guard."""
+    lang = _gated_lang(recover=True)
+    seen = []
+    lang._connectivity_guarded_ep = lambda ep: seen.append(ep) or MAIN
+
+    assert lang.get_entry_point() == MAIN
+    assert seen == [EP]

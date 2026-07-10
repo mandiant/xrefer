@@ -1438,7 +1438,7 @@ class XRefer:
             # (Ghidra, Vivisect) opt in. IDA / Binary Ninja inherit False and skip
             # this block entirely, so their Rust clustering is left byte-for-byte
             # unchanged even if they expose a named rust_main.
-            if (self._backend.recover_incomplete_call_graph
+            if (getattr(self._backend, "recover_incomplete_call_graph", False)
                     and self.lang is not None
                     and getattr(self.lang, "id", None) == "lang_rust"
                     and self.current_analysis_ep):
