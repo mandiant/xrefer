@@ -18,11 +18,50 @@ class BackendNotAvailableError(Exception):
     """Raised when a requested backend is not available."""
 
 
+def _ida_install_configured() -> bool:
+    """True if an idalib-usable IDA installation is actually configured.
+
+    ``find_spec("idapro")`` alone is NOT a valid signal: the ``idapro``
+    PyPI shim arrives transitively on every install (flare-capa ->
+    ida-settings -> ida-hcli -> idapro), so the module is importable on
+    machines with no IDA at all — its import then raises unless an IDA
+    install dir is configured. Replicate the shim's read-only lookup
+    ($IDADIR, else ida-config.json) WITHOUT importing it: importing
+    ``idapro`` with IDA present loads libidalib into the process, and
+    the shim's own config loader creates a default config file as a
+    side effect — neither belongs in backend detection.
+    """
+    import json
+    import os
+    import platform
+
+    if os.environ.get("IDADIR"):
+        return True
+    idausr = os.environ.get("IDAUSR")
+    if idausr:
+        config_dir = Path(idausr)
+    elif platform.system() == "Windows":
+        appdata = os.environ.get("APPDATA")
+        if not appdata:
+            return False
+        config_dir = Path(appdata) / "Hex-Rays" / "IDA Pro"
+    else:
+        config_dir = Path.home() / ".idapro"
+    config_path = config_dir / "ida-config.json"
+    try:
+        config = json.loads(config_path.read_text())
+        return bool(config["Paths"].get("ida-install-dir"))
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
 def detect_available_backends() -> list[str]:
     """Detect which backends are available on the system."""
     backends = []
     for spec, name in [("idapro", "ida"), ("binaryninja", "binaryninja"), ("pyghidra", "ghidra"), ("vivisect", "vivisect")]:
         if find_spec(spec) is not None:
+            if name == "ida" and not _ida_install_configured():
+                continue
             backends.append(name)
     return backends
 
@@ -541,9 +580,18 @@ def cli():
     """Command line interface."""
     available_backends = detect_available_backends()
 
-    parser = argparse.ArgumentParser(description="Unified XRefer CLI for multiple backends", formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    # Explicit prog: under ``python -m xrefer`` argparse would otherwise
+    # report the program as ``__main__.py``.
+    parser = argparse.ArgumentParser(prog="xrefer", description="Unified XRefer CLI for multiple backends", formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     parser.add_argument("file", type=Path, help="Path to the file to analyze")
-    parser.add_argument("--backend", choices=available_backends, required=True, help=f"Analysis backend to use (available: {', '.join(available_backends)})")
+    parser.add_argument(
+        "--backend",
+        choices=available_backends,
+        default=None,
+        help=f"Analysis backend to use (available: {', '.join(available_backends)}). "
+        "Omit to auto-select the first available; vivisect ships with the package, so a bare "
+        "'xrefer <file>' always has a working backend.",
+    )
     parser.add_argument("--save", action="store_true", help="Save changes to database/project")
     parser.add_argument(
         "--auto-analysis",
@@ -629,8 +677,14 @@ def cli():
     args = parser.parse_args()
 
     if not available_backends:
-        print("[x] Error: No analysis backends available. Please install IDA Pro, Binary Ninja, or Ghidra.")
+        # Practically unreachable: vivisect arrives transitively with the
+        # package (via flare-capa). Kept as a guard for broken installs.
+        print("[x] Error: No analysis backends available. Reinstall xrefer, or install IDA Pro / Binary Ninja / Ghidra.")
         sys.exit(1)
+
+    if args.backend is None:
+        args.backend = available_backends[0]
+        print(f"[+] No --backend given; auto-selected '{args.backend}' (available: {', '.join(available_backends)})")
 
     file_path = args.file.resolve()
     if not file_path.exists():
