@@ -54,6 +54,10 @@ XRefer's LLM-based features, when enabled, send portions of analyzed data (e.g.,
 
 ## CLI Installation
 
+> **Standalone usage** (plain `pip install xrefer`, the `xrefer.analyze()`
+> library API, and capa-style one-file binaries that need no Python at
+> all) is documented in [docs/standalone.md](docs/standalone.md).
+
 1. Clone the repository and enter it:
    ```bash
    git clone https://github.com/mandiant/xrefer && cd xrefer
@@ -64,21 +68,24 @@ XRefer's LLM-based features, when enabled, send portions of analyzed data (e.g.,
    ```bash
    uv sync
    ```
-3. Add any required reverse-engineering backends (IDA Pro, Binary Ninja, Ghidra).  
+3. Add any required reverse-engineering backends (IDA Pro, Binary Ninja, Ghidra).
+   The vivisect backend is bundled — a plain `uv sync` can already analyze binaries.
+   Backends live in standard extras (so plain-pip users get them too, e.g.
+   `pip install xrefer[vivisect]`).
    Reference: [IDA](https://docs.hex-rays.com/user-guide/idalib), [Binary Ninja](https://docs.binary.ninja/dev/batch.html#install-the-api), [Ghidra](https://pypi.org/project/pyghidra/).
    e.g. for IDA:
    ```bash
    # set `IDADIR`
-   uv sync --group ida
+   uv sync --extra ida
    ```
    for ghidra:
    ```bash
    # set `GHIDRA_INSTALL_DIR`
-   uv sync --group ghidra
+   uv sync --extra ghidra
    ```
    if you want multiple backends, add them all.
    ```
-   uv sync --group ida --group ghidra
+   uv sync --extra ida --extra ghidra
    ```
 4. Run analyses from the packaged CLI:
    ```bash
@@ -87,7 +94,7 @@ XRefer's LLM-based features, when enabled, send portions of analyzed data (e.g.,
    For reference on CLI options, run:
    ```bash
     ❯ uv run xrefer --help
-    usage: xrefer [-h] --backend {ida,binaryninja,ghidra} [--save] [--auto-analysis | --no-auto-analysis]
+    usage: xrefer [-h] [--backend {ida,binaryninja,ghidra,vivisect}] [--save] [--auto-analysis | --no-auto-analysis]
                   [--mode {light,full}] [--report-data-mode {html,json,none}] [--force]
                   [--entry-point ENTRY_POINT] [-L LOGFILE] [--model MODEL] [--api-key API_KEY]
                   [--api-base API_BASE] [--light-model LIGHT_MODEL] [--light-api-key LIGHT_API_KEY]
