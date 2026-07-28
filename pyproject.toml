@@ -27,26 +27,20 @@ dependencies = [
     "pydantic>=2.11.7",
     "pydantic-settings>=2.10.1",
     "python-statemachine>=2.5.0",
-    "qtpy",                    # imported directly in gui/* and core/analyzer.py (Qt abstraction)
     "requests>=2.32.4",
     "tabulate>=0.9.0",
 ]
 
-[dependency-groups]
-dev = [
-    "coverage>=7.9.2",
-    "isort>=6.0.1",
-    "line-profiler>=4.2.0",
-    "memory-profiler>=0.61.0",
-    "pre-commit>=4.2.0",
-    "pysnooper>=1.2.3",
-    "pytest>=8.4.1",
-    "pytest-cov>=6.2.1",
-    "ruff>=0.12.2",
-    "vulture>=2.14",
-]
+# Backend/GUI dependencies live in standard extras (NOT PEP 735
+# dependency-groups) so plain-pip users can do e.g.
+# ``pip install xrefer[vivisect]`` from a wheel — pip cannot install
+# dependency-groups from a built distribution. uv users: ``uv sync
+# --extra vivisect`` (dev tooling stays a dependency-group below).
+[project.optional-dependencies]
 ida = [
     "idapro",
+    # IDA's GUI plugin path (gui/*) goes through the qtpy abstraction.
+    "qtpy",
 ]
 binaryninja = []
 ghidra = [
@@ -58,6 +52,39 @@ vivisect = [
     # (backend/vivisect/backend.py::_extract_lief_data). vivisect itself is
     # pulled transitively via flare-capa.
     "lief>=0.17.6",
+]
+gui = [
+    # Qt abstraction used by gui/* and one interactive dialog in
+    # core/analyzer.py (lazily imported there) — headless CLI/report
+    # runs never touch it, so core stays Qt-free.
+    "qtpy",
+]
+
+[dependency-groups]
+# Standalone-binary build tooling (see .github/pyinstaller/xrefer.spec).
+build = [
+    "pyinstaller>=6.21",
+]
+dev = [
+    "coverage>=7.9.2",
+    "isort>=6.0.1",
+    "line-profiler>=4.2.0",
+    "memory-profiler>=0.61.0",
+    "pre-commit>=4.2.0",
+    # python-statemachine's diagram renderer (statemachine/contrib/
+    # diagram) imports pydot at test-collection time via the GUI state
+    # machine tests — without it the suite errors (ModuleNotFoundError),
+    # it was previously an undocumented manual install.
+    "pydot",
+    "pysnooper>=1.2.3",
+    "pytest>=8.4.1",
+    "pytest-cov>=6.2.1",
+    # The GUI test suite (tests/test_view_filter.py etc.) imports
+    # xrefer.gui -> qtpy. Runtime core no longer depends on Qt (it
+    # moved to the [gui] extra), but the dev/test env still needs it.
+    "qtpy",
+    "ruff>=0.12.2",
+    "vulture>=2.14",
 ]
 
 [tool.uv]
@@ -82,6 +109,14 @@ py-modules = []
 
 [tool.setuptools.packages.find]
 where = ["plugins"]
+
+[tool.setuptools.package-data]
+# ``plugins/xrefer/data/`` has no __init__.py, so packages.find skips
+# it and the wheel would ship WITHOUT the HTML report template /
+# initial categories JSON / logo — an installed xrefer then crashes at
+# report generation (analyzer.generate_html_report asserts the data
+# dir exists). Declare it as package data of ``xrefer`` explicitly.
+xrefer = ["data/*"]
 
 [tool.setuptools.dynamic]
 # Reads ``plugins/xrefer/_version.py`` via setuptools' static AST

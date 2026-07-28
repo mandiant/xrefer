@@ -16,3 +16,13 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Packaging build artifacts (python -m build / uv build)
+build/
+dist/
+
+# Test/coverage artifacts (pytest, pytest-cov -- see the dev dependency-group)
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
