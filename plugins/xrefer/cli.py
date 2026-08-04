@@ -499,6 +499,12 @@ def cli():
         ),
     )
     parser.add_argument("--report-data-mode", choices=["html", "json", "none"], default="html", help="Report output format: html (standalone), json (data only), or none")
+    parser.add_argument("--emit-anatomy", nargs="?", const="__DEFAULT__", metavar="PATH",
+                        help="Export the agent-facing binary-anatomy JSON (single file) after analysis. "
+                             "Optional PATH; default <binary>_anatomy.json.")
+    parser.add_argument("--emit-agent-map", nargs="?", const="__DEFAULT__", metavar="DIR",
+                        help="Export the tiered agent-map bundle (map.json + clusters/ + indices/) after "
+                             "analysis. Optional DIR; default <binary>_agent_map/.")
     parser.add_argument("--force", action="store_true", help="Remove previous artifacts and re-analyze")
     parser.add_argument("--entry-point", type=parse_entry_point, help="Override entry point address (decimal or hex like 0x401000)")
     parser.add_argument("-L", "--logfile", help="Output log file path")
@@ -660,6 +666,20 @@ def cli():
                 print("[!] Analysis completed with warnings (see above)")
             else:
                 print("[+] Analysis completed successfully")
+
+            if args.emit_anatomy is not None and analysis_result is not None:
+                from xrefer.core.agent_map import export_anatomy
+                _anat_out = (args.emit_anatomy if args.emit_anatomy != "__DEFAULT__"
+                             else f"{file_path}_anatomy.json")
+                export_anatomy(analysis_result, str(_anat_out))
+                print(f"[+] Agent anatomy written to: {_anat_out}")
+
+            if args.emit_agent_map is not None and analysis_result is not None:
+                from xrefer.core.agent_map import export_agent_map
+                _map_out = (args.emit_agent_map if args.emit_agent_map != "__DEFAULT__"
+                            else f"{file_path}_agent_map")
+                export_agent_map(analysis_result, str(_map_out))
+                print(f"[+] Agent map bundle written to: {_map_out}/")
         except KeyboardInterrupt:
             print("\n[!] Analysis interrupted by user")
             sys.exit(1)

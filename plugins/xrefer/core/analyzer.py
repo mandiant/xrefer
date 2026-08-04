@@ -1007,21 +1007,35 @@ class XRefer:
 
         _, _, last_edges = self._path_corpus_topology()
         for func_ea, child_func_ea in last_edges:
-            if not self.global_xrefs[child_func_ea][self.DIRECT_XREFS]["imports"]:
+            # Thunk side is only READ, so probe without creating an entry: a
+            # leaf bearing no artifacts simply has nothing to forward.
+            child_entry = self.global_xrefs.get(child_func_ea)
+            if not child_entry or not child_entry[self.DIRECT_XREFS]["imports"]:
                 continue
             fn = self._backend.get_function_at(child_func_ea)
             if not fn.is_thunk:
                 continue
-            node = next(iter(self.global_xrefs[child_func_ea][self.DIRECT_XREFS]["imports"]))
-            self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports"].add(node)
+            node = next(iter(child_entry[self.DIRECT_XREFS]["imports"]))
+            # The calling side is what we WRITE to, and it is not guaranteed to
+            # have an entry yet. Entries exist for artifact-bearing functions,
+            # plus — in FULL mode only — every path node via
+            # propagate_xref_nodes(). In light mode a caller carrying no
+            # artifacts of its own therefore has none, and indexing it raised
+            # KeyError, aborting the entire analysis before clustering.
+            # Create the entry rather than skipping the forward: skipping would
+            # drop the thunk's import from the caller in light mode only, which
+            # is precisely the light/full report divergence that
+            # tests/test_light_mode_gating.py exists to prevent.
+            caller_entry = self.ensure_global_xrefs_entry(func_ea)
+            caller_entry[self.DIRECT_XREFS]["imports"].add(node)
             try:
-                if node not in self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports_ea"]:
+                if node not in caller_entry[self.DIRECT_XREFS]["imports_ea"]:
                     call_xrefs = self.caller_xrefs_cache[func_ea][child_func_ea]
-                    self.global_xrefs[func_ea][self.DIRECT_XREFS]["imports_ea"][node] = call_xrefs
+                    caller_entry[self.DIRECT_XREFS]["imports_ea"][node] = call_xrefs
                     self.entity_xrefs[node].update(call_xrefs)
             except (KeyError, AttributeError) as e:
                 log(f"Warning: Failed to update thunk imports for function 0x{func_ea:x}: {e}")
-            self.global_xrefs[func_ea][self.INDIRECT_XREFS]["imports"].discard(node)
+            caller_entry[self.INDIRECT_XREFS]["imports"].discard(node)
 
     def _process_artifact_xrefs(self, idx: int, entity: Tuple, xrefs: Set[int], func_artifacts: Dict, orphan_func_artifacts: Dict, orphan_artifacts: List) -> None:
         """
@@ -2020,13 +2034,27 @@ class XRefer:
                         "[!] The entry point does not lead to any cross-references. \n"
                         "[!] Please specify a different entry point and rerun the analysis. (CLI: `--entry-point <address>`)\n\n"
                     )
+                    # Guidance, but still a run that produced no analysis: report
+                    # it as a failure so scripted/CI callers don't read the
+                    # "completed successfully" exit as a usable result.
+                    self.analysis_errors.append(
+                        f"No call paths could be generated for entry point {ep_value:#x}"
+                    )
                 else:
                     log(f"[-] Analysis aborted: {message}")
+                    # Record it: the analysis did NOT complete, so callers must
+                    # not treat this run as a success (the CLI exits non-zero on
+                    # a non-empty analysis_errors).
+                    self.analysis_errors.append(f"Analysis aborted: {message}")
             except Exception as err:
                 log(f"[-] Error running full analysis: {err}")
                 import traceback
 
                 traceback.print_exc()
+                # Without this the run aborts before clustering yet still
+                # reports "Analysis completed successfully" and exits 0, so a
+                # hard failure looks like a clean run to any caller/CI.
+                self.analysis_errors.append(f"Analysis failed: {err!r}")
 
         log_elapsed_time("Analysis Time", start_time)
 
