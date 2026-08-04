@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 # Common disassembler-generated function-name prefixes (IDA sub_/nullsub_/loc_,
 # Ghidra FUN_, Binary Ninja sub_). Used by Function.has_default_name's portable

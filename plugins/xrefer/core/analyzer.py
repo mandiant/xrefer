@@ -43,8 +43,13 @@ if TYPE_CHECKING:
 try:
     from idaapi import hide_wait_box, show_wait_box
 except ImportError:
+    # Kept out of the f-string expression: a backslash inside one is a
+    # SyntaxError before Python 3.12 (PEP 701 lifted the restriction), and
+    # pyproject declares requires-python >= 3.11.
+    _WAIT_BOX_PREFIX = "HIDECANCEL\n"
+
     def show_wait_box(message: str, *args, **kwargs) -> None:
-        print(f"Wait: {message.removeprefix('HIDECANCEL\n')}", *args, **kwargs)
+        print(f"Wait: {message.removeprefix(_WAIT_BOX_PREFIX)}", *args, **kwargs)
     def hide_wait_box(*args, **kwargs) -> None:
         print("Wait box hidden", *args, **kwargs)
 
