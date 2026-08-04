@@ -920,6 +920,75 @@ class GenerateHtmlReportHandler(idaapi.action_handler_t):
         return idaapi.AST_DISABLE
 
 
+class GenerateAgentAnatomyHandler(idaapi.action_handler_t):
+    """
+    Export the agent-facing "binary anatomy" JSON (single file) to
+    <binary_path>_anatomy.json, for an external malware-analysis agent
+    (radare2 / format_binary). Works with or without the LLM layer: if cluster
+    analysis has not run, a valid static-only map is still emitted.
+    """
+
+    def activate(self, ctx: Any) -> bool:
+        from xrefer.plugin import plugin_instance
+
+        try:
+            from xrefer.core.agent_map import export_anatomy
+
+            xo = plugin_instance.xrefer_view.xrefer_obj
+            out_path = f"{xo._backend.path}_anatomy.json"
+            export_anatomy(xo, out_path)
+            log(f"[+] Agent anatomy written to: {out_path}")
+            return True
+        except Exception as e:
+            log(f"[-] Error exporting agent anatomy: {str(e)}")
+            import traceback
+
+            traceback.print_exc()
+            return False
+
+    def update(self, ctx: Any) -> int:
+        from xrefer.plugin import plugin_instance
+
+        if plugin_instance.xrefer_view and getattr(plugin_instance.xrefer_view, "xrefer_obj", None):
+            return idaapi.AST_ENABLE_ALWAYS
+        return idaapi.AST_DISABLE
+
+
+class GenerateAgentMapHandler(idaapi.action_handler_t):
+    """
+    Export the tiered agent-map bundle (map.json + clusters/ + indices/) to
+    <binary_path>_agent_map/, for an external malware-analysis agent
+    (radare2 / format_binary). Carries the full uncurated projection split
+    across lazy-loaded files — for binaries too large for the single-file
+    anatomy. Works with or without the LLM layer.
+    """
+
+    def activate(self, ctx: Any) -> bool:
+        from xrefer.plugin import plugin_instance
+
+        try:
+            from xrefer.core.agent_map import export_agent_map
+
+            xo = plugin_instance.xrefer_view.xrefer_obj
+            out_dir = f"{xo._backend.path}_agent_map"
+            export_agent_map(xo, out_dir)
+            log(f"[+] Agent map bundle written to: {out_dir}/")
+            return True
+        except Exception as e:
+            log(f"[-] Error exporting agent map: {str(e)}")
+            import traceback
+
+            traceback.print_exc()
+            return False
+
+    def update(self, ctx: Any) -> int:
+        from xrefer.plugin import plugin_instance
+
+        if plugin_instance.xrefer_view and getattr(plugin_instance.xrefer_view, "xrefer_obj", None):
+            return idaapi.AST_ENABLE_ALWAYS
+        return idaapi.AST_DISABLE
+
+
 class SyncImageBaseHandler(idaapi.action_handler_t):
     """
     Handler for synchronizing image base addresses.
