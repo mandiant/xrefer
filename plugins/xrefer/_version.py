@@ -27,4 +27,4 @@
 # breaks ``uv lock`` because of the ``plugins/xrefer.py`` IDA-loader
 # vs. ``plugins/xrefer/`` package name collision.
 
-__version__ = "1.1.20260604"
+__version__ = "1.1.20260804"
