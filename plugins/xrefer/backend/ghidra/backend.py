@@ -1,7 +1,25 @@
 import logging
+import os
+import re
 from collections.abc import Iterator
 
 from ..base import Address, BackEnd, BackendError, BasicBlock, Function, FunctionType, Instruction, InvalidAddressError, Operand, OperandType, Section, SectionType, String, StringEncType, Xref, XrefType
+
+# Ghidra's Program.getExecutablePath() hands back a URI-style path. On
+# Windows that is "/D:/dir/sample.bin" — a leading slash in front of the
+# drive letter — which Python's open() rejects with EINVAL. It is not just
+# the binary: every derived path (the .xrefer cache, _capa.json,
+# _user_xrefs.txt, _trace.zip) is built from this string, so a headless
+# Windows run fails at save time having done all the analysis work.
+# Invisible on Linux and macOS, where a leading slash is simply correct.
+_URI_DRIVE_PATH = re.compile(r"^/([A-Za-z]:[\\/])")
+
+
+def _native_path(path: str) -> str:
+    """Convert a Ghidra URI-style path into one the host OS accepts."""
+    if _URI_DRIVE_PATH.match(path):
+        return os.path.normpath(path[1:])
+    return path
 
 
 def configure_fast_analysis(program) -> None:
@@ -773,7 +791,7 @@ class GhidraBackend(BackEnd):
             program = self._get_actual_program()
             executable_path = program.getExecutablePath()
             if executable_path:
-                return executable_path
+                return _native_path(executable_path)
             # Fallback to program name
             return program.getName()
         except Exception as e:
