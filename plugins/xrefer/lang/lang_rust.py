@@ -995,8 +995,16 @@ class LangRust(LanguageBase):
         return "::".join(common_parts)
 
     def _ptr_size(self) -> int:
-        max_end = max(sec.end.value for sec in self.backend.get_sections())
-        return 8 if max_end > 0xFFFFFFFF else 4
+        # Mirrors RustStringParser._guess_ptr_size: an unguarded max() raises
+        # ValueError on a binary whose backend reports no sections, and this
+        # runs inside _process_if_rust, so it would abort ALL Rust analysis
+        # rather than just the pointer-size probe.
+        try:
+            max_end = max(sec.end.value for sec in self.backend.get_sections())
+            return 8 if max_end > 0xFFFFFFFF else 4
+        except Exception:
+            # Safe default (64-bit), same fallback as the sibling helper.
+            return 8
 
     def _read_ptr(self, addr: Address, size: int) -> Optional[int]:
         raw = self.backend.read_bytes(addr, size)
