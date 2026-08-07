@@ -1244,14 +1244,14 @@ def export_anatomy(xrefer: Any, out_path: str) -> str:
         n = cur - 1 + len(str(n))
     data["_end"]["declared_bytes"] = n
     raw = _dump(data)
-    with open(out_path, "w", encoding="utf-8") as fh:
+    with open(out_path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(raw)
     log(f"[agent_map] wrote {out_path} ({len(raw.encode('utf-8'))} bytes, "
         f"{len(data['clusters'])} signal clusters, has_llm={data['meta']['has_llm_layer']})")
     skill = _read_agent_skill("xrefer_binary_anatomy.md")
     if skill is not None:
         skill_path = os.path.join(os.path.dirname(os.path.abspath(out_path)), "xrefer_binary_anatomy.SKILL.md")
-        with open(skill_path, "w", encoding="utf-8") as fh:
+        with open(skill_path, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(skill)
         log(f"[agent_map] wrote consumer skill to {skill_path}")
     return out_path
@@ -1286,8 +1286,13 @@ def export_agent_map(xrefer: Any, out_dir: str) -> str:
     os.makedirs(indices_dir, exist_ok=True)
 
     def _write(path: str, obj: Any) -> int:
+        # newline="\n" is load-bearing, not style: in text mode Windows
+        # translates every \n to \r\n AFTER this function has measured the
+        # string, so the manifest under-reports each file by one byte per
+        # line and a consumer sizing a read from it comes up short. It
+        # also keeps a bundle byte-identical across platforms.
         raw = json.dumps(obj, ensure_ascii=False, indent=2)
-        with open(path, "w", encoding="utf-8") as fh:
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(raw)
         return len(raw.encode("utf-8"))
 
@@ -1316,7 +1321,7 @@ def export_agent_map(xrefer: Any, out_dir: str) -> str:
     if bundle["report_md"] is not None:
         rel = "indices/report.md"
         raw = bundle["report_md"]
-        with open(os.path.join(out_dir, rel), "w", encoding="utf-8") as fh:
+        with open(os.path.join(out_dir, rel), "w", encoding="utf-8", newline="\n") as fh:
             fh.write(raw)
         tier2.append({"path": rel, "bytes": len(raw.encode("utf-8")),
                       "load_when": "you want xrefer's LLM narrative (reference only — do NOT use as your report's spine)"})
@@ -1325,7 +1330,7 @@ def export_agent_map(xrefer: Any, out_dir: str) -> str:
     skill_present = False
     skill = _read_agent_skill("xrefer_agent_map.md")
     if skill is not None:
-        with open(os.path.join(out_dir, "SKILL.md"), "w", encoding="utf-8") as fh:
+        with open(os.path.join(out_dir, "SKILL.md"), "w", encoding="utf-8", newline="\n") as fh:
             fh.write(skill)
         skill_present = True
 

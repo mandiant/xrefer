@@ -18,6 +18,7 @@ PyPI shim arrives transitively on every install, so mere importability
 must NOT count as IDA being available)."""
 
 import json
+import platform
 
 import pytest
 
@@ -62,12 +63,24 @@ def test_available_backends_returns_detected():
 
 
 def _isolate_ida_config(monkeypatch, tmp_path):
-    """Point every lookup the detector does at a controlled empty home."""
+    """Point every lookup the detector does at a controlled empty home.
+
+    Returns the directory the detector actually reads ida-config.json from
+    on THIS platform — ``~/.idapro`` on POSIX, but
+    ``%APPDATA%/Hex-Rays/IDA Pro`` on Windows (see cli._ida_install_
+    configured). Hardcoding the POSIX path made the "configured" test fail
+    on Windows, and made the "empty config" test pass there for the wrong
+    reason: no config found at all, rather than one found and rejected.
+    """
     monkeypatch.delenv("IDADIR", raising=False)
     monkeypatch.delenv("IDAUSR", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     # Path.home() honors HOME on POSIX; on Windows it uses USERPROFILE.
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    if platform.system() == "Windows":
+        monkeypatch.setenv("APPDATA", str(tmp_path / "AppData"))
+        return tmp_path / "AppData" / "Hex-Rays" / "IDA Pro"
+    return tmp_path / ".idapro"
 
 
 def test_ida_not_configured_without_install(monkeypatch, tmp_path):
@@ -82,17 +95,15 @@ def test_ida_configured_via_idadir(monkeypatch, tmp_path):
 
 
 def test_ida_configured_via_config_json(monkeypatch, tmp_path):
-    _isolate_ida_config(monkeypatch, tmp_path)
-    cfg_dir = tmp_path / ".idapro"
-    cfg_dir.mkdir()
+    cfg_dir = _isolate_ida_config(monkeypatch, tmp_path)
+    cfg_dir.mkdir(parents=True)
     (cfg_dir / "ida-config.json").write_text(json.dumps({"Paths": {"ida-install-dir": "/opt/ida"}}))
     assert _ida_install_configured() is True
 
 
 def test_ida_empty_config_not_configured(monkeypatch, tmp_path):
-    _isolate_ida_config(monkeypatch, tmp_path)
-    cfg_dir = tmp_path / ".idapro"
-    cfg_dir.mkdir()
+    cfg_dir = _isolate_ida_config(monkeypatch, tmp_path)
+    cfg_dir.mkdir(parents=True)
     (cfg_dir / "ida-config.json").write_text(json.dumps({"Paths": {"ida-install-dir": ""}}))
     assert _ida_install_configured() is False
 
