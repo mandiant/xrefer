@@ -116,7 +116,14 @@ where = ["plugins"]
 # initial categories JSON / logo — an installed xrefer then crashes at
 # report generation (analyzer.generate_html_report asserts the data
 # dir exists). Declare it as package data of ``xrefer`` explicitly.
-xrefer = ["data/*"]
+#
+# The glob must recurse: ``data/*`` matches only files sitting directly
+# in ``data/`` and silently drops every subdirectory (setuptools keeps
+# just the file matches). ``data/agent_skills/*.md`` was lost that way —
+# built, installed, and no error anywhere, because nothing reads a skill
+# file at import time. ``data/**/*`` covers both levels, so a new data
+# subdirectory ships without anyone having to remember this file.
+xrefer = ["data/**/*"]
 
 [tool.setuptools.dynamic]
 # Reads ``plugins/xrefer/_version.py`` via setuptools' static AST
