@@ -14,7 +14,27 @@ authors = [
 # whichever is convenient.
 dynamic = ["version"]
 description = "FLARE Team's Binary Navigator"
+# Without these three the PyPI project page renders as a bare title with
+# no body, no licence and no search facets — the README is what tells a
+# visitor what xrefer is.
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
+keywords = ["reverse-engineering", "malware-analysis", "binary-analysis", "disassembler", "ida-pro", "ghidra"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Information Technology",
+    "Operating System :: OS Independent",
+    # The floor is set by networkx (>=3.11) and the ceiling by
+    # litellm/dspy (<3.15), not by preference.
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+    "Topic :: Software Development :: Disassemblers",
+]
 dependencies = [
     # Pure-Python ASCII graph renderer (replaces asciinet/JVM) is now
     # vendored at plugins/xrefer/_vendor/ascii_graphs/ — no external
@@ -93,7 +113,8 @@ override-dependencies = [
 ]
 
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+# setuptools >= 77 for PEP 639 (SPDX ``license`` + ``license-files``).
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]

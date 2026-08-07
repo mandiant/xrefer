@@ -1,0 +1,288 @@
+# Continuous integration for the pip-installable / standalone xrefer.
+#
+# Everything here runs against the BUILT WHEEL, never the source tree.
+# That is deliberate: every packaging bug this project has hit (empty
+# data/ dir, a phantom "ida" backend from a transitive dep, package-data
+# globs that silently dropped a subdirectory) was invisible from a source
+# checkout and only appeared once the wheel was installed somewhere clean.
+# A GitHub runner is that clean somewhere — a fresh VM image per job.
+#
+# Backends: vivisect ships with the package and is covered on every
+# matrix leg. Ghidra needs a real installation plus a JVM, so it gets its
+# own job on Linux + Windows rather than multiplying the matrix by a
+# ~500 MB download. IDA and Binary Ninja need licensed host applications
+# and cannot run here at all.
+name: ci
+
+on:
+  push:
+    branches: [gsoc_2025]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Never let a CI run reach out to an LLM provider: it costs money and
+  # would need a secret. Everything up to the LLM boundary is covered.
+  XREFER_CI: "1"
+
+jobs:
+  # ---------------------------------------------------------------- #
+  # Fresh install on a clean machine: the wheel, the three entry       #
+  # surfaces, the programmatic API, and a real analysis.               #
+  # ---------------------------------------------------------------- #
+  install:
+    name: install ${{ matrix.os }} py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The supported window is set by the dependencies, not by taste:
+        # networkx requires >=3.11 (so 3.9/3.10 are impossible), and
+        # litellm/dspy cap out below 3.15.
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Build the wheel
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+
+      - name: Install the wheel into a clean environment
+        shell: bash
+        run: python -m pip install "$(ls dist/*.whl)[vivisect]" pytest
+
+      # ``-o pythonpath=`` clears the pythonpath = ["plugins"] set in
+      # pyproject.toml. Without it pytest puts the source tree ahead of
+      # site-packages and the suite silently tests ./plugins instead of
+      # the wheel that was just installed — which for a packaging change
+      # is the one thing that must not happen.
+      #
+      # tests/integration and tests/e2e need the sample submodule and a
+      # host disassembler; the ghidra job below covers that ground.
+      # (--cov in addopts is safe without pytest-cov: tests/conftest.py
+      # already registers no-op coverage flags for exactly that case.)
+      - name: Unit suite (against the installed wheel, not the source tree)
+        shell: bash
+        run: python -m pytest tests/ -q --ignore=tests/e2e --ignore=tests/integration -o pythonpath=
+
+      - name: Entry surface 1of3 — console script
+        shell: bash
+        run: xrefer --help
+
+      - name: Entry surface 2of3 — python -m
+        shell: bash
+        run: python -m xrefer --help
+
+      - name: Entry surface 3of3 — import, and the packaged data files
+        shell: bash
+        run: |
+          python - <<'PY'
+          import pathlib, sys, xrefer
+
+          print("version :", xrefer.__version__)
+          print("backends:", xrefer.available_backends())
+
+          # vivisect ships with the package, so it must always be offered.
+          assert "vivisect" in xrefer.available_backends(), "vivisect missing"
+
+          # No IDA on a runner. idapro arrives transitively (flare-capa ->
+          # ida-settings -> ida-hcli -> idapro), and advertising a backend
+          # that cannot work is worse than not offering it.
+          assert "ida" not in xrefer.available_backends(), "phantom ida backend"
+
+          # Package data must survive the build. Kept explicit because a
+          # non-recursive package-data glob once dropped data/agent_skills/
+          # from the wheel with no error anywhere.
+          data = pathlib.Path(xrefer.__file__).parent / "data"
+          expected = {
+              "report_tmpl.html",
+              "xrefer_categories_initial.json",
+              "xrefer_logo.png",
+              "agent_skills/xrefer_binary_anatomy.md",
+              "agent_skills/xrefer_agent_map.md",
+          }
+          missing = {p for p in expected if not (data / p).is_file()}
+          assert not missing, f"data files missing from the wheel: {sorted(missing)}"
+          print("data files: all", len(expected), "present")
+          PY
+
+      - name: Sample binary to analyse
+        shell: bash
+        # Unix compiles a small ELF/Mach-O. Windows analyses a stock
+        # system PE instead of installing a toolchain — which also means
+        # the matrix covers both container formats for real.
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp "$SYSTEMROOT/System32/where.exe" sample.bin
+          else
+            printf '#include <stdio.h>\n#include <stdlib.h>\nint main(int c,char**v){if(c>1)printf("%%ld\\n",strtol(v[1],0,10));return 0;}\n' > s.c
+            # Prefer a non-PIE binary: vivisect's ELF PLT pass raises a
+            # caught-but-printed exception on PIE, which analyses fine
+            # but leaves a traceback in the log that reads as a failure.
+            # arm64 macOS mandates PIE, hence the fallback.
+            cc -no-pie -o sample.bin s.c 2>/dev/null || cc -o sample.bin s.c
+          fi
+          ls -l sample.bin
+
+      - name: Real analysis through the CLI (vivisect)
+        shell: bash
+        run: |
+          xrefer --no-llm sample.bin
+          # RC=0 is not enough on its own: the analyzer can decline to do
+          # work and still exit clean, so assert the artefact exists.
+          ls -l sample.bin_vivisect.xrefer
+
+      - name: Real analysis through the programmatic API
+        shell: bash
+        run: |
+          python - <<'PY'
+          import pathlib, xrefer
+
+          result = xrefer.analyze("sample.bin", llm=False, force=True)
+          assert result is not None, "analyze() returned nothing"
+          assert pathlib.Path("sample.bin_vivisect.xrefer").is_file(), "no cache written"
+          print("analyze() ->", type(result).__name__)
+          PY
+
+  # ---------------------------------------------------------------- #
+  # Ghidra backend. Needs a JVM and a real Ghidra install, so it is    #
+  # deliberately narrow: one Python, the two platforms asked for.      #
+  # ---------------------------------------------------------------- #
+  ghidra:
+    name: ghidra backend ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Resolve the latest Ghidra release
+        id: ghidra
+        shell: bash
+        # Resolved from the API rather than pinned so this does not rot
+        # silently; the resolved version is echoed into the log and the
+        # cache key so a failure is always attributable to a version.
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, urllib.request
+
+          url = "https://api.github.com/repos/NationalSecurityAgency/ghidra/releases/latest"
+          rel = json.load(urllib.request.urlopen(url))
+          asset = next(a for a in rel["assets"] if a["name"].endswith(".zip"))
+          print(f"tag={rel['tag_name']}")
+          print(f"name={asset['name']}")
+          print(f"url={asset['browser_download_url']}")
+          PY
+          cat "$GITHUB_OUTPUT"
+
+      - name: Cache the Ghidra install
+        id: ghidra-cache
+        uses: actions/cache@v4
+        with:
+          path: ghidra
+          key: ghidra-${{ runner.os }}-${{ steps.ghidra.outputs.tag }}
+
+      - name: Download and unpack Ghidra
+        if: steps.ghidra-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          curl -sSL -o ghidra.zip "${{ steps.ghidra.outputs.url }}"
+          mkdir -p ghidra && unzip -q ghidra.zip -d ghidra
+          rm ghidra.zip
+
+      - name: Point GHIDRA_INSTALL_DIR at it
+        shell: bash
+        # The zip unpacks to a single versioned directory whose name
+        # tracks the release, so discover it rather than hardcode it.
+        run: |
+          dir="$(find "$PWD/ghidra" -maxdepth 1 -mindepth 1 -type d | head -1)"
+          echo "GHIDRA_INSTALL_DIR=$dir" >> "$GITHUB_ENV"
+          echo "resolved: $dir"
+
+      - name: Build and install the wheel with the ghidra extra
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+          python -m pip install "$(ls dist/*.whl)[ghidra]"
+
+      - name: Ghidra is auto-detected
+        shell: bash
+        run: |
+          python - <<'PY'
+          import xrefer
+
+          backends = xrefer.available_backends()
+          print("backends:", backends)
+          assert "ghidra" in backends, "ghidra extra installed but not detected"
+          PY
+
+      - name: Sample binary to analyse
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp "$SYSTEMROOT/System32/where.exe" sample.bin
+          else
+            printf '#include <stdio.h>\n#include <stdlib.h>\nint main(int c,char**v){if(c>1)printf("%%ld\\n",strtol(v[1],0,10));return 0;}\n' > s.c
+            # Prefer a non-PIE binary: vivisect's ELF PLT pass raises a
+            # caught-but-printed exception on PIE, which analyses fine
+            # but leaves a traceback in the log that reads as a failure.
+            # arm64 macOS mandates PIE, hence the fallback.
+            cc -no-pie -o sample.bin s.c 2>/dev/null || cc -o sample.bin s.c
+          fi
+
+      - name: Real analysis through the ghidra backend
+        shell: bash
+        run: |
+          xrefer --backend ghidra --no-llm sample.bin
+          ls -l sample.bin.xrefer
+
+  # ---------------------------------------------------------------- #
+  # Security scan. Ruff already enforces flake8-bandit (the "S" rules) #
+  # on every lint run; bandit proper is kept for the checks that do    #
+  # not have a ruff equivalent.                                        #
+  # ---------------------------------------------------------------- #
+  bandit:
+    name: bandit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install bandit
+        run: python -m pip install bandit[toml]
+
+      # -ll reports medium severity and above. Findings are surfaced but
+      # do not fail the build yet: this repo has never been scanned, and
+      # a first run that goes red on pre-existing findings tells nobody
+      # anything useful. Tighten to a hard gate once triaged.
+      - name: Scan
+        continue-on-error: true
+        run: bandit -r plugins/xrefer -ll -f screen

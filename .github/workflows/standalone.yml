@@ -79,7 +79,24 @@ jobs:
       - name: Smoke-test standalone binary
         shell: bash
         working-directory: .github/pyinstaller
-        run: ./dist/${{ matrix.binary }} --help
+        # --help only proves the frozen binary starts. Analyse something
+        # real as well: a one-file build can boot fine and still be
+        # missing a bundled data file or a lazily-imported backend
+        # module, neither of which shows up until analysis runs.
+        # Windows analyses a stock system PE; the others compile a small
+        # ELF/Mach-O, so both container formats get exercised.
+        run: |
+          ./dist/${{ matrix.binary }} --help
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp "$SYSTEMROOT/System32/where.exe" sample.bin
+          else
+            printf '#include <stdio.h>\n#include <stdlib.h>\nint main(int c,char**v){if(c>1)printf("%%ld\\n",strtol(v[1],0,10));return 0;}\n' > s.c
+            # Non-PIE where possible: vivisect's ELF PLT pass prints a
+            # caught exception on PIE that reads as a failure in the log.
+            cc -no-pie -o sample.bin s.c 2>/dev/null || cc -o sample.bin s.c
+          fi
+          ./dist/${{ matrix.binary }} --no-llm sample.bin
+          ls -l sample.bin_vivisect.xrefer
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
