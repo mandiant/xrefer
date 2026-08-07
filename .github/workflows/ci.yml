@@ -117,11 +117,31 @@ jobs:
           print("data files: all", len(expected), "present")
           PY
 
+      # ---------------------------------------------------------------- #
+      # The analysis steps below are skipped on macOS. vivisect cannot   #
+      # load a Mach-O at all through the normal path:                    #
+      #                                                                  #
+      #   vivisect/parsers/macho.py:98                                   #
+      #       offset = baseaddr - fakebase                               #
+      #   TypeError: unsupported operand type(s) for -: 'NoneType'/'int' #
+      #                                                                  #
+      # loadFromFile() defaults baseaddr to None, and line 98 uses it    #
+      # before the None-resolution its own following comment describes.  #
+      # Architecture-independent, upstream vivisect, nothing xrefer can  #
+      # fix from the outside. macOS still covers build, install, the     #
+      # unit suite, all three entry surfaces and the packaged data —     #
+      # only the analyse-a-file steps are unavailable. Linux and Windows #
+      # (what the reviewer asked for) run the full set.                  #
+      # ---------------------------------------------------------------- #
+      - name: Note why analysis is skipped here
+        if: runner.os == 'macOS'
+        run: echo "vivisect cannot load Mach-O (macho.py:98, baseaddr=None) - analysis steps skipped, see workflow comment"
+
       - name: Sample binary to analyse
+        if: runner.os != 'macOS'
         shell: bash
-        # Unix compiles a small ELF/Mach-O. Windows analyses a stock
-        # system PE instead of installing a toolchain — which also means
-        # the matrix covers both container formats for real.
+        # Windows analyses a stock system PE instead of installing a
+        # toolchain; Linux compiles a small ELF.
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
             cp "$SYSTEMROOT/System32/where.exe" sample.bin
@@ -136,6 +156,7 @@ jobs:
           ls -l sample.bin
 
       - name: Real analysis through the CLI (vivisect)
+        if: runner.os != 'macOS'
         shell: bash
         run: |
           xrefer --no-llm sample.bin
@@ -144,6 +165,7 @@ jobs:
           ls -l sample.bin_vivisect.xrefer
 
       - name: Real analysis through the programmatic API
+        if: runner.os != 'macOS'
         shell: bash
         run: |
           python - <<'PY'
