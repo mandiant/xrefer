@@ -146,6 +146,13 @@ def _ida_backend(path: pathlib.Path):  # pragma: no cover - requires IDA at runt
         idapro.close_database(save=False)
 
 
+@contextmanager
+def _vivisect_backend(path: pathlib.Path):
+    from xrefer.backend.vivisect.backend import VivisectBackend
+
+    yield VivisectBackend(path=str(path))
+
+
 def _backend_context(backend_id: str, path: pathlib.Path):
     if backend_id == "binaryninja":
         return _binaryninja_backend(path)
@@ -153,6 +160,8 @@ def _backend_context(backend_id: str, path: pathlib.Path):
         return _ghidra_backend(path)
     if backend_id == "ida":
         return _ida_backend(path)
+    if backend_id == "vivisect":
+        return _vivisect_backend(path)
     raise ValueError(f"unknown backend: {backend_id}")
 
 
@@ -178,7 +187,7 @@ def _collect(backend, address: Address) -> set[ExpectedXref]:
 @pytest.mark.integration
 @pytest.mark.requires_binary
 @pytest.mark.parametrize("hash_id", list(SAMPLES.keys()))
-@pytest.mark.parametrize("backend_id", ["binaryninja", "ghidra", "ida"])
+@pytest.mark.parametrize("backend_id", ["binaryninja", "ghidra", "ida", "vivisect"])
 def test_strict_xrefs(hash_id: str, backend_id: str):
     expectations = SAMPLES[hash_id]
     base = pathlib.Path("tests/e2e/xrefer-test/samples") / hash_id / "binary"

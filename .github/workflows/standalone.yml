@@ -1,0 +1,115 @@
+# Build the standalone one-file xrefer binaries (vivisect backend) for
+# Linux / Windows / macOS, plus the pip wheel. Modeled on mandiant/capa's
+# build workflow: PyInstaller cannot cross-compile, so each OS builds its
+# own artifact in a matrix.
+#
+# Triggers are deliberately conservative (manual + release) so CI minutes
+# are not spent on every push; flip on pull_request if/when maintainers
+# want per-PR build validation.
+name: build standalone
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build wheel + sdist
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - name: Smoke-test wheel install
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install "$(ls dist/*.whl)[vivisect]"
+          /tmp/smoke/bin/python -m xrefer --help
+          /tmp/smoke/bin/python -c "import xrefer; print(xrefer.__version__, xrefer.available_backends())"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xrefer-wheel
+          path: dist/*
+
+  standalone:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04        # oldest supported LTS -> broadest glibc compat
+            artifact: xrefer-linux
+            binary: xrefer
+          - os: windows-latest
+            artifact: xrefer-windows
+            binary: xrefer.exe
+          - os: macos-14            # arm64
+            artifact: xrefer-macos-arm64
+            binary: xrefer
+          - os: macos-13            # x86_64
+            artifact: xrefer-macos-x86_64
+            binary: xrefer
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build wheel
+        shell: bash
+        run: |
+          python -m pip install --upgrade build
+          python -m build --wheel
+      - name: Install wheel + PyInstaller
+        shell: bash
+        # Build the frozen binary against the INSTALLED wheel so the
+        # standalone ships exactly what pip users get.
+        run: python -m pip install "$(ls dist/*.whl)[vivisect]" pyinstaller
+      - name: Build standalone binary
+        shell: bash
+        working-directory: .github/pyinstaller
+        run: pyinstaller xrefer.spec --noconfirm
+      - name: Smoke-test standalone binary
+        shell: bash
+        working-directory: .github/pyinstaller
+        # --help only proves the frozen binary starts. Analyse something
+        # real as well: a one-file build can boot fine and still be
+        # missing a bundled data file or a lazily-imported backend
+        # module, neither of which shows up until analysis runs.
+        # Windows analyses a stock system PE; Linux compiles a small ELF.
+        #
+        # macOS gets --help only: vivisect cannot load a Mach-O through the
+        # normal path at all — vivisect/parsers/macho.py:98 computes
+        # "offset = baseaddr - fakebase" while baseaddr is still None
+        # (loadFromFile defaults it, and the None-resolution the code's own
+        # comment describes happens further down), so every Mach-O raises
+        # TypeError regardless of architecture. Upstream vivisect, not
+        # something xrefer can fix, and macOS is not a target platform for
+        # this work — the binary is still built and published.
+        run: |
+          ./dist/${{ matrix.binary }} --help
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            echo "macOS: vivisect cannot load Mach-O (macho.py:98, baseaddr=None) - analysis smoke test skipped"
+            exit 0
+          fi
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp "$SYSTEMROOT/System32/where.exe" sample.bin
+          else
+            printf '#include <stdio.h>\n#include <stdlib.h>\nint main(int c,char**v){if(c>1)printf("%%ld\\n",strtol(v[1],0,10));return 0;}\n' > s.c
+            # Non-PIE where possible: vivisect's ELF PLT pass prints a
+            # caught exception on PIE that reads as a failure in the log.
+            cc -no-pie -o sample.bin s.c 2>/dev/null || cc -o sample.bin s.c
+          fi
+          ./dist/${{ matrix.binary }} --no-llm sample.bin
+          ls -l sample.bin_vivisect.xrefer
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: .github/pyinstaller/dist/${{ matrix.binary }}

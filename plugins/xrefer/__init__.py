@@ -26,4 +26,6 @@
 from ._version import __version__
 
 from . import core, lang, llm, loaders
-__all__ = ["core", "lang", "llm", "loaders", "__version__"]
+from .api import analyze, available_backends
+
+__all__ = ["core", "lang", "llm", "loaders", "analyze", "available_backends", "__version__"]

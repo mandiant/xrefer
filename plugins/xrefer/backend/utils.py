@@ -1,5 +1,10 @@
 def sample_path() -> str:
-    """Return a sample path for the active backend."""
+    """Return a sample path for the active backend.
+
+    This seeds default paths for INPUT artifacts (trace/capa/xrefs) and the
+    per-sample settings key, so it must stay the real binary path. Backend-
+    qualified OUTPUT naming (the ``.xrefer`` cache / report) is handled via
+    ``backend.output_base`` at the output sites, not here."""
     from . import get_current_backend
 
     backend = get_current_backend()

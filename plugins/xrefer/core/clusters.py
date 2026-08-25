@@ -19,7 +19,7 @@ import networkx as nx
 from networkx import NetworkXError
 
 from xrefer.backend import Address, BackEnd
-from xrefer.core.helpers import find_cluster_analysis, log
+from xrefer.core.helpers import cluster_debug_enabled, dlog, find_cluster_analysis, log
 
 # Per-cluster frequent-node-cleanup narration (six lines per touched
 # cluster) buried real warnings in the Output window. The cleanup logs a
@@ -789,6 +789,11 @@ class ClusterManager:
 
                     if should_subcluster:
                         # log(f"Adding subcluster for node 0x{child:x}")
+                        # STAGE D (decompose) — every node that splits off a
+                        # subcluster, with its branching factor. Diffing these
+                        # shows whether two backends fragment at the same nodes.
+                        dlog(f"STAGED split root=0x{root:x} child=0x{child:x} "
+                             f"child_succ={len(child_successors)}")
                         if child in subcluster_cache:
                             existing_subcluster, _ = subcluster_cache[child]
                             cluster.subclusters.append(existing_subcluster)
@@ -841,6 +846,16 @@ class ClusterManager:
 
             cluster = extract_cluster(initial_graph, root)
             clusters.append(cluster)
+
+        # STAGE D summary — final top-level + total (incl. subclusters) count.
+        # Gated on the env check UP FRONT: the total-cluster tally recurses over
+        # the entire cluster tree, so without this guard every production run
+        # would walk the whole forest just to build a string dlog() discards.
+        if cluster_debug_enabled():
+            def _count_cluster(cl: "FunctionalCluster") -> int:
+                return 1 + sum(_count_cluster(s) for s in cl.subclusters)
+            dlog(f"STAGED top_level={len(clusters)} "
+                 f"total_clusters={sum(_count_cluster(c) for c in clusters)}")
 
         # Post-process to establish all cluster relationships
         log("Establishing cluster relationships...")

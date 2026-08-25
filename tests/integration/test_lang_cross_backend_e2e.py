@@ -94,6 +94,13 @@ def _ida_backend(path: str):
 
 
 @contextmanager
+def _vivisect_backend(path: str):
+    from xrefer.backend.vivisect.backend import VivisectBackend
+
+    yield VivisectBackend(path=path)
+
+
+@contextmanager
 def _backend_context(backend_id: str, path: str):
     if backend_id == "binaryninja":
         with _binaryninja_backend(path) as backend:
@@ -105,6 +112,10 @@ def _backend_context(backend_id: str, path: str):
         return
     if backend_id == "ida":
         with _ida_backend(path) as backend:
+            yield backend
+        return
+    if backend_id == "vivisect":
+        with _vivisect_backend(path) as backend:
             yield backend
         return
     raise ValueError(f"Unknown backend: {backend_id}")
@@ -156,6 +167,13 @@ def _debug_dump(backend_id: str, snapshot: dict):
 def test_lang_consistency_across_real_backends(sample_id):
     # Require at least two backends to make a meaningful comparison
     avail = _available_backend_ids()
+    # NOTE: deliberately excludes "vivisect". flare-capa pulls vivisect in as a
+    # transitive dep, so it is ALWAYS importable — adding it here would flip this
+    # test from skip to run on an IDA-only machine and strict-assert IDA ==
+    # vivisect on entry_point and lib_refs, surfacing any not-yet-verified parity
+    # gap as a red test that looks like an IDA bug. Re-add only once vivisect
+    # parity is verified against IDA (or put the vivisect comparison behind an
+    # explicit env flag).
     need_any = {"binaryninja", "ghidra", "ida"}
     usable = [b for b in avail if b in need_any]
     if len(usable) < 2:

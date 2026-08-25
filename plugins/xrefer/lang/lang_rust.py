@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Tuple
 from tabulate import tabulate
 from xrefer.backend.base import Instruction
 from xrefer.backend import Address, FunctionType, OperandType, Section, XrefType
-from xrefer.core.helpers import filter_null_string, log, normalize_path
+from xrefer.core.helpers import dlog, filter_null_string, log, normalize_path
 from xrefer.lang.lang_base import LanguageBase
 from xrefer.lang.lang_default import LangDefault
 
@@ -116,6 +116,20 @@ class RustStringParser:
         self.next_offset = 8 if self.is_64bit else 4
         self.ror_num = 32 if self.is_64bit else 16
 
+    def _get_ro_section(self):
+        """Return the primary read-only data section, format-agnostically.
+
+        Rust string literals live in the read-only data section, which is
+        named ``.rdata`` on PE and ``.rodata`` on ELF/Mach-O. The original
+        code hardcoded ``.rdata`` only, so the precise (ptr, len) string
+        slicers silently produced nothing on ELF binaries — collapsing the
+        packed Rust string blob into a single un-sliced entry and starving
+        cluster candidates of their string artifacts. Trying both names keeps
+        one code path working across formats.
+        """
+        return (self.backend.get_section_by_name(".rdata")
+                or self.backend.get_section_by_name(".rodata"))
+
     def get_data_rel_ro_strings(self) -> Dict[int, RustStringInfo]:
         """
         Extract Rust strings from .data.rel.ro section.
@@ -133,7 +147,7 @@ class RustStringParser:
         if not data_rel_ro:
             return strings
 
-        rdata = self.backend.get_section_by_name(".rdata")
+        rdata = self._get_ro_section()
         if not rdata:
             return strings
 
@@ -141,6 +155,9 @@ class RustStringParser:
         while curr_ea < data_rel_ro.end.value:
             ea_candidate = self._read_ptr(curr_ea)
             len_candidate = self._read_ptr(curr_ea + self.next_offset)
+            if ea_candidate is None or len_candidate is None:
+                curr_ea += 1
+                continue
 
             if self._is_valid_string(len_candidate, ea_candidate, rdata):
                 try:
@@ -170,7 +187,7 @@ class RustStringParser:
         """
         strings = {}
 
-        rdata = self.backend.get_section_by_name(".rdata")
+        rdata = self._get_ro_section()
         if not rdata:
             return strings
 
@@ -211,7 +228,7 @@ class RustStringParser:
         """
         strings = {}
         text = self.backend.get_section_by_name(".text")
-        rdata = self.backend.get_section_by_name(".rdata")
+        rdata = self._get_ro_section()
         if not text or not rdata:
             return strings
 
@@ -333,8 +350,8 @@ class LangRust(LanguageBase):
         user_xrefs (List[Tuple[int, int]]): User-defined cross-references
     """
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, backend=None):
+        super().__init__(backend)
         self.id = "lang_rust"
         self.strings = None
         self.ep_annotation = None
@@ -376,6 +393,20 @@ class LangRust(LanguageBase):
         log("Rust compiled binary detected")
         self.user_xrefs = self.get_user_xrefs() or []
         log(f"Found {len(self.user_xrefs)} Rust thread xrefs")
+
+        # Recover trait-object (vtable) dispatch edges the backend's static
+        # analysis missed. Injecting them through user_xrefs reconnects the call
+        # graph so clustering converges to the decompiler's view instead of
+        # over-fragmenting. Backends that can't recover them return [] (default),
+        # so this is a no-op for them.
+        try:
+            vtable_edges = self.backend.recover_vtable_edges()
+        except Exception as e:
+            vtable_edges = []
+            log(f"Rust vtable edge recovery skipped: {e}")
+        if vtable_edges:
+            self.user_xrefs.extend(vtable_edges)
+            log(f"Recovered {len(vtable_edges)} Rust vtable/trait-dispatch edges")
         self._process_strings()
         log(f"Extracted {len(self.strings or {})} Rust strings")
         # self._ensure_rust_entry_alias()
@@ -703,7 +734,26 @@ class LangRust(LanguageBase):
         if not self.lang_match():
             return super().get_entry_point()
 
+        ep = self._select_entry_point()
+        # Guard against a disconnected entry point. On some binaries (observed on
+        # PE Rust) the CRT->main::main link is an indirect call the backend never
+        # resolved, so rust_main detection lands on a function that reaches almost
+        # nothing in the static call graph. Path generation then collapses and the
+        # whole program degenerates into one edgeless cluster. If the chosen EP is
+        # essentially dead, re-root at the dominant reachable function (the real
+        # user main). Strictly gated, so well-connected EPs are returned untouched.
+        #
+        # Only applied for backends that actually under-connect the call graph
+        # (recover_incomplete_call_graph == True: Ghidra, Vivisect). IDA / Binary
+        # Ninja resolve these indirect edges statically, so their EP is never dead
+        # for this reason — they inherit False and get the raw selected EP, leaving
+        # their downstream results unchanged.
+        if not self.backend.recover_incomplete_call_graph:
+            return ep
+        return self._connectivity_guarded_ep(ep)
 
+    def _select_entry_point(self) -> Optional[int]:
+        """Run the rust_main detection cascade (no connectivity guard)."""
         # Try explicit rust_main first
         rust_main = self.backend.get_address_for_name("rust_main")
         if rust_main:
@@ -729,6 +779,124 @@ class LangRust(LanguageBase):
 
         # Last resort: nothing matched.
         return None
+
+    # Connectivity guard: the static call graph reachable from a function.
+    _GUARD_MIN_REACH = 16        # an EP reaching fewer than this is "dead"
+    _GUARD_MIN_ALT = 50          # a replacement must reach at least this many
+    _GUARD_TOPK = 40             # only probe the K highest out-degree functions
+    _GUARD_MAJORITY = 0.5        # an EP reaching < this fraction of all funcs is
+                                 # not trusted as the real root: a larger,
+                                 # disconnected island may hold the true user main
+                                 # (an orphaned rust_main whose indirect bootstrap
+                                 # edge the backend never resolved).
+    _GUARD_DOMINANCE = 4         # on a fragmented binary the real main may reach
+                                 # only a minority, yet still dwarf the stuck EP.
+                                 # Re-root at an island reaching >= this many times
+                                 # the EP *and* >= a quarter of the program.
+
+    def _func_callees(self, fva: int, cache: dict) -> set:
+        """Callee function-starts of `fva`, memoized.
+
+        Counts the SAME edges the path-builder uses for reachability
+        (create_xref_mapping -> caller_xrefs_cache): every far cross-function
+        reference, via far_only=True, not just CALL. Rust leans on tail-call
+        JMPs and vtable / trait-dispatch DATA_OFFSET function pointers; a
+        CALL-only filter misses those, which made the connectivity guard see
+        the real user main as low-reach and decline to re-root (the residual
+        052e0fa2 collapse: guard saw reach 548 < majority where the path
+        builder actually reaches 1774). Aligning the metric with far_only=True
+        makes the guard's reach predict the true cluster-forming reach. (Also
+        cheaper: far_only skips the per-instruction fall-through flow refs.)
+        """
+        if fva in cache:
+            return cache[fva]
+        out: set = set()
+        fn = self.backend.get_function_at(Address(fva))
+        if fn is not None:
+            for bb in fn.basic_blocks:
+                for ia in self.backend.instructions(bb.start, bb.end):
+                    for xr in self.backend.get_xrefs_from(ia, far_only=True):
+                        cf = self.backend.get_function_at(xr.target)
+                        if cf is not None and int(cf.start) != fva:
+                            out.add(int(cf.start))
+        cache[fva] = out
+        return out
+
+    def _reachable(self, start: int, cache: dict, cap: Optional[int] = None) -> set:
+        """Functions reachable from `start` via call edges (optional early stop)."""
+        seen = {int(start)}
+        stack = [int(start)]
+        while stack:
+            x = stack.pop()
+            for y in self._func_callees(x, cache):
+                if y not in seen:
+                    seen.add(y)
+                    if cap is not None and len(seen) >= cap:
+                        return seen
+                    stack.append(y)
+        return seen
+
+    def _connectivity_guarded_ep(self, ep: Optional[int]) -> Optional[int]:
+        if ep is None:
+            return ep
+        ep = int(ep)
+        cache: dict = {}
+        # How many functions would the EP have to reach to be unambiguously the
+        # real root? A majority of the program. Counting functions is cheap
+        # (no reach computation).
+        total_funcs = sum(1 for _ in self.backend.functions())
+        majority = max(self._GUARD_MIN_REACH, int(self._GUARD_MAJORITY * total_funcs))
+        # Cheap path: stop the BFS as soon as the EP is shown to reach a
+        # majority — then it is the real root and we skip the dominant-island
+        # search entirely (the common, well-connected case: no overhead added).
+        reached = self._reachable(ep, cache, cap=majority)
+        if len(reached) >= majority:
+            return ep
+        # The EP reaches only a MINORITY. Two failure modes land here, both
+        # wanting the same remedy: (a) a genuinely dead EP (reaches almost
+        # nothing), and (b) — the bimodal Rust collapse — an EP stuck at the CRT
+        # stub that reaches a moderate runtime sliver while the real user main
+        # sits on a much larger DISCONNECTED island. That island's root is an
+        # orphaned rust_main: the indirect Rust bootstrap call
+        # (__lang_start_internal(main_ptr, ...)) was not resolved, so rust_main
+        # has zero incoming edges and is unreachable from the EP — but it still
+        # has high OUT-degree and reach. Find it by out-degree/reach (not by
+        # reachability from the EP) and re-root there. Only runs in this
+        # pathological minority case.
+        try:
+            ep_reach = len(reached)   # BFS finished below the cap -> full reach
+            degree = []
+            for fn in self.backend.functions():
+                cs = self._func_callees(int(fn.start), cache)
+                if cs:
+                    degree.append((len(cs), int(fn.start)))
+            degree.sort(reverse=True)
+            best, best_reach = None, 0
+            for _, f in degree[:self._GUARD_TOPK]:
+                r = len(self._reachable(f, cache))
+                if r > best_reach:
+                    best, best_reach = f, r
+            dlog(f"GUARD ep=0x{ep:x} ep_reach={ep_reach} total_funcs={total_funcs} "
+                 f"majority={majority} best={('0x%x' % best) if best else None} "
+                 f"best_reach={best_reach} top_outdeg={[(d, hex(a)) for d, a in degree[:5]]}")
+            # Re-root only at a clearly dominant island: it must reach a program
+            # MAJORITY (robust signal that it is the true root), or dwarf the EP
+            # by 10x (the original strict rule, for genuinely-dead EPs). Where no
+            # function dominates (a genuinely fragmented binary), neither holds
+            # and the EP is kept untouched.
+            if (best is not None and best != ep
+                    and best_reach >= self._GUARD_MIN_ALT
+                    and (best_reach >= majority
+                         or best_reach >= 10 * max(1, ep_reach)
+                         or (best_reach >= self._GUARD_DOMINANCE * max(1, ep_reach)
+                             and best_reach >= total_funcs // 4))):
+                log(f"Rust EP connectivity guard: EP 0x{ep:x} reaches only {ep_reach} "
+                    f"function(s) of {total_funcs}; re-rooting at dominant function "
+                    f"0x{best:x} (reaches {best_reach}).")
+                return best
+        except Exception as e:
+            log(f"Rust EP connectivity guard skipped: {e}")
+        return ep
 
     def _find_rust_main(self, main_addr: Address) -> Optional[int]:
         """Delegate rust_main detection to the active backend.

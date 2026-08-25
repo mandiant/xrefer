@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union, 
 import xrefer
 from xrefer.backend import Address, BackEnd, FunctionType, XrefType, get_current_backend
 from xrefer.core.clusters import ClusterManager, FunctionalCluster
-from xrefer.core.helpers import AnalysisCancelled, cancellable_phase, check_cancelled, enrich_string_data_core, find_cluster_analysis, log, log_elapsed_time, log_progress, sanitize_dirtree_name
+from xrefer.core.helpers import AnalysisCancelled, cancellable_phase, check_cancelled, dlog, enrich_string_data_core, find_cluster_analysis, log, log_elapsed_time, log_progress, sanitize_dirtree_name
 from xrefer.core.settings import XReferSettingsManager, deep_merge_settings
 from xrefer.lang import get_language_object
 from xrefer.llm import ClusterAnalyzer, CATEGORIES, Categorizer
@@ -639,6 +639,15 @@ class XRefer:
                             if Address(ref.target) in func:
                                 continue
                             self._record_caller_xref(start, ref)
+
+        # STAGE 0 (backend call graph) — the only true backend boundary;
+        # everything downstream is deterministic from this. Dump a sorted,
+        # per-edge view so two backends over the same binary diff cleanly.
+        if os.environ.get("XREFER_CLUSTER_DEBUG"):
+            edges = [(c, t) for c, tmap in self.caller_xrefs_cache.items() for t in tmap]
+            dlog(f"STAGE0 caller_xrefs_cache funcs={len(self.caller_xrefs_cache)} edges={len(edges)}")
+            for c, t in sorted(edges):
+                dlog(f"STAGE0 edge 0x{c:x} -> 0x{t:x}")
 
     def _record_caller_xref(self, start: int, ref) -> None:
         """Record one outgoing reference into caller_xrefs_cache."""
@@ -1415,6 +1424,48 @@ class XRefer:
             # otherwise-separate clusters to merge into one (regression vs. main).
             # Reverting to main's semantics.
 
+            # Rust dominator anchor. Two-part Rust fix: (1) the backend recovers
+            # the real trait-dispatch edges it statically missed (recover_vtable_edges),
+            # which improves call-graph connectivity; (2) here we re-root at rust_main
+            # *only when it is provably the common ancestor (dominator) of the
+            # fragmented candidates*. This is NOT the blunt "force EP as candidate"
+            # hack the upstream note above rejects: that one fires unconditionally and
+            # collapses every binary to one cluster. We instead require rust_main to
+            # have been POSITIVELY identified (== EP) AND to reach >=2 of the artifact
+            # candidates in the call graph (self.paths[rust_main]). On a std-heavy Rust
+            # program the artifact-bearing functions are library functions (std::io,
+            # std::thread, ...) that main::main calls but that aren't main::main itself;
+            # without rooting at their common ancestor they fragment into N overlapping
+            # runtime clusters. Rooting at rust_main — the genuine user entry that
+            # dominates them — consolidates them into the single user cluster that
+            # matches Ghidra's PRIMARY cluster. Dynamic: if rust_main does NOT dominate
+            # >=2 candidates (e.g. a binary with genuinely independent user clusters),
+            # the anchor does not fire and natural clustering stands. Gated to Rust with
+            # a named rust_main, so Ghidra/other backends (no rust_main) are untouched.
+            # Additionally gated on the backend's recover_incomplete_call_graph
+            # capability: only backends that actually under-connect the call graph
+            # (Ghidra, Vivisect) opt in. IDA / Binary Ninja inherit False and skip
+            # this block entirely, so their Rust clustering is left byte-for-byte
+            # unchanged even if they expose a named rust_main.
+            if (getattr(self._backend, "recover_incomplete_call_graph", False)
+                    and self.lang is not None
+                    and getattr(self.lang, "id", None) == "lang_rust"
+                    and self.current_analysis_ep):
+                try:
+                    rm = self._backend.get_address_for_name("rust_main")
+                    rm = int(rm) if rm is not None else None
+                    if rm is not None and rm == int(self.current_analysis_ep):
+                        reached = set(self.paths.get(rm, {}).keys())
+                        dominated = all_candidate_funcs & reached
+                        if len(dominated) >= 2:
+                            all_candidate_funcs.add(rm)
+                            log(f"Rust dominator anchor: rust_main 0x{rm:x} dominates "
+                                f"{len(dominated)} candidate(s) → rooting clusters there")
+                            dlog(f"STAGEB dominator_anchor FIRED rust_main=0x{rm:x} "
+                                 f"dominated={len(dominated)}")
+                except Exception as e:
+                    log(f"Rust dominator anchor skipped: {e}")
+
             def _fmt_func(ea: int) -> str:
                 fn = self._backend.get_function_at(ea)
                 if fn is None or not getattr(fn, "name", None):
@@ -1428,6 +1479,15 @@ class XRefer:
             if all_candidate_funcs:
                 preview = ", ".join(_fmt_func(ea) for ea in list(all_candidate_funcs)[:10])
                 log(f"Candidate function sample: {preview}")
+
+            # STAGE B (cluster candidates) — the artifact-bearing functions that
+            # seed clustering, plus whether the Rust dominator anchor fired.
+            dlog(f"STAGEB candidates total={len(all_candidate_funcs)} "
+                 f"with_artifacts={len(func_artifacts)} orphan={len(orphan_func_artifacts)} "
+                 f"ep=0x{self.current_analysis_ep:x}")
+            if os.environ.get("XREFER_CLUSTER_DEBUG"):
+                for fn in sorted(all_candidate_funcs):
+                    dlog(f"STAGEB candidate 0x{fn:x}")
 
             if not all_candidate_funcs:
                 log("No candidate functions found for clustering")
@@ -1505,6 +1565,13 @@ class XRefer:
             else:
                 # Normal decomposition path.
                 log(f"Creating clusters from {len(graph_paths)} paths with {len(root_nodes)} root nodes")
+                # STAGE C (paths/roots) — len(root_nodes) is ~the top-level
+                # cluster count, i.e. the metric itself.
+                dlog(f"STAGEC graph_paths={len(graph_paths)} root_nodes={len(root_nodes)} "
+                     f"paths_examined={paths_examined} candidate_paths={candidate_paths_found}")
+                if os.environ.get("XREFER_CLUSTER_DEBUG"):
+                    for r in sorted(root_nodes):
+                        dlog(f"STAGEC root 0x{r:x}")
                 self.clusters = ClusterManager.decompose_into_clusters(graph_paths, intermediate_paths_map, root_nodes, self.artifact_functions, backend=self._backend)
 
             # ── Pre-flight token-budget gate ─────────────────────────
@@ -1557,7 +1624,6 @@ class XRefer:
                 self.cluster_analysis = ClusterAnalyzer.analyze_clusters(
                     self.clusters, self, batch_size=batch_size, force_no_cache=force_no_cache,
                 )
-                # self.cluster_analysis = ClusterAnalyzer.populate_dummy_cluster_analysis(self.clusters)
                 if not self.cluster_analysis:
                     # The budget gate and the auth pre-flight inside the run
                     # also return {} after setting their own flags; don't
@@ -1591,8 +1657,12 @@ class XRefer:
                         analysis = find_cluster_analysis(self.cluster_analysis, cluster.id)
                         if analysis:
                             # The LLM returns 0 or 1. Convert to boolean.
+                            # Defensive: a missing/None value (LLM omitted the
+                            # field, or the dummy/skip-LLM debug path) must not
+                            # crash here — default to not-library. No-op for the
+                            # real path where the value is always 0/1.
                             is_lib_val = analysis.get("library_or_runtime") if isinstance(analysis, dict) else analysis.library_or_runtime
-                            cluster.is_library = bool(int(is_lib_val))
+                            cluster.is_library = bool(int(is_lib_val)) if is_lib_val is not None else False
                         # Recurse into subclusters
                         if cluster.subclusters:
                             populate_library_flag(cluster.subclusters)
@@ -3469,6 +3539,16 @@ class XRefer:
 
         total_paths_generated = len(self.paths[self.current_analysis_ep])
         log(f"Generated {total_paths_generated} call path groups from {ep_name}")
+
+        # STAGE A (reachability) — forward_reach is the single most decisive
+        # number for the bimodal collapse (EP rooted at a CRT stub reaches a
+        # fraction of the user-code mass). The sorted forward set reveals
+        # exactly which funcs a backend fails to reach from this EP.
+        dlog(f"STAGEA ep=0x{self.current_analysis_ep:x} forward_reach={len(forward)} "
+             f"reachable_leaves={total_paths_generated} total_leaves={total}")
+        if os.environ.get("XREFER_CLUSTER_DEBUG"):
+            for fn in sorted(forward):
+                dlog(f"STAGEA forward 0x{fn:x}")
         if total_paths_generated == 0:
             log(f"WARNING: No paths found from {ep_name} to any leaf functions!")
         elif total_paths_generated < total / 2:
@@ -3948,7 +4028,7 @@ class XRefer:
         """Write report data JSON only (no HTML)."""
         report_data = self.generate_report_data()
         report_json_suffix = "_report_data.json"
-        json_path = Path(getattr(self, "report_path", None) or f"{self._backend.path}{report_json_suffix}")
+        json_path = Path(getattr(self, "report_path", None) or f"{self._backend.output_base}{report_json_suffix}")
         json_payload = json.dumps(report_data, indent=2, default=str)
         json_path.write_text(json_payload, encoding="utf-8")
         log(f"Report data saved to: {json_path}")
@@ -3966,7 +4046,7 @@ class XRefer:
         json_data = json.dumps(report_data, indent=2, default=str)
         report_html_suffix = "_report.html"
 
-        save_path = getattr(self, "report_path", None) or f"{self._backend.path}{report_html_suffix}"
+        save_path = getattr(self, "report_path", None) or f"{self._backend.output_base}{report_html_suffix}"
 
         data_url_value = json.dumps("")
         embedded_payload = json_data.replace("</", "<\\/")

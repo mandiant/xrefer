@@ -1118,6 +1118,32 @@ def log(string: str) -> None:
         print(f"[XRefer] {string}")
 
 
+def dlog(string: str) -> None:
+    """Env-gated verbose log for cluster-parity debugging.
+
+    No-op unless XREFER_CLUSTER_DEBUG is set in the environment, so
+    production runs and every non-debug backend (IDA / Binary Ninja /
+    normal CLI) are byte-for-byte unchanged. Output is tagged
+    ``[CLUSTERDBG]`` so two backend runs over the same binary can be
+    grepped out of the log and diffed side by side to locate the exact
+    stage where their cluster topology starts to diverge. The env var is
+    read per-call (not cached at import) so it also works when toggled
+    inside a long-lived IDA session.
+    """
+    if cluster_debug_enabled():
+        log(f"[CLUSTERDBG] {string}")
+
+
+def cluster_debug_enabled() -> bool:
+    """True iff cluster-parity debug logging is on (XREFER_CLUSTER_DEBUG set).
+
+    Exposed so callers can gate EXPENSIVE dlog arguments — e.g. a recursive walk
+    of the whole cluster tree — behind the same env check dlog uses, instead of
+    building the message on every production run only for dlog to discard it.
+    """
+    return bool(os.environ.get("XREFER_CLUSTER_DEBUG"))
+
+
 _progress_func = None
 
 

@@ -14,7 +14,27 @@ authors = [
 # whichever is convenient.
 dynamic = ["version"]
 description = "FLARE Team's Binary Navigator"
+# Without these three the PyPI project page renders as a bare title with
+# no body, no licence and no search facets — the README is what tells a
+# visitor what xrefer is.
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
+keywords = ["reverse-engineering", "malware-analysis", "binary-analysis", "disassembler", "ida-pro", "ghidra"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Information Technology",
+    "Operating System :: OS Independent",
+    # The floor is set by networkx (>=3.11) and the ceiling by
+    # litellm/dspy (<3.15), not by preference.
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+    "Topic :: Software Development :: Disassemblers",
+]
 dependencies = [
     # Pure-Python ASCII graph renderer (replaces asciinet/JVM) is now
     # vendored at plugins/xrefer/_vendor/ascii_graphs/ — no external
@@ -27,31 +47,64 @@ dependencies = [
     "pydantic>=2.11.7",
     "pydantic-settings>=2.10.1",
     "python-statemachine>=2.5.0",
-    "qtpy",                    # imported directly in gui/* and core/analyzer.py (Qt abstraction)
     "requests>=2.32.4",
     "tabulate>=0.9.0",
 ]
 
+# Backend/GUI dependencies live in standard extras (NOT PEP 735
+# dependency-groups) so plain-pip users can do e.g.
+# ``pip install xrefer[vivisect]`` from a wheel — pip cannot install
+# dependency-groups from a built distribution. uv users: ``uv sync
+# --extra vivisect`` (dev tooling stays a dependency-group below).
+[project.optional-dependencies]
+ida = [
+    "idapro",
+    # IDA's GUI plugin path (gui/*) goes through the qtpy abstraction.
+    "qtpy",
+]
+binaryninja = []
+ghidra = [
+    "ghidra-stubs>=11.4",
+    "pyghidra>=2.2.0",
+]
+vivisect = [
+    # ELF/PE symbol + section enrichment used only by the vivisect backend
+    # (backend/vivisect/backend.py::_extract_lief_data). vivisect itself is
+    # pulled transitively via flare-capa.
+    "lief>=0.17.6",
+]
+gui = [
+    # Qt abstraction used by gui/* and one interactive dialog in
+    # core/analyzer.py (lazily imported there) — headless CLI/report
+    # runs never touch it, so core stays Qt-free.
+    "qtpy",
+]
+
 [dependency-groups]
+# Standalone-binary build tooling (see .github/pyinstaller/xrefer.spec).
+build = [
+    "pyinstaller>=6.21",
+]
 dev = [
     "coverage>=7.9.2",
     "isort>=6.0.1",
     "line-profiler>=4.2.0",
     "memory-profiler>=0.61.0",
     "pre-commit>=4.2.0",
+    # python-statemachine's diagram renderer (statemachine/contrib/
+    # diagram) imports pydot at test-collection time via the GUI state
+    # machine tests — without it the suite errors (ModuleNotFoundError),
+    # it was previously an undocumented manual install.
+    "pydot",
     "pysnooper>=1.2.3",
     "pytest>=8.4.1",
     "pytest-cov>=6.2.1",
+    # The GUI test suite (tests/test_view_filter.py etc.) imports
+    # xrefer.gui -> qtpy. Runtime core no longer depends on Qt (it
+    # moved to the [gui] extra), but the dev/test env still needs it.
+    "qtpy",
     "ruff>=0.12.2",
     "vulture>=2.14",
-]
-ida = [
-    "idapro",
-]
-binaryninja = []
-ghidra = [
-    "ghidra-stubs>=11.4",
-    "pyghidra>=2.2.0",
 ]
 
 [tool.uv]
@@ -60,7 +113,8 @@ override-dependencies = [
 ]
 
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+# setuptools >= 77 for PEP 639 (SPDX ``license`` + ``license-files``).
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
@@ -76,6 +130,21 @@ py-modules = []
 
 [tool.setuptools.packages.find]
 where = ["plugins"]
+
+[tool.setuptools.package-data]
+# ``plugins/xrefer/data/`` has no __init__.py, so packages.find skips
+# it and the wheel would ship WITHOUT the HTML report template /
+# initial categories JSON / logo — an installed xrefer then crashes at
+# report generation (analyzer.generate_html_report asserts the data
+# dir exists). Declare it as package data of ``xrefer`` explicitly.
+#
+# The glob must recurse: ``data/*`` matches only files sitting directly
+# in ``data/`` and silently drops every subdirectory (setuptools keeps
+# just the file matches). ``data/agent_skills/*.md`` was lost that way —
+# built, installed, and no error anywhere, because nothing reads a skill
+# file at import time. ``data/**/*`` covers both levels, so a new data
+# subdirectory ships without anyone having to remember this file.
+xrefer = ["data/**/*"]
 
 [tool.setuptools.dynamic]
 # Reads ``plugins/xrefer/_version.py`` via setuptools' static AST

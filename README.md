@@ -52,7 +52,36 @@ Contributions, bug reports, and feature requests are welcome. Please open an iss
 
 XRefer's LLM-based features, when enabled, send portions of analyzed data (e.g., APIs, strings, library references, and function relationships) to external servers, such as Google's Gemini API or other configured LLM endpoints. These external services process the information to generate natural language descriptions and insights. If you are analyzing sensitive binaries or prefer not to share data outside your local environment, you can disable all LLM features in the settings, preventing any external communication. Please consult Google Gemini's [Terms of Service](https://cloud.google.com/gemini/docs/discover/data-governance)  before use.
 
+## pip Package
+
+XRefer also installs as an ordinary Python package and runs without IDA. The
+vivisect backend ships with it, so this is enough to analyze a binary:
+
+```bash
+pip install "xrefer[vivisect]"    # or [ghidra] — also needs GHIDRA_INSTALL_DIR
+xrefer /path/to/binary            # backend auto-selected if not given
+python -m xrefer --help           # same CLI, module form
+```
+
+### Library API
+
+```python
+import xrefer
+
+xrefer.available_backends()                    # e.g. ['ghidra', 'vivisect']
+x = xrefer.analyze("/path/to/binary", llm=False)
+```
+
+`analyze()` accepts the same options as the CLI — `backend=`, `mode=`,
+`report=`, `llm=`, `force=`, `entry_point=`, `output=` — and returns the
+analyzed `XRefer` instance.
+
+One-file binaries that need no Python at all are documented in
+[docs/standalone.md](docs/standalone.md).
+
 ## CLI Installation
+
+> From source, for development. To just *use* XRefer, see [pip Package](#pip-package) above.
 
 1. Clone the repository and enter it:
    ```bash
@@ -64,21 +93,24 @@ XRefer's LLM-based features, when enabled, send portions of analyzed data (e.g.,
    ```bash
    uv sync
    ```
-3. Add any required reverse-engineering backends (IDA Pro, Binary Ninja, Ghidra).  
+3. Add any required reverse-engineering backends (IDA Pro, Binary Ninja, Ghidra).
+   The vivisect backend is bundled — a plain `uv sync` can already analyze binaries.
+   Backends live in standard extras (so plain-pip users get them too, e.g.
+   `pip install xrefer[vivisect]`).
    Reference: [IDA](https://docs.hex-rays.com/user-guide/idalib), [Binary Ninja](https://docs.binary.ninja/dev/batch.html#install-the-api), [Ghidra](https://pypi.org/project/pyghidra/).
    e.g. for IDA:
    ```bash
    # set `IDADIR`
-   uv sync --group ida
+   uv sync --extra ida
    ```
    for ghidra:
    ```bash
    # set `GHIDRA_INSTALL_DIR`
-   uv sync --group ghidra
+   uv sync --extra ghidra
    ```
    if you want multiple backends, add them all.
    ```
-   uv sync --group ida --group ghidra
+   uv sync --extra ida --extra ghidra
    ```
 4. Run analyses from the packaged CLI:
    ```bash
@@ -87,7 +119,7 @@ XRefer's LLM-based features, when enabled, send portions of analyzed data (e.g.,
    For reference on CLI options, run:
    ```bash
     ❯ uv run xrefer --help
-    usage: xrefer [-h] --backend {ida,binaryninja,ghidra} [--save] [--auto-analysis | --no-auto-analysis]
+    usage: xrefer [-h] [--backend {ida,binaryninja,ghidra,vivisect}] [--save] [--auto-analysis | --no-auto-analysis]
                   [--mode {light,full}] [--report-data-mode {html,json,none}] [--force]
                   [--entry-point ENTRY_POINT] [-L LOGFILE] [--model MODEL] [--api-key API_KEY]
                   [--api-base API_BASE] [--light-model LIGHT_MODEL] [--light-api-key LIGHT_API_KEY]
