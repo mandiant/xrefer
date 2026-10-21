@@ -11,7 +11,9 @@ def configure_fast_analysis(program) -> None:
     note:
     - Decompiler analyzers: +4.29s overhead (17x slower)
     - Demanglers: +0.14s overhead
-    - Stack analyzer: +0.01s overhead
+    - Stack analyzer: O(N^2) stall on heavily obfuscated stack string functions;
+      xrefer discards stack references, so disabling Stack analysis provides a
+      massive speedup with zero loss of fidelity.
 
     Args:
         program: Ghidra Program object
@@ -26,6 +28,8 @@ def configure_fast_analysis(program) -> None:
     disabled_analyzers = [
         "Decompiler Parameter ID",
         "Decompiler Switch Analysis",
+        "Stack",
+        "Windows x86 PE RTTI Analyzer",
     ]
 
     for analyzer in disabled_analyzers:
@@ -36,6 +40,15 @@ def configure_fast_analysis(program) -> None:
     for analyzer in essential:
         options.setBoolean(analyzer, True)
         logger.debug(f"Enabled analyzer: {analyzer}")
+
+    try:
+        from ghidra.app.plugin.core.analysis import AutoAnalysisManager
+
+        mgr = AutoAnalysisManager.getAnalysisManager(program)
+        mgr.initializeOptions()
+        logger.debug("Synchronized AutoAnalysisManager options")
+    except Exception as exc:
+        logger.debug(f"Could not synchronize AutoAnalysisManager options: {exc}")
 
 class GhidraFunction(Function):
     def __init__(self, ghidra_func, backend) -> None:
