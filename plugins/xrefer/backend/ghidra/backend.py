@@ -1,7 +1,43 @@
 import logging
 from collections.abc import Iterator
+from typing import Final
 
 from ..base import Address, BackEnd, BackendError, BasicBlock, Function, FunctionType, Instruction, InvalidAddressError, Operand, OperandType, Section, SectionType, String, StringEncType, Xref, XrefType
+
+_UINT64_MASK: Final[int] = 0xFFFFFFFFFFFFFFFF
+
+
+def _parse_ghidra_addr_str(addr_text: str) -> int:
+    """Parse flat ('00401000'), spaced ('ram:00401000'), or segmented ('1000:0000') strings."""
+    parts = [part.strip() for part in addr_text.strip().split(":") if part.strip()]
+    if not parts:
+        raise InvalidAddressError(f"Empty Ghidra address string: {addr_text!r}")
+    if len(parts) == 1:
+        return int(parts[0], 16)
+    try:
+        int(parts[0], 16)
+    except ValueError:
+        parts = parts[1:]
+    if len(parts) == 2:
+        segment = int(parts[0], 16)
+        offset = int(parts[1], 16)
+        return (segment << 4) + offset
+    if len(parts) == 1:
+        return int(parts[0], 16)
+    raise InvalidAddressError(f"Unsupported Ghidra address format: {addr_text!r}")
+
+
+def _ghidra_address_to_xrefer_address(ghidra_addr) -> Address:
+    """Convert a Ghidra Address to an xrefer Address without failing on seg:offset strings."""
+    for attr in ("getUnsignedOffset", "getOffset"):
+        getter = getattr(ghidra_addr, attr, None)
+        if callable(getter):
+            raw_offset = getter()
+            if isinstance(raw_offset, int) and not isinstance(raw_offset, bool):
+                if raw_offset >= 0:
+                    return Address(raw_offset)
+                return Address(raw_offset & _UINT64_MASK)
+    return Address(_parse_ghidra_addr_str(ghidra_addr.toString()))
 
 
 def configure_fast_analysis(program) -> None:
@@ -501,11 +537,13 @@ class GhidraBackend(BackEnd):
         ref_manager = program.getReferenceManager()
         addr_value = address.value if isinstance(address, Address) else int(address)
         ghidra_addr = self._addr_factory.getAddress(f"{addr_value:x}")
+        if ghidra_addr is None:
+            return
 
         raw_refs = ref_manager.getReferencesTo(ghidra_addr)
         for ref in raw_refs:
             xref_type = self._convert_ref_type(ref.getReferenceType())
-            yield GhidraXref(Address(ref.getFromAddress().getOffset()), Address(ref.getToAddress().getOffset()), xref_type)
+            yield GhidraXref(_ghidra_address_to_xrefer_address(ref.getFromAddress()), _ghidra_address_to_xrefer_address(ref.getToAddress()), xref_type)
 
     def get_xrefs_from(self, address: Address, far_only: bool = False) -> Iterator[Xref]:
         """Get all references FROM the specified address.
@@ -517,6 +555,8 @@ class GhidraBackend(BackEnd):
         ref_manager = program.getReferenceManager()
         addr_value = address.value if isinstance(address, Address) else int(address)
         ghidra_addr = self._addr_factory.getAddress(f"{addr_value:x}")
+        if ghidra_addr is None:
+            return
 
         raw_refs = ref_manager.getReferencesFrom(ghidra_addr)
         memory = program.getMemory()
@@ -540,10 +580,8 @@ class GhidraBackend(BackEnd):
             if memory.getBlock(to_addr) is None:
                 continue
 
-            from_ghidra = ref.getFromAddress()
-            var_from = Address(int(from_ghidra.toString(), 16))
-
-            var_to = Address(int(to_addr.toString(), 16))
+            var_from = _ghidra_address_to_xrefer_address(ref.getFromAddress())
+            var_to = _ghidra_address_to_xrefer_address(to_addr)
 
             yield GhidraXref(var_from, var_to, xref_type)
 
@@ -847,13 +885,13 @@ class GhidraBackend(BackEnd):
                 if has_addr:
                     for o in objs:
                         if isinstance(o, GAddress):
-                            val = Address(int(o.toString(), 16))
+                            val = _ghidra_address_to_xrefer_address(o)
                             break
             elif op_kind == OperandType.IMMEDIATE:
                 if has_addr:
                     for o in objs:
                         if isinstance(o, GAddress):
-                            val = Address(int(o.toString(), 16))
+                            val = _ghidra_address_to_xrefer_address(o)
                             break
                 elif has_scalar:
                     for o in objs:
@@ -877,16 +915,9 @@ class GhidraBackend(BackEnd):
                             continue
                         if memory and not memory.contains(to_addr):
                             continue
-                        offset = Address(int(to_addr.toString(), 16))
-                        # offset = to_addr.getUnsignedOffset()
-                        # if offset < 0 and hasattr(to_addr, "getUnsignedOffset"):
-                        #     offset = to_addr.getUnsignedOffset()
-                        if offset is None or offset < 0:
-                            continue
                         try:
-                            val = Address(int(offset))
-
-                        except ValueError:
+                            val = _ghidra_address_to_xrefer_address(to_addr)
+                        except (InvalidAddressError, ValueError):
                             continue
                         break
 
